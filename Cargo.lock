@@ -4309,10 +4309,13 @@ dependencies = [
  "rustical_dav",
  "rustical_dav_push",
  "rustical_frontend",
+ "rustical_ical",
  "rustical_oidc",
+ "rustical_scheduling",
  "rustical_store",
  "rustical_store_sqlite",
  "serde",
+ "serde_json",
  "similar-asserts",
  "sqlx",
  "tempfile",
@@ -4325,6 +4328,23 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "rustical_api"
+version = "0.16.1"
+dependencies = [
+ "async-trait",
+ "axum",
+ "http",
+ "rustical_ical",
+ "rustical_store",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
  "uuid",
 ]
 
@@ -4342,6 +4362,7 @@ dependencies = [
  "derive_more",
  "futures-util",
  "headers",
+ "hex",
  "http",
  "insta",
  "matchit 0.9.2",
@@ -4352,6 +4373,7 @@ dependencies = [
  "rustical_dav",
  "rustical_dav_push",
  "rustical_ical",
+ "rustical_scheduling",
  "rustical_store",
  "rustical_store_sqlite",
  "rustical_xml",
@@ -4472,6 +4494,7 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-extra",
+ "caldata",
  "chrono",
  "chrono-humanize",
  "futures-core",
@@ -4482,11 +4505,14 @@ dependencies = [
  "mime_guess",
  "percent-encoding",
  "rand 0.10.2",
+ "reqwest 0.13.4",
  "rust-embed",
+ "rustical_api",
  "rustical_dav",
  "rustical_ical",
  "rustical_oidc",
  "rustical_store",
+ "rustical_store_sqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -4533,6 +4559,30 @@ dependencies = [
  "thiserror 2.0.20",
  "tower-sessions",
  "tracing",
+]
+
+[[package]]
+name = "rustical_scheduling"
+version = "0.16.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "hmac 0.13.0",
+ "rstest",
+ "rustical_store",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+ "uuid",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -4626,6 +4676,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -5651,7 +5702,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -6182,7 +6232,6 @@ checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
- "rand 0.10.2",
  "wasm-bindgen",
 ]
 

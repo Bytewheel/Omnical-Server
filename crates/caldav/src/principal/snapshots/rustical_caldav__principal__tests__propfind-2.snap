@@ -23,6 +23,21 @@ ResponseElement {
                             ),
                         ),
                         Principal(
+                            ScheduleInboxUrl(
+                                None,
+                            ),
+                        ),
+                        Principal(
+                            ScheduleOutboxUrl(
+                                None,
+                            ),
+                        ),
+                        Principal(
+                            ScheduleDefaultCalendarUrl(
+                                None,
+                            ),
+                        ),
+                        Principal(
                             PrincipalUrl(
                                 HrefElement {
                                     href: /caldav/principal/user/,

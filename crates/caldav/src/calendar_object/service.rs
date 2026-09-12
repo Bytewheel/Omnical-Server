@@ -9,9 +9,10 @@ use async_trait::async_trait;
 use axum::{extract::Request, handler::Handler, response::Response};
 use futures_util::future::BoxFuture;
 use rustical_dav::resource::{AxumMethods, ResourceService};
+use rustical_scheduling::Scheduler;
 use rustical_store::{CalendarStore, auth::Principal};
 use serde::{Deserialize, Deserializer};
-use std::{convert::Infallible, sync::Arc};
+use std::{borrow::Cow, convert::Infallible, sync::Arc};
 use tower::Service;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -25,6 +26,7 @@ pub struct CalendarObjectPathComponents {
 pub struct CalendarObjectResourceService<C: CalendarStore> {
     pub(crate) cal_store: Arc<C>,
     pub(crate) config: Arc<CalDavConfig>,
+    pub(crate) scheduler: Option<Arc<Scheduler>>,
 }
 
 impl<C: CalendarStore> Clone for CalendarObjectResourceService<C> {
@@ -32,13 +34,22 @@ impl<C: CalendarStore> Clone for CalendarObjectResourceService<C> {
         Self {
             cal_store: self.cal_store.clone(),
             config: self.config.clone(),
+            scheduler: self.scheduler.clone(),
         }
     }
 }
 
 impl<C: CalendarStore> CalendarObjectResourceService<C> {
-    pub const fn new(cal_store: Arc<C>, config: Arc<CalDavConfig>) -> Self {
-        Self { cal_store, config }
+    pub const fn new(
+        cal_store: Arc<C>,
+        config: Arc<CalDavConfig>,
+        scheduler: Option<Arc<Scheduler>>,
+    ) -> Self {
+        Self {
+            cal_store,
+            config,
+            scheduler,
+        }
     }
 }
 
@@ -52,6 +63,10 @@ impl<C: CalendarStore> ResourceService for CalendarObjectResourceService<C> {
     type PrincipalUri = CalDavPrincipalUri;
 
     const DAV_HEADER: &str = "1, 3, access-control, calendar-access";
+
+    fn dav_header(&self) -> Cow<'static, str> {
+        crate::scheduling::dav_header_with_scheduling(Self::DAV_HEADER, self.scheduler.as_deref())
+    }
 
     async fn get_resource(
         &self,
@@ -86,6 +101,20 @@ impl<C: CalendarStore> ResourceService for CalendarObjectResourceService<C> {
             .delete_object(principal, calendar_id, object_id, use_trashbin)
             .await?;
         Ok(())
+    }
+
+    async fn on_resource_deleted(
+        &self,
+        _path: &Self::PathComponents,
+        user: &Principal,
+        deleted_resource: &Self::Resource,
+        user_agent: Option<&str>,
+    ) {
+        if let Some(scheduler) = self.scheduler.as_ref() {
+            scheduler
+                .handle_delete(&user.id, deleted_resource.object.get_ics(), user_agent)
+                .await;
+        }
     }
 }
 

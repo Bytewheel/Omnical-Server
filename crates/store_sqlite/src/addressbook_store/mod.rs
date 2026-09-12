@@ -634,6 +634,9 @@ impl AddressbookWriteStore for SqliteAddressbookStore {
         &self,
         addressbook: Addressbook,
     ) -> Result<(), rustical_store::Error> {
+        if let Some(ref displayname) = addressbook.displayname {
+            self.check_displayname_unique(displayname, &addressbook.principal).await?;
+        }
         let mut tx = self
             .db
             .begin_with(BEGIN_IMMEDIATE)
@@ -643,6 +646,27 @@ impl AddressbookWriteStore for SqliteAddressbookStore {
         let birthday_cal = Self::default_birthday_calendar(addressbook);
         Self::_insert_birthday_calendar(&mut *tx, &birthday_cal).await?;
         tx.commit().await.map_err(crate::Error::from)?;
+        Ok(())
+    }
+
+    #[instrument]
+    async fn check_displayname_unique(
+        &self,
+        displayname: &str,
+        principal: &str,
+    ) -> Result<(), rustical_store::Error> {
+        let exists = sqlx::query(
+            "SELECT 1 FROM addressbooks WHERE displayname = ? AND principal != ? LIMIT 1",
+        )
+        .bind(displayname)
+        .bind(principal)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(crate::Error::from)?
+        .is_some();
+        if exists {
+            return Err(rustical_store::Error::AlreadyExists);
+        }
         Ok(())
     }
 

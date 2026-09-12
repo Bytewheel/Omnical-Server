@@ -10,9 +10,58 @@ use headers::{ContentType, HeaderMapExt};
 use http::{HeaderValue, Method, StatusCode, header};
 use rustical_dav::rfc_3986_percent_encode;
 use rustical_dav_push::DavPushStore;
-use rustical_store::{CalendarStore, auth::Principal};
+use rustical_ical::CalendarObject;
+use rustical_store::{Calendar, CalendarStore, auth::Principal};
 use std::str::FromStr;
 use tracing::instrument;
+
+/// Generate the full `.ics` export of a calendar: all objects wrapped in one
+/// `VCALENDAR`, with `X-WR-CALNAME`/`X-WR-CALDESC`/`X-WR-CALCOLOR`/
+/// `X-WR-TIMEZONE` props derived from the calendar metadata.
+///
+/// Shared between the owner-authenticated `route_get` export and the
+/// unauthenticated subscription export routes (Omnical "share links",
+/// PLAN.md §17.7), so both serve byte-identical payloads.
+#[must_use]
+pub fn build_export_ics(calendar: &Calendar, objects: Vec<(String, CalendarObject)>) -> String {
+    let objects = objects
+        .into_iter()
+        .map(|(_, object)| object.into())
+        .collect();
+
+    let mut props = vec![];
+
+    if let Some(displayname) = &calendar.meta.displayname {
+        props.push(ContentLine {
+            name: "X-WR-CALNAME".to_owned(),
+            value: displayname.clone(),
+            params: vec![].into(),
+        });
+    }
+    if let Some(description) = &calendar.meta.description {
+        props.push(ContentLine {
+            name: "X-WR-CALDESC".to_owned(),
+            value: description.clone(),
+            params: vec![].into(),
+        });
+    }
+    if let Some(color) = &calendar.meta.color {
+        props.push(ContentLine {
+            name: "X-WR-CALCOLOR".to_owned(),
+            value: color.clone(),
+            params: vec![].into(),
+        });
+    }
+    if let Some(timezone_id) = &calendar.timezone_id {
+        props.push(ContentLine {
+            name: "X-WR-TIMEZONE".to_owned(),
+            value: timezone_id.clone(),
+            params: vec![].into(),
+        });
+    }
+
+    IcalCalendar::from_objects("RustiCal Export".to_owned(), objects, props).generate()
+}
 
 #[instrument(skip(cal_store))]
 pub async fn route_get<C: CalendarStore, DP: DavPushStore>(
@@ -32,45 +81,9 @@ pub async fn route_get<C: CalendarStore, DP: DavPushStore>(
         return Err(crate::Error::Unauthorized);
     }
 
-    let objects = cal_store
-        .get_objects(&principal, &calendar_id)
-        .await?
-        .into_iter()
-        .map(|(_, object)| object.into())
-        .collect();
+    let objects = cal_store.get_objects(&principal, &calendar_id).await?;
 
-    let mut props = vec![];
-
-    if let Some(ref displayname) = calendar.meta.displayname {
-        props.push(ContentLine {
-            name: "X-WR-CALNAME".to_owned(),
-            value: displayname.clone(),
-            params: vec![].into(),
-        });
-    }
-    if let Some(description) = calendar.meta.description {
-        props.push(ContentLine {
-            name: "X-WR-CALDESC".to_owned(),
-            value: description,
-            params: vec![].into(),
-        });
-    }
-    if let Some(color) = calendar.meta.color {
-        props.push(ContentLine {
-            name: "X-WR-CALCOLOR".to_owned(),
-            value: color,
-            params: vec![].into(),
-        });
-    }
-    if let Some(timezone_id) = calendar.timezone_id {
-        props.push(ContentLine {
-            name: "X-WR-TIMEZONE".to_owned(),
-            value: timezone_id,
-            params: vec![].into(),
-        });
-    }
-
-    let export_calendar = IcalCalendar::from_objects("RustiCal Export".to_owned(), objects, props);
+    let export_ics = build_export_ics(&calendar, objects);
 
     let mut resp = Response::builder().status(StatusCode::OK);
     let hdrs = resp.headers_mut().unwrap();
@@ -98,6 +111,6 @@ pub async fn route_get<C: CalendarStore, DP: DavPushStore>(
     if matches!(method, Method::HEAD) {
         Ok(resp.body(Body::empty()).unwrap())
     } else {
-        Ok(resp.body(Body::new(export_calendar.generate())).unwrap())
+        Ok(resp.body(Body::new(export_ics)).unwrap())
     }
 }

@@ -6,6 +6,7 @@ use axum::Router;
 use axum::extract::FromRequestParts;
 use axum::response::IntoResponse;
 use serde::Deserialize;
+use std::borrow::Cow;
 
 /// A `ResourceService` is responsible for handling operations on the resource at an endpoint
 #[async_trait]
@@ -30,6 +31,13 @@ pub trait ResourceService: Clone + Sized + Send + Sync + AxumMethods + 'static {
     type PrincipalUri: PrincipalUri;
 
     const DAV_HEADER: &'static str;
+
+    /// Instance-level `DAV` header advertised by `OPTIONS`.
+    /// Services whose feature set depends on runtime state (e.g. the CalDAV
+    /// scheduling extension) override this; the default is [`Self::DAV_HEADER`].
+    fn dav_header(&self) -> Cow<'static, str> {
+        Cow::Borrowed(Self::DAV_HEADER)
+    }
 
     async fn get_members(
         &self,
@@ -58,6 +66,21 @@ pub trait ResourceService: Clone + Sized + Send + Sync + AxumMethods + 'static {
         _use_trashbin: bool,
     ) -> Result<(), Self::Error> {
         Err(crate::Error::Unauthorized.into())
+    }
+
+    /// Hook invoked by the generic DELETE path after [`Self::delete_resource`]
+    /// succeeded. `deleted_resource` was fetched *before* the deletion and
+    /// carries the object's last contents; `user_agent` is the raw
+    /// `User-Agent` header of the request. Failures are the implementor's to
+    /// handle — the resource is already gone at this point, so an error must
+    /// never fail the (already-successful) request.
+    async fn on_resource_deleted(
+        &self,
+        _path: &Self::PathComponents,
+        _principal: &Self::Principal,
+        _deleted_resource: &Self::Resource,
+        _user_agent: Option<&str>,
+    ) {
     }
 
     // Returns whether an existing resource was overwritten

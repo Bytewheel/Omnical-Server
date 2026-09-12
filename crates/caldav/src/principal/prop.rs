@@ -14,6 +14,21 @@ pub enum PrincipalProp {
     CalendarUserType(PrincipalType),
     #[xml(ns = "rustical_dav::namespace::NS_CALDAV")]
     CalendarUserAddressSet(HrefElement),
+    #[xml(
+        ns = "rustical_dav::namespace::NS_CALDAV",
+        rename = "schedule-inbox-URL"
+    )]
+    ScheduleInboxUrl(Option<HrefElement>),
+    #[xml(
+        ns = "rustical_dav::namespace::NS_CALDAV",
+        rename = "schedule-outbox-URL"
+    )]
+    ScheduleOutboxUrl(Option<HrefElement>),
+    #[xml(
+        ns = "rustical_dav::namespace::NS_CALDAV",
+        rename = "schedule-default-calendar-URL"
+    )]
+    ScheduleDefaultCalendarUrl(Option<HrefElement>),
 
     // WebDAV Access Control (RFC 3744)
     #[xml(ns = "rustical_dav::namespace::NS_DAV", rename = "principal-URL")]

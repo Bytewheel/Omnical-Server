@@ -415,6 +415,15 @@ impl CalendarWriteStore for SqliteAddressbookStore {
     }
 
     #[instrument]
+    async fn check_displayname_unique(
+        &self,
+        _displayname: &str,
+        _principal: &str,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    #[instrument]
     async fn delete_calendar(
         &self,
         principal: &str,

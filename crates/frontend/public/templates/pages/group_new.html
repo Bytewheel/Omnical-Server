@@ -1,0 +1,15 @@
+{% extends "layouts/default.html" %}
+
+{% block title %}New Group &mdash; RustiCal{% endblock %}
+
+{% block content %}
+<h1>New Group</h1>
+
+<group-create-form user="{{ user.id }}"></group-create-form>
+
+<template id="data-rustical-user">{{ user|json }}</template>
+<script>
+window.rusticalUser = JSON.parse(document.querySelector('#data-rustical-user').innerHTML);
+</script>
+<script type="module" src="/frontend/assets/js/bundle.mjs" async></script>
+{% endblock %}

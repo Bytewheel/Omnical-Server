@@ -68,6 +68,20 @@ pub async fn route_mkcol<AS: AddressbookStore, DP: DavPushStore>(
         push_topic: uuid::Uuid::new_v4().to_string(),
     };
 
+    if let Some(ref displayname) = addressbook.displayname {
+        match addr_store.check_displayname_unique(displayname, &principal).await {
+            Err(rustical_store::Error::AlreadyExists) => {
+                return Ok((
+                    StatusCode::CONFLICT,
+                    format!("An addressbook with displayname \"{displayname}\" already exists"),
+                )
+                    .into_response());
+            }
+            Err(err) => return Err(err.into()),
+            Ok(()) => {}
+        }
+    }
+
     match addr_store.insert_addressbook(addressbook).await {
         // oh no, there's a conflict
         // Correct status is Method Not Allowed

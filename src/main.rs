@@ -5,7 +5,9 @@ use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use rustical::config::Config;
 use rustical::{Args, Command};
-use rustical::{cmd_gen_config, cmd_health, cmd_principals, cmd_serve};
+use rustical::{
+    cmd_gen_config, cmd_health, cmd_invites, cmd_principals, cmd_serve, cmd_subscriptions,
+};
 use tracing::warn;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -26,6 +28,10 @@ async fn main() -> Result<()> {
         Command::Principals(principals_args) => {
             cmd_principals(principals_args, parse_config()?).await
         }
+        Command::Subscriptions(subscriptions_args) => {
+            cmd_subscriptions(subscriptions_args, parse_config()?).await
+        }
+        Command::Invites(invites_args) => cmd_invites(invites_args, parse_config()?).await,
         Command::Health(health_args) => {
             let config: Config = parse_config()?;
             cmd_health(config.http, health_args).await
@@ -44,6 +50,46 @@ mod test_config {
         providers::{Env, Format, Toml},
     };
     use rustical::config::{Config, HttpBindConfig};
+
+    #[test]
+    fn test_config_toml_subscriptions() {
+        let config = r#"
+[data_store.sqlite]
+db_url = "/var/lib/rustical/db.sqlite3"
+
+[http]
+bind = "0.0.0.0:4000"
+
+[subscriptions]
+enabled = true
+public_url = "https://0115d8cf.duckdns.org:8443"
+"#;
+
+        let config: Config = Figment::new()
+            .merge(Toml::string(config))
+            .extract()
+            .unwrap();
+        assert!(config.subscriptions.enabled);
+        assert_eq!(
+            config.subscriptions.public_url.as_deref(),
+            Some("https://0115d8cf.duckdns.org:8443")
+        );
+        // A config without the section must keep the disabled default
+        let config = r#"
+[data_store.sqlite]
+db_url = "/var/lib/rustical/db.sqlite3"
+"#;
+        let config: Config = Figment::new()
+            .merge(Toml::string(config))
+            .extract()
+            .unwrap();
+        assert!(!config.subscriptions.enabled);
+        assert_eq!(config.subscriptions.public_url, None);
+        assert_eq!(
+            config.http.bind_config().unwrap(),
+            HttpBindConfig::Tcp("[::]:4000".to_string())
+        );
+    }
 
     #[test]
     fn test_config_toml_http_host() {

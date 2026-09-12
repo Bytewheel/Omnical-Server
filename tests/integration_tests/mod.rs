@@ -5,6 +5,7 @@ use rustical::{app::make_app, config::NextcloudLoginConfig};
 use rustical_caldav::CalDavConfig;
 use rustical_frontend::FrontendConfig;
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
+use rustical_store_sqlite::{SqliteCalendarSourceStore, SqliteSubscriptionStore};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -17,6 +18,12 @@ pub fn get_app(context: TestStoreContext) -> axum::Router {
         ..
     } = context;
 
+    // The Share portal tests exercise the real subscription store end to
+    // end (create → portal URL → public /export fetch), so the integration
+    // app mounts the same extension as production.
+    let subscription_store = Arc::new(SqliteSubscriptionStore::new(cal_store.clone()));
+    let source_store = Arc::new(SqliteCalendarSourceStore::new(cal_store.clone()));
+
     make_app(
         Arc::new(addr_store),
         Arc::new(cal_store),
@@ -28,10 +35,15 @@ pub fn get_app(context: TestStoreContext) -> axum::Router {
         },
         None,
         CalDavConfig::default(),
+        None,
+        Some(subscription_store),
+        None,
         &NextcloudLoginConfig { enabled: false },
         false,
         true,
         20,
+        source_store,
+        "https://public.example".to_owned(),
     )
 }
 
@@ -65,5 +77,9 @@ async fn test_ping(
     assert!(response.status().is_success());
 }
 
+mod api;
 mod caldav;
 mod carddav;
+mod frontend_groups;
+mod frontend_linked_platforms;
+mod frontend_share;

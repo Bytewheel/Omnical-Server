@@ -14,8 +14,10 @@ use axum::extract::Request;
 use axum::handler::Handler;
 use rustical_dav::resource::{AxumMethods, MethodFunction, ResourceService};
 use rustical_dav_push::DavPushStore;
+use rustical_scheduling::Scheduler;
 use rustical_store::CalendarStore;
 use rustical_store::auth::Principal;
+use std::borrow::Cow;
 use std::sync::Arc;
 use tower::Service;
 
@@ -23,6 +25,7 @@ pub struct CalendarResourceService<C: CalendarStore, DP: DavPushStore> {
     pub(crate) cal_store: Arc<C>,
     pub(crate) dav_push_store: Arc<DP>,
     pub(crate) config: Arc<CalDavConfig>,
+    pub(crate) scheduler: Option<Arc<Scheduler>>,
 }
 
 impl<C: CalendarStore, DP: DavPushStore> Clone for CalendarResourceService<C, DP> {
@@ -31,6 +34,7 @@ impl<C: CalendarStore, DP: DavPushStore> Clone for CalendarResourceService<C, DP
             cal_store: self.cal_store.clone(),
             dav_push_store: self.dav_push_store.clone(),
             config: self.config.clone(),
+            scheduler: self.scheduler.clone(),
         }
     }
 }
@@ -40,11 +44,13 @@ impl<C: CalendarStore, DP: DavPushStore> CalendarResourceService<C, DP> {
         cal_store: Arc<C>,
         dav_push_store: Arc<DP>,
         config: Arc<CalDavConfig>,
+        scheduler: Option<Arc<Scheduler>>,
     ) -> Self {
         Self {
             cal_store,
             dav_push_store,
             config,
+            scheduler,
         }
     }
 }
@@ -59,6 +65,10 @@ impl<C: CalendarStore, DP: DavPushStore> ResourceService for CalendarResourceSer
     type PrincipalUri = CalDavPrincipalUri;
 
     const DAV_HEADER: &str = "1, 3, access-control, calendar-access, webdav-push";
+
+    fn dav_header(&self) -> Cow<'static, str> {
+        crate::scheduling::dav_header_with_scheduling(Self::DAV_HEADER, self.scheduler.as_deref())
+    }
 
     async fn get_resource(
         &self,
@@ -120,8 +130,12 @@ impl<C: CalendarStore, DP: DavPushStore> ResourceService for CalendarResourceSer
         Router::new()
             .nest(
                 "/{object_id}",
-                CalendarObjectResourceService::new(self.cal_store.clone(), self.config.clone())
-                    .axum_router(),
+                CalendarObjectResourceService::new(
+                    self.cal_store.clone(),
+                    self.config.clone(),
+                    self.scheduler.clone(),
+                )
+                .axum_router(),
             )
             .route_service("/", self.axum_service())
     }

@@ -1,0 +1,45 @@
+<h2>{{ user.id }}'s linked platforms</h2>
+{% if let Some(error) = error %}
+<div class="alert" role="alert">{{ error }}</div>
+{% endif %}
+{% if sources.is_empty() %}
+<p>No linked platforms yet. Subscribe to an external calendar feed below.</p>
+{% else %}
+<ul class="collection-list">
+  {% for source in sources %}
+  <li class="collection-list-item">
+    <div class="inner">
+      <span class="title">{{ source.source_url }}</span>
+      <span class="description">
+        {% if let Some(created_at) = source.created_at %}created {{ created_at }}{% endif %}
+        {% if let Some(last_fetch_at) = source.last_fetch_at %} · last fetch: {{ last_fetch_at }}{% endif %}
+      </span>
+      <div class="metadata">
+        collection: {{ source.calendar_id }} · provider: {{ source.provider_host }}
+        {% if source.last_fetch_success %}(last fetch ok){% else %}(last fetch failed){% endif %}
+      </div>
+      <div class="metadata">
+        <form method="POST" action="/frontend/user/{{ user.id }}/linked-platforms/{{ source.id }}/refresh" style="display: inline">
+          <button type="submit">Refresh</button>
+        </form>
+        <form method="POST" action="/frontend/user/{{ user.id }}/linked-platforms/{{ source.id }}/remove" style="display: inline">
+          <button type="submit">Remove</button>
+        </form>
+      </div>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+<h3>Add linked platform</h3>
+<form method="POST" action="/frontend/user/{{ user.id }}/linked-platforms/add">
+  <label>Source URL <input type="url" name="source_url" required></label>
+  <label>Calendar
+    <select name="calendar_id">
+      {% for cal in calendars %}
+      <option value="{{ cal.id }}">{{ calendar_display_names[loop.index0] }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit">Add</button>
+</form>

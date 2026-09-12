@@ -35,6 +35,18 @@ pub fn find_free_port() -> Option<u16> {
 pub fn rustical_process(
     db_url: Option<String>,
 ) -> (CancellationToken, u16, JoinHandle<()>, Arc<Notify>) {
+    rustical_process_with(db_url, |_| {})
+}
+
+/// Like [`rustical_process`], but lets the caller customize the [`Config`]
+/// before the server starts (e.g. enable an extension for a test).
+pub fn rustical_process_with<F>(
+    db_url: Option<String>,
+    customize: F,
+) -> (CancellationToken, u16, JoinHandle<()>, Arc<Notify>)
+where
+    F: FnOnce(&mut Config) + Send + 'static,
+{
     let port = find_free_port().unwrap();
     let token = CancellationToken::new();
     let cloned_token = token.clone();
@@ -44,30 +56,35 @@ pub fn rustical_process(
     let main_process = thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let fut = async {
+            let mut config = Config {
+                data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
+                    db_url: db_url.unwrap_or(":memory:".to_owned()),
+                    run_repairs: true,
+                    skip_broken: false,
+                }),
+                http: HttpConfig {
+                    bind: Some(format!("127.0.0.1:{port}")),
+                    ..Default::default()
+                },
+                frontend: Default::default(),
+                oidc: None,
+                tracing: Default::default(),
+                dav_push: Default::default(),
+                nextcloud_login: Default::default(),
+                caldav: Default::default(),
+                scheduling: Default::default(),
+                subscriptions: Default::default(),
+                registration: Default::default(),
+                maintenance: Default::default(),
+            };
+            customize(&mut config);
             cmd_serve(
                 Args {
                     config_file: "asldajldakjsdkj".to_owned(),
                     no_migrations: false,
                     command: rustical::Command::Serve,
                 },
-                Config {
-                    data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
-                        db_url: db_url.unwrap_or(":memory:".to_owned()),
-                        run_repairs: true,
-                        skip_broken: false,
-                    }),
-                    http: HttpConfig {
-                        bind: Some(format!("127.0.0.1:{port}")),
-                        ..Default::default()
-                    },
-                    frontend: Default::default(),
-                    oidc: None,
-                    tracing: Default::default(),
-                    dav_push: Default::default(),
-                    nextcloud_login: Default::default(),
-                    caldav: Default::default(),
-                    maintenance: Default::default(),
-                },
+                config,
                 Some(cloned_start_notify),
                 false,
             )

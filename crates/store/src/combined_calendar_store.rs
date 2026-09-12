@@ -153,6 +153,17 @@ impl CalendarWriteStore for CombinedCalendarStore {
             .await
     }
 
+    async fn check_displayname_unique(
+        &self,
+        displayname: &str,
+        principal: &str,
+    ) -> Result<(), crate::Error> {
+        for store in self.stores.values() {
+            store.check_displayname_unique(displayname, principal).await?;
+        }
+        Ok(())
+    }
+
     async fn delete_calendar(
         &self,
         principal: &str,

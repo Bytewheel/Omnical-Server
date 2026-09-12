@@ -7,7 +7,10 @@ use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType};
 use sqlx::SqlitePool;
 
 mod addressbook_store;
+mod calendar_source_store;
 mod calendar_store;
+mod invite_store;
+mod subscription_store;
 
 #[derive(Debug, Clone)]
 pub struct TestStoreContext {

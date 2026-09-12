@@ -11,8 +11,9 @@ use headers::{ContentType, HeaderMapExt};
 use http::{Method, StatusCode};
 use routes::{addressbooks::route_addressbooks, calendars::route_calendars};
 use rustical_oidc::{OidcConfig, OidcServiceConfig, oidc_router};
+use rustical_store::SubscriptionStore;
 use rustical_store::{
-    AddressbookStore, CalendarStore, PrefixedCalendarStore,
+    AddressbookStore, CalendarSourceStore, CalendarStore, PrefixedCalendarStore,
     auth::{AuthenticationProvider, middleware::AuthenticationLayer},
 };
 use std::sync::Arc;
@@ -24,6 +25,7 @@ pub mod nextcloud_login;
 mod oidc_user_store;
 pub(crate) mod pages;
 mod routes;
+pub mod url_builder;
 
 pub use config::FrontendConfig;
 use oidc_user_store::OidcUserStore;
@@ -32,13 +34,21 @@ use crate::routes::{
     addressbook::{route_addressbook, route_addressbook_restore},
     app_token::{route_delete_app_token, route_post_app_token},
     calendar::{route_calendar, route_calendar_restore},
+    groups::{route_group_detail, route_group_new, route_groups},
+    linked_platforms::{
+        route_get_linked_platforms, route_post_linked_platforms_add,
+        route_post_linked_platforms_refresh, route_post_linked_platforms_remove,
+    },
     login::{route_get_login, route_post_login, route_post_logout},
+    share::{route_get_share, route_share_create, route_share_revoke},
     timezones::route_timezones,
     user::{route_get_home, route_root, route_user_named},
 };
 #[cfg(not(feature = "dev"))]
 use assets::{Assets, EmbedService};
+use rustical_api::api_router;
 
+#[allow(clippy::too_many_arguments)]
 pub fn frontend_router<
     AP: AuthenticationProvider,
     CS: CalendarStore,
@@ -50,6 +60,9 @@ pub fn frontend_router<
     addr_store: Arc<AS>,
     frontend_config: FrontendConfig,
     oidc_config: Option<OidcConfig>,
+    sub_store: Option<Arc<dyn SubscriptionStore>>,
+    source_store: Arc<dyn CalendarSourceStore>,
+    subscriptions_public_url: String,
 ) -> Router {
     let user_router = Router::new()
         .route("/", get(route_get_home))
@@ -78,11 +91,46 @@ pub fn frontend_router<
             "/{user}/addressbook/{addressbook}/restore",
             post(route_addressbook_restore::<AS>),
         )
+        // Linked platforms (Omnical §17.8)
+        .route(
+            "/{user}/linked-platforms",
+            get(route_get_linked_platforms::<CS>),
+        )
+        .route(
+            "/{user}/linked-platforms/add",
+            post(route_post_linked_platforms_add::<CS>),
+        )
+        .route(
+            "/{user}/linked-platforms/{id}/refresh",
+            post(route_post_linked_platforms_refresh::<CS>),
+        )
+        .route(
+            "/{user}/linked-platforms/{id}/remove",
+            post(route_post_linked_platforms_remove),
+        )
+        // Share links (Omnical §17.7)
+        .route("/{user}/share", get(route_get_share::<AP, CS, AS>))
+        .route(
+            "/{user}/share/create",
+            post(route_share_create::<AP, CS, AS>),
+        )
+        .route("/{user}/share/{id}/revoke", post(route_share_revoke::<AP>))
+        // Groups (Omnical §17.9)
+        .route("/{user}/groups", get(route_groups::<AP, CS, AS>))
+        .route("/{user}/groups/new", get(route_group_new))
+        .route(
+            "/{user}/groups/{group}",
+            get(route_group_detail::<AP, CS, AS>),
+        )
         .layer(middleware::from_fn(unauthorized_handler));
 
     let router = Router::new()
         .route("/", get(route_root))
         .nest("/user", user_router)
+        .nest(
+            "/api/v1",
+            api_router(auth_provider.clone(), cal_store.clone(), addr_store.clone()),
+        )
         .route("/login", get(route_get_login).post(route_post_login::<AP>))
         .route("/logout", post(route_post_logout))
         .route(
@@ -119,7 +167,10 @@ pub fn frontend_router<
         .layer(Extension(cal_store))
         .layer(Extension(addr_store))
         .layer(Extension(frontend_config))
-        .layer(Extension(oidc_config));
+        .layer(Extension(oidc_config))
+        .layer(Extension(sub_store))
+        .layer(Extension(source_store))
+        .layer(Extension(subscriptions_public_url));
 
     Router::new()
         .nest(prefix, router)

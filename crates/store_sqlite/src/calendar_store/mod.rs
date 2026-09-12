@@ -119,8 +119,13 @@ pub struct SqliteCalendarStore {
 }
 
 impl SqliteCalendarStore {
+    #[must_use]
+    pub(crate) fn db_pool(&self) -> &SqlitePool {
+        &self.db
+    }
+
     // Logs an operation to the events
-    async fn log_object_operation(
+    pub(crate) async fn log_object_operation(
         tx: &mut Transaction<'_, Sqlite>,
         principal: &str,
         cal_id: &str,
@@ -161,7 +166,7 @@ impl SqliteCalendarStore {
         Ok(format_synctoken(synctoken))
     }
 
-    fn send_push_notification(&self, data: CollectionOperationInfo, topic: String) {
+    pub(crate) fn send_push_notification(&self, data: CollectionOperationInfo, topic: String) {
         if let Err(err) = self.sender.try_send(CollectionOperation { topic, data }) {
             error_span!(
                 "Error trying to send calendar update notification:",
@@ -885,7 +890,31 @@ impl CalendarReadStore for SqliteCalendarStore {
 impl CalendarWriteStore for SqliteCalendarStore {
     #[instrument]
     async fn insert_calendar(&self, calendar: Calendar) -> Result<(), Error> {
+        if let Some(ref displayname) = calendar.meta.displayname {
+            self.check_displayname_unique(displayname, &calendar.principal).await?;
+        }
         Self::_insert_calendar(&self.db, calendar).await
+    }
+
+    #[instrument]
+    async fn check_displayname_unique(
+        &self,
+        displayname: &str,
+        principal: &str,
+    ) -> Result<(), Error> {
+        let exists = sqlx::query(
+            "SELECT 1 FROM calendars WHERE displayname = ? AND principal != ? LIMIT 1",
+        )
+        .bind(displayname)
+        .bind(principal)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(crate::Error::from)?
+        .is_some();
+        if exists {
+            return Err(Error::AlreadyExists);
+        }
+        Ok(())
     }
 
     #[instrument]

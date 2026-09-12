@@ -1,0 +1,55 @@
+{% extends "layouts/default.html" %}
+
+{% block title %}{{ displayname }} &mdash; RustiCal{% endblock %}
+
+{% block content %}
+<h1>{{ displayname }}</h1>
+
+{% if owner %}
+<div class="actions">
+  <form action="/frontend/api/v1/groups/{{ group_id }}" method="POST"
+    onsubmit="return confirm('Delete this group and all its collections?')">
+    <input type="hidden" name="_method" value="DELETE">
+    <button type="submit" class="delete">Delete Group</button>
+  </form>
+</div>
+{% endif %}
+
+<h2>Members ({{ members.len() }})</h2>
+<ul>
+  {% for member in members %}
+  <li>
+    {{ member.displayname.as_deref().unwrap_or(&member.id) }}
+    {% if owner && member.id != user.id %}
+    <form action="/frontend/api/v1/groups/{{ group_id }}/members/{{ member.id }}" method="POST"
+      style="display:inline">
+      <input type="hidden" name="_method" value="DELETE">
+      <button type="submit" class="delete">Remove</button>
+    </form>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+
+{% if owner %}
+<h3>Add Member</h3>
+<member-picker group-id="{{ group_id }}"></member-picker>
+{% endif %}
+
+<h2>Collections</h2>
+{% if !collections.is_empty() %}
+<ul>
+  {% for collection in collections %}
+  <li>{{ collection }}</li>
+  {% endfor %}
+</ul>
+{% else %}
+<p>No collections in this group yet.</p>
+{% endif %}
+
+<template id="data-rustical-user">{{ user|json }}</template>
+<script>
+window.rusticalUser = JSON.parse(document.querySelector('#data-rustical-user').innerHTML);
+</script>
+<script type="module" src="/frontend/assets/js/bundle.mjs" async></script>
+{% endblock %}

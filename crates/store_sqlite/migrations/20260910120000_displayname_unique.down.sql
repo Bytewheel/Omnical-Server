@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_calendars_displayname_unique;
+DROP INDEX IF EXISTS idx_addressbooks_displayname_unique;

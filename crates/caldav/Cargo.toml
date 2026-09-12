@@ -48,3 +48,5 @@ vtimezones-rs.workspace = true
 similar-asserts.workspace = true
 matchit.workspace = true
 matchit-serde.workspace = true
+rustical_scheduling.workspace = true
+hex.workspace = true

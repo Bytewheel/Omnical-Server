@@ -8,6 +8,7 @@ use rustical_dav::resource::{PrincipalUri, ResourceService};
 use rustical_dav::resources::RootResourceService;
 use rustical_dav::rfc_3986_percent_encode;
 use rustical_dav_push::DavPushStore;
+use rustical_scheduling::Scheduler;
 use rustical_store::CalendarStore;
 use rustical_store::auth::middleware::AuthenticationLayer;
 use rustical_store::auth::{AuthenticationProvider, Principal};
@@ -18,6 +19,7 @@ pub mod calendar;
 pub mod calendar_object;
 pub mod error;
 pub mod principal;
+pub mod scheduling;
 pub use error::Error;
 
 #[derive(Debug, Clone, Constructor)]
@@ -46,6 +48,7 @@ pub fn caldav_router<AP: AuthenticationProvider, C: CalendarStore, DP: DavPushSt
     dav_push_store: Arc<DP>,
     simplified_home_set: bool,
     config: Arc<CalDavConfig>,
+    scheduler: Option<Arc<Scheduler>>,
 ) -> Router {
     Router::new().nest(
         prefix,
@@ -55,6 +58,7 @@ pub fn caldav_router<AP: AuthenticationProvider, C: CalendarStore, DP: DavPushSt
             cal_store: store,
             simplified_home_set,
             config,
+            scheduler,
         })
         .axum_router()
         .layer(AuthenticationLayer::new(auth_provider))

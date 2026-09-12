@@ -12,6 +12,9 @@ window.rusticalUser = JSON.parse(document.querySelector('#data-rustical-user').i
   <a href="/frontend/user/{{ user.id }}" {% if S::name() == "profile" %}class="active"{% endif %}>{% include "icons/user.svg" %}Profile</a>
   <a href="/frontend/user/{{ user.id }}/calendar" {% if S::name() == "calendars" %}class="active"{% endif %}>{% include "icons/calendar.svg" %}Calendars</a>
   <a href="/frontend/user/{{ user.id }}/addressbook" {% if S::name() == "addressbooks" %}class="active"{% endif %}>{% include "icons/group.svg" %}Addressbooks</a>
+  <a href="/frontend/user/{{ user.id }}/groups" {% if S::name() == "groups" %}class="active"{% endif %}>{% include "icons/group.svg" %}Groups</a>
+  <a href="/frontend/user/{{ user.id }}/linked-platforms" {% if S::name() == "linked-platforms" %}class="active"{% endif %}>{% include "icons/calendar.svg" %}Linked platforms</a>
+  <a href="/frontend/user/{{ user.id }}/share" {% if S::name() == "share" %}class="active"{% endif %}>{% include "icons/group.svg" %}Share</a>
 </nav>
 {% endblock %}
 

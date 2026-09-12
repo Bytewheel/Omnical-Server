@@ -25,6 +25,9 @@ pub async fn axum_route_delete<R: ResourceService>(
     let no_trash = header_map
         .get("X-No-Trashbin")
         .is_some_and(|val| matches!(val.to_str(), Ok("1")));
+    let user_agent = header_map
+        .get(http::header::USER_AGENT)
+        .and_then(|val| val.to_str().ok());
     route_delete(
         &path,
         &principal,
@@ -32,10 +35,12 @@ pub async fn axum_route_delete<R: ResourceService>(
         no_trash,
         if_match.map(|hdr| hdr.0),
         if_none_match.map(|hdr| hdr.0),
+        user_agent,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn route_delete<R: ResourceService>(
     path_components: &R::PathComponents,
     principal: &R::Principal,
@@ -43,6 +48,7 @@ pub async fn route_delete<R: ResourceService>(
     no_trash: bool,
     if_match: Option<IfMatch>,
     if_none_match: Option<IfNoneMatch>,
+    user_agent: Option<&str>,
 ) -> Result<(), R::Error> {
     let resource = resource_service.get_resource(path_components, true).await?;
 
@@ -67,5 +73,10 @@ pub async fn route_delete<R: ResourceService>(
     resource_service
         .delete_resource(path_components, !no_trash)
         .await?;
+    // Post-delete hook (fire-and-forget: the object is already gone, so a
+    // hook failure must not turn the successful DELETE into an error).
+    resource_service
+        .on_resource_deleted(path_components, principal, &resource, user_agent)
+        .await;
     Ok(())
 }

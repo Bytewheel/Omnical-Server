@@ -1,0 +1,548 @@
+//! Portal Share-section tests (PLAN.md §17.8.4): the per-user surface for
+//! the §17.7 share-link subscriptions — list with full export URLs, create
+//! (own + owned-group collections), ownership enforcement, revoke, and the
+//! public `/export` round-trip through the same app.
+use super::{ResponseExtractString, get_app};
+use axum::body::Body;
+use axum::extract::Request;
+use headers::{Authorization, HeaderMapExt};
+use http::header::CONTENT_TYPE;
+use http::{Method, StatusCode};
+use rstest::rstest;
+use rustical_ical::CalendarObjectType;
+use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType};
+use rustical_store::{
+    Addressbook, AddressbookWriteStore, Calendar, CalendarMetadata, CalendarWriteStore,
+};
+use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
+use tower::ServiceExt;
+
+async fn insert_group(context: &TestStoreContext, group_id: &str, displayname: &str, owner: &str) {
+    context
+        .principal_store
+        .insert_principal(
+            Principal {
+                id: group_id.to_owned(),
+                displayname: Some(displayname.to_owned()),
+                memberships: vec![],
+                password: None,
+                principal_type: PrincipalType::Group,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    context
+        .principal_store
+        .set_group_owner(group_id, owner)
+        .await
+        .unwrap();
+    context
+        .principal_store
+        .add_membership(owner, group_id)
+        .await
+        .unwrap();
+}
+
+async fn insert_user(context: &TestStoreContext, id: &str) {
+    context
+        .principal_store
+        .insert_principal(
+            Principal {
+                id: id.to_owned(),
+                displayname: Some(id.to_owned()),
+                memberships: vec![],
+                password: None,
+                principal_type: PrincipalType::Individual,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    context
+        .principal_store
+        .add_app_token(id, id.to_owned(), id.to_owned())
+        .await
+        .unwrap();
+}
+
+/// Own calendar + addressbook, an owned group with a calendar, and a foreign
+/// group (owned by `bob`) with a calendar.
+async fn setup_share_fixtures(context: &TestStoreContext) {
+    context
+        .cal_store
+        .insert_calendar(Calendar {
+            id: "personal".to_owned(),
+            principal: "user".to_owned(),
+            meta: CalendarMetadata {
+                displayname: Some("Personal".to_owned()),
+                order: 0,
+                description: None,
+                color: None,
+            },
+            timezone_id: None,
+            deleted_at: None,
+            synctoken: 0,
+            subscription_url: None,
+            push_topic: "share-test-personal".to_owned(),
+            components: vec![CalendarObjectType::Event],
+        })
+        .await
+        .unwrap();
+    context
+        .addr_store
+        .insert_addressbook(Addressbook {
+            id: "contacts".to_owned(),
+            principal: "user".to_owned(),
+            displayname: Some("Contacts".to_owned()),
+            description: None,
+            deleted_at: None,
+            synctoken: 0,
+            push_topic: "share-test-contacts".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    insert_group(context, "testgroup", "Test Group", "user").await;
+    context
+        .cal_store
+        .insert_calendar(Calendar {
+            id: "groupcal".to_owned(),
+            principal: "testgroup".to_owned(),
+            meta: CalendarMetadata {
+                displayname: Some("Group Calendar".to_owned()),
+                order: 0,
+                description: None,
+                color: None,
+            },
+            timezone_id: None,
+            deleted_at: None,
+            synctoken: 0,
+            subscription_url: None,
+            push_topic: "share-test-groupcal".to_owned(),
+            components: vec![CalendarObjectType::Event],
+        })
+        .await
+        .unwrap();
+
+    insert_user(context, "bob").await;
+    insert_group(context, "foreigngroup", "Foreign Group", "bob").await;
+    context
+        .cal_store
+        .insert_calendar(Calendar {
+            id: "foreigncal".to_owned(),
+            principal: "foreigngroup".to_owned(),
+            meta: CalendarMetadata {
+                displayname: Some("Foreign Calendar".to_owned()),
+                order: 0,
+                description: None,
+                color: None,
+            },
+            timezone_id: None,
+            deleted_at: None,
+            synctoken: 0,
+            subscription_url: None,
+            push_topic: "share-test-foreigncal".to_owned(),
+            components: vec![CalendarObjectType::Event],
+        })
+        .await
+        .unwrap();
+}
+
+fn request(
+    method: Method,
+    uri: &str,
+    user: &str,
+    pass: &str,
+    body: Option<String>,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("host", "public.example");
+    let body = body.map(Body::from);
+    if body.is_some() {
+        builder = builder.header(CONTENT_TYPE, "application/x-www-form-urlencoded");
+    }
+    let mut request = builder.body(body.unwrap_or_else(Body::empty)).unwrap();
+    request
+        .headers_mut()
+        .typed_insert(Authorization::basic(user, pass));
+    request
+}
+
+fn form(body: &str) -> Option<String> {
+    Some(body.to_owned())
+}
+
+/// Extract the first `https://public.example/export/…{extension}` URL.
+fn extract_share_url(body: &str, extension: &str) -> String {
+    let marker = "https://public.example/export/";
+    let start = body.find(marker).expect("share URL in body");
+    let rest = &body[start..];
+    let end = rest.find(extension).expect("extension in share URL");
+    rest[..end + extension.len()].to_owned()
+}
+
+/// Extract the first revoke form action (`/frontend/user/user/share/{id}/revoke`).
+fn extract_revoke_action(body: &str) -> String {
+    let end = body.find("/revoke").expect("revoke form action in body");
+    let start = body[..end]
+        .rfind("/frontend/user/user/share/")
+        .expect("share path before revoke action");
+    body[start..end + "/revoke".len()].to_owned()
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_page_lists_collections_with_create_buttons(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let app = get_app(context);
+
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/share",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    assert!(body.contains("Create share link"));
+    assert!(body.contains("Personal"));
+    assert!(body.contains("Contacts"));
+    // Own + owned-group collections are listed …
+    assert!(body.contains("Group Calendar"));
+    // … but not collections of groups the user does not own.
+    assert!(!body.contains("Foreign Calendar"));
+    // No share link exists yet, so no URL is shown.
+    assert!(!body.contains("/export/"));
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_create_shows_url_and_serves_export(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/create",
+        "user",
+        "pass",
+        form("principal=user&kind=calendar&collection_id=personal"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get("location").unwrap(),
+        "/frontend/user/user/share"
+    );
+
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/share",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    let url = extract_share_url(&body, ".ics");
+    let token = url
+        .trim_start_matches("https://public.example/export/")
+        .trim_end_matches(".ics");
+    assert_eq!(token.len(), 64, "app-token shape: {url}");
+    assert!(token.chars().all(|c| c.is_ascii_alphanumeric()));
+
+    // The public export URL serves without any authentication.
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(&url["https://public.example".len()..])
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers()
+            .get(CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/calendar")
+    );
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_create_addressbook_serves_vcf(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/create",
+        "user",
+        "pass",
+        form("principal=user&kind=addressbook&collection_id=contacts"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/share",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let body = resp.extract_string().await;
+    let url = extract_share_url(&body, ".vcf");
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(&url["https://public.example".len()..])
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers()
+            .get(CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/vcard")
+    );
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_create_group_collection(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/create",
+        "user",
+        "pass",
+        form("principal=testgroup&kind=calendar&collection_id=groupcal"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // The group's share link shows on the user's Share page …
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/share",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let body = resp.extract_string().await;
+    let url = extract_share_url(&body, ".ics");
+
+    // … and serves through the public export route.
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(&url["https://public.example".len()..])
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_create_rejects_foreign_group(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/create",
+        "user",
+        "pass",
+        form("principal=foreigngroup&kind=calendar&collection_id=foreigncal"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_create_rejects_other_user_principal(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/create",
+        "user",
+        "pass",
+        form("principal=bob&kind=calendar&collection_id=personal"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_create_rejects_unknown_collection(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/create",
+        "user",
+        "pass",
+        form("principal=user&kind=calendar&collection_id=nope"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_create_rejects_unknown_kind(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/create",
+        "user",
+        "pass",
+        form("principal=user&kind=bogus&collection_id=personal"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_revoke_makes_url_404(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/create",
+        "user",
+        "pass",
+        form("principal=user&kind=calendar&collection_id=personal"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/share",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let body = resp.extract_string().await;
+    let url = extract_share_url(&body, ".ics");
+    let revoke_action = extract_revoke_action(&body);
+
+    let req = request(
+        Method::POST,
+        &revoke_action,
+        "user",
+        "pass",
+        form("principal=user"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // The Share page shows the create button again …
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/share",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let body = resp.extract_string().await;
+    assert!(body.contains("Create share link"));
+    assert!(!body.contains("/export/"));
+
+    // … and the export URL is gone immediately.
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(&url["https://public.example".len()..])
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_page_wrong_user(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let app = get_app(context);
+
+    let req = request(Method::GET, "/frontend/user/user/share", "bob", "bob", None);
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

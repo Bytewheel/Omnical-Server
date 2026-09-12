@@ -1664,4 +1664,295 @@ __decorate([n$3()], GenerateAppTokenForm.prototype, "token", void 0);
 __decorate([n$3()], GenerateAppTokenForm.prototype, "uaApple", void 0);
 GenerateAppTokenForm = __decorate([t$2("generate-app-token-form")], GenerateAppTokenForm);
 //#endregion
-export { CreateAddressbookForm, CreateBirthdayCalendarForm, CreateCalendarForm, DeleteButton, EditAddressbookForm, EditCalendarForm, GenerateAppTokenForm, ImportAddressbookForm, ImportCalendarForm };
+//#region lib/group-create-form.ts
+var GroupCreateForm = class GroupCreateForm extends i$2 {
+	constructor(..._args) {
+		super(..._args);
+		this.user = "";
+		this.id = "";
+		this.displayname = "";
+		this.members = "";
+		this.calendar = true;
+		this.tasks = true;
+		this.addressbook = true;
+		this.submitting = false;
+		this.error = "";
+		this.form = e();
+	}
+	createRenderRoot() {
+		return this;
+	}
+	render() {
+		return b`
+      <form ${n(this.form)} @submit=${this.onSubmit}>
+        ${this.error ? b`<p class="error">${this.error}</p>` : ""}
+        <div>
+          <label>
+            Group ID
+            <input type="text" .value=${this.id} @change=${(e) => this.id = e.target.value}
+              placeholder="my-group" required
+              pattern="[a-zA-Z0-9_.@-]+" title="Letters, numbers, dots, underscores, hyphens, @">
+          </label>
+        </div>
+        <div>
+          <label>
+            Display name
+            <input type="text" .value=${this.displayname} @change=${(e) => this.displayname = e.target.value}
+              placeholder="My Group" required>
+          </label>
+        </div>
+        <div>
+          <label>
+            Members (comma-separated user IDs)
+            <input type="text" .value=${this.members} @change=${(e) => this.members = e.target.value}
+              placeholder="alice@example.com, bob@example.com">
+          </label>
+        </div>
+        <fieldset>
+          <legend>Collections to create</legend>
+          <label><input type="checkbox" .checked=${this.calendar} @change=${(e) => this.calendar = e.target.checked}> Calendar</label>
+          <label><input type="checkbox" .checked=${this.tasks} @change=${(e) => this.tasks = e.target.checked}> Tasks</label>
+          <label><input type="checkbox" .checked=${this.addressbook} @change=${(e) => this.addressbook = e.target.checked}> Addressbook</label>
+        </fieldset>
+        <button type="submit" class="primary margin-top-m" ?disabled=${this.submitting}>
+          ${this.submitting ? "Creating..." : "Create Group"}
+        </button>
+      </form>
+    `;
+	}
+	async onSubmit(e) {
+		e.preventDefault();
+		this.error = "";
+		this.submitting = true;
+		const memberList = this.members.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+		try {
+			const resp = await fetch("/frontend/api/v1/groups", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					id: this.id,
+					displayname: this.displayname,
+					members: memberList,
+					collections: {
+						calendar: this.calendar,
+						tasks: this.tasks,
+						addressbook: this.addressbook
+					}
+				})
+			});
+			if (!resp.ok) {
+				const body = await resp.text();
+				throw new Error(`HTTP ${resp.status}: ${body}`);
+			}
+			window.location.href = `/frontend/user/${this.user}/groups/${this.id}`;
+		} catch (err) {
+			this.error = String(err);
+		} finally {
+			this.submitting = false;
+		}
+	}
+};
+__decorate([n$3()], GroupCreateForm.prototype, "user", void 0);
+__decorate([n$3()], GroupCreateForm.prototype, "id", void 0);
+__decorate([n$3()], GroupCreateForm.prototype, "displayname", void 0);
+__decorate([n$3()], GroupCreateForm.prototype, "members", void 0);
+__decorate([n$3({ type: Boolean })], GroupCreateForm.prototype, "calendar", void 0);
+__decorate([n$3({ type: Boolean })], GroupCreateForm.prototype, "tasks", void 0);
+__decorate([n$3({ type: Boolean })], GroupCreateForm.prototype, "addressbook", void 0);
+__decorate([n$3({ type: Boolean })], GroupCreateForm.prototype, "submitting", void 0);
+__decorate([n$3()], GroupCreateForm.prototype, "error", void 0);
+GroupCreateForm = __decorate([t$2("group-create-form")], GroupCreateForm);
+//#endregion
+//#region lib/group-list.ts
+var GroupList = class GroupList extends i$2 {
+	constructor(..._args) {
+		super(..._args);
+		this.user = "";
+		this.groups = [];
+		this.loading = true;
+		this.error = "";
+	}
+	createRenderRoot() {
+		return this;
+	}
+	async connectedCallback() {
+		super.connectedCallback();
+		await this.fetchGroups();
+	}
+	async fetchGroups() {
+		this.loading = true;
+		this.error = "";
+		try {
+			const resp = await fetch("/frontend/api/v1/groups");
+			if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+			this.groups = await resp.json();
+		} catch (e) {
+			this.error = String(e);
+		} finally {
+			this.loading = false;
+		}
+	}
+	render() {
+		if (this.loading) return b`<p>Loading groups&hellip;</p>`;
+		if (this.error) return b`<p class="error">Failed to load groups: ${this.error}</p>`;
+		if (!this.groups.length) return b`
+        <p>You are not a member of any groups yet.</p>
+        <div class="section-actions">
+          <a href="/frontend/user/${this.user}/groups/new" class="button">New Group</a>
+        </div>
+      `;
+		return b`
+      <ul class="collection-list">
+        ${this.groups.map((group) => b`
+          <li class="collection-list-item">
+            <a href="/frontend/user/${this.user}/groups/${group.id}"></a>
+            <div class="inner">
+              <span class="title">
+                ${group.displayname}
+                ${group.owner ? b`<span class="chip">Owner</span>` : ""}
+              </span>
+              <span class="description">
+                ${group.member_count} member${group.member_count !== 1 ? "s" : ""}
+                &middot;
+                ${group.collections.length} collection${group.collections.length !== 1 ? "s" : ""}
+              </span>
+            </div>
+          </li>
+        `)}
+      </ul>
+      <div class="section-actions">
+        <a href="/frontend/user/${this.user}/groups/new" class="button">New Group</a>
+      </div>
+    `;
+	}
+};
+__decorate([n$3()], GroupList.prototype, "user", void 0);
+__decorate([n$3({ type: Array })], GroupList.prototype, "groups", void 0);
+__decorate([n$3({ type: Boolean })], GroupList.prototype, "loading", void 0);
+__decorate([n$3()], GroupList.prototype, "error", void 0);
+GroupList = __decorate([t$2("group-list")], GroupList);
+//#endregion
+//#region lib/member-picker.ts
+var MemberPicker = class MemberPicker extends i$2 {
+	constructor(..._args) {
+		super(..._args);
+		this.debounce = 300;
+		this.suggestions = [];
+		this.query = "";
+		this.error = "";
+		this.groupId = "";
+		this.loading = false;
+		this.showDropdown = false;
+		this.adding = false;
+		this._debounceTimer = null;
+	}
+	createRenderRoot() {
+		return this;
+	}
+	render() {
+		return b`
+      ${this.error ? b`<p class="error">${this.error}</p>` : ""}
+      <div class="member-picker" style="position:relative">
+        <input
+          type="text"
+          .value=${this.query}
+          @input=${this._onInput}
+          @focus=${() => {
+			if (this.suggestions.length) this.showDropdown = true;
+		}}
+          placeholder="Search users..."
+          autocomplete="off"
+        >
+        ${this.showDropdown && this.suggestions.length > 0 ? b`
+          <ul class="member-picker-dropdown" style="
+            position:absolute; top:100%; left:0; right:0;
+            background:var(--bg); border:1px solid var(--border);
+            list-style:none; margin:0; padding:0; z-index:100;
+            max-height:200px; overflow-y:auto;
+          "
+            @mouseleave=${() => this.showDropdown = false}
+          >
+            ${this.suggestions.map((u) => b`
+              <li @click=${() => this._selectUser(u)} style="
+                padding:4px 8px; cursor:pointer; display:flex; justify-content:space-between;
+              "
+                @mouseover=${(e) => e.currentTarget.style.background = "var(--highlight-bg)"}
+                @mouseout=${(e) => e.currentTarget.style.background = ""}>
+                <span>${u.displayname}</span>
+                <span style="color:var(--dim-text)">${u.id}</span>
+              </li>
+            `)}
+          </ul>
+        ` : ""}
+      </div>
+      <button @click=${this._addSelected} ?disabled=${this.adding || !this.query.trim()} style="margin-top:4px;">
+        ${this.adding ? "Adding..." : "Add"}
+      </button>
+    `;
+	}
+	_onInput(e) {
+		this.query = e.target.value;
+		this.error = "";
+		if (this._debounceTimer) clearTimeout(this._debounceTimer);
+		if (!this.query.trim()) {
+			this.suggestions = [];
+			this.showDropdown = false;
+			return;
+		}
+		this._debounceTimer = setTimeout(() => this._search(), this.debounce);
+	}
+	async _search() {
+		const q = this.query.trim();
+		if (!q) return;
+		this.loading = true;
+		try {
+			const resp = await fetch(`/frontend/api/v1/users?q=${encodeURIComponent(q)}`);
+			if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+			this.suggestions = await resp.json();
+			this.showDropdown = this.suggestions.length > 0;
+		} catch (e) {
+			console.error("member-picker search error:", e);
+			this.suggestions = [];
+			this.showDropdown = false;
+		} finally {
+			this.loading = false;
+		}
+	}
+	_selectUser(user) {
+		this.query = user.id;
+		this.showDropdown = false;
+	}
+	async _addSelected() {
+		const userId = this.query.trim();
+		if (!userId || !this.groupId) return;
+		this.adding = true;
+		this.error = "";
+		try {
+			const resp = await fetch(`/frontend/api/v1/groups/${this.groupId}/members`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ user_id: userId })
+			});
+			if (!resp.ok) {
+				const text = await resp.text();
+				throw new Error(text);
+			}
+			window.location.reload();
+		} catch (e) {
+			this.error = String(e);
+		} finally {
+			this.adding = false;
+		}
+	}
+};
+__decorate([n$3({ type: Number })], MemberPicker.prototype, "debounce", void 0);
+__decorate([n$3({ type: Array })], MemberPicker.prototype, "suggestions", void 0);
+__decorate([n$3()], MemberPicker.prototype, "query", void 0);
+__decorate([n$3()], MemberPicker.prototype, "error", void 0);
+__decorate([n$3()], MemberPicker.prototype, "groupId", void 0);
+__decorate([n$3({ type: Boolean })], MemberPicker.prototype, "loading", void 0);
+__decorate([n$3({ type: Boolean })], MemberPicker.prototype, "showDropdown", void 0);
+__decorate([n$3({ type: Boolean })], MemberPicker.prototype, "adding", void 0);
+MemberPicker = __decorate([t$2("member-picker")], MemberPicker);
+//#endregion
+export { CreateAddressbookForm, CreateBirthdayCalendarForm, CreateCalendarForm, DeleteButton, EditAddressbookForm, EditCalendarForm, GenerateAppTokenForm, GroupCreateForm, GroupList, ImportAddressbookForm, ImportCalendarForm, MemberPicker };

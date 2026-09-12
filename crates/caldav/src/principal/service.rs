@@ -1,13 +1,16 @@
 use crate::calendar::CalendarResourceService;
 use crate::calendar::resource::CalendarResource;
 use crate::principal::PrincipalResource;
+use crate::scheduling::{InboxResourceService, OutboxResourceService, select_default_calendar_id};
 use crate::{CalDavConfig, CalDavPrincipalUri, Error};
 use async_trait::async_trait;
 use axum::Router;
 use rustical_dav::resource::{AxumMethods, ResourceService};
 use rustical_dav_push::DavPushStore;
+use rustical_scheduling::Scheduler;
 use rustical_store::CalendarStore;
 use rustical_store::auth::{AuthenticationProvider, Principal};
+use std::borrow::Cow;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -19,6 +22,7 @@ pub struct PrincipalResourceService<AP: AuthenticationProvider, DP: DavPushStore
     // If true only return the principal as the calendar home set, otherwise also groups
     pub(crate) simplified_home_set: bool,
     pub(crate) config: Arc<CalDavConfig>,
+    pub(crate) scheduler: Option<Arc<Scheduler>>,
 }
 
 impl<AP: AuthenticationProvider, DP: DavPushStore, CS: CalendarStore> Clone
@@ -31,6 +35,7 @@ impl<AP: AuthenticationProvider, DP: DavPushStore, CS: CalendarStore> Clone
             cal_store: self.cal_store.clone(),
             simplified_home_set: self.simplified_home_set,
             config: self.config.clone(),
+            scheduler: self.scheduler.clone(),
         }
     }
 }
@@ -48,6 +53,10 @@ impl<AP: AuthenticationProvider, DP: DavPushStore, CS: CalendarStore> ResourceSe
 
     const DAV_HEADER: &str = "1, 3, access-control, calendar-access";
 
+    fn dav_header(&self) -> Cow<'static, str> {
+        crate::scheduling::dav_header_with_scheduling(Self::DAV_HEADER, self.scheduler.as_deref())
+    }
+
     async fn get_resource(
         &self,
         (principal,): &Self::PathComponents,
@@ -58,10 +67,20 @@ impl<AP: AuthenticationProvider, DP: DavPushStore, CS: CalendarStore> ResourceSe
             .get_principal(principal)
             .await?
             .ok_or(crate::Error::NotFound)?;
+        let scheduling = match self.scheduler.as_ref() {
+            Some(scheduler) if scheduler.enabled() => {
+                let calendars = self.cal_store.get_calendars(&user.id).await?;
+                Some(crate::scheduling::SchedulingProps {
+                    default_calendar_id: select_default_calendar_id(&calendars),
+                })
+            }
+            _ => None,
+        };
         Ok(PrincipalResource {
             members: self.auth_provider.list_members(&user.id).await?,
             principal: user,
             simplified_home_set: self.simplified_home_set,
+            scheduling,
         })
     }
 
@@ -83,17 +102,33 @@ impl<AP: AuthenticationProvider, DP: DavPushStore, CS: CalendarStore> ResourceSe
     }
 
     fn axum_router<State: Send + Sync + Clone + 'static>(self) -> axum::Router<State> {
-        Router::new()
-            .nest(
-                "/{calendar_id}",
-                CalendarResourceService::new(
-                    self.cal_store.clone(),
-                    self.dav_push_store.clone(),
-                    self.config.clone(),
-                )
-                .axum_router(),
+        let mut router = Router::new().nest(
+            "/{calendar_id}",
+            CalendarResourceService::new(
+                self.cal_store.clone(),
+                self.dav_push_store.clone(),
+                self.config.clone(),
+                self.scheduler.clone(),
             )
-            .route_service("/", self.axum_service())
+            .axum_router(),
+        );
+        if let Some(scheduler) = self
+            .scheduler
+            .as_ref()
+            .filter(|scheduler| scheduler.enabled())
+        {
+            // Static routes win over the `/{calendar_id}` parameter route
+            router = router
+                .nest(
+                    "/inbox",
+                    InboxResourceService::new(scheduler.store()).axum_router(),
+                )
+                .nest(
+                    "/outbox",
+                    OutboxResourceService::new(scheduler.clone()).axum_router(),
+                );
+        }
+        router.route_service("/", self.axum_service())
     }
 }
 

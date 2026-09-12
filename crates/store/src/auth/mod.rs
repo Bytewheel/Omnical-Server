@@ -89,6 +89,26 @@ pub trait AuthenticationProvider: Send + Sync + 'static {
     async fn remove_membership(&self, principal: &str, member_of: &str) -> Result<(), Error>;
 
     async fn list_members(&self, principal: &str) -> Result<Vec<String>, Error>;
+
+    async fn list_groups_for_user(&self, user_id: &str) -> Result<Vec<(String, String)>, Error> {
+        let _ = user_id;
+        Ok(Vec::new())
+    }
+
+    async fn get_group_owner(&self, group_id: &str) -> Result<Option<String>, Error> {
+        let _ = group_id;
+        Ok(None)
+    }
+
+    async fn set_group_owner(&self, group_id: &str, owner_id: &str) -> Result<(), Error> {
+        let _ = (group_id, owner_id);
+        Ok(())
+    }
+
+    async fn search_users(&self, query: &str) -> Result<Vec<(String, String)>, Error> {
+        let _ = query;
+        Ok(Vec::new())
+    }
 }
 
 pub use middleware::AuthenticationMiddleware;

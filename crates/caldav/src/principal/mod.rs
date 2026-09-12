@@ -1,12 +1,18 @@
 use crate::Error;
+use crate::scheduling::SchedulingProps;
+use http::Uri;
 use rustical_dav::extensions::CommonPropertiesExtension;
 use rustical_dav::namespace::NS_DAV;
 use rustical_dav::privileges::UserPrivilegeSet;
 use rustical_dav::resource::{PrincipalUri, Resource, ResourceName};
 use rustical_dav::resourcetype;
-use rustical_dav::xml::{GroupMemberSet, GroupMembership, Resourcetype, SupportedReportSet};
+use rustical_dav::rfc_3986_percent_encode;
+use rustical_dav::xml::{
+    GroupMemberSet, GroupMembership, HrefElement, Resourcetype, SupportedReportSet,
+};
 use rustical_store::auth::Principal;
 use std::borrow::Cow;
+use std::str::FromStr;
 
 mod service;
 pub use service::*;
@@ -21,6 +27,8 @@ pub struct PrincipalResource {
     members: Vec<String>,
     // If true only return the principal as the calendar home set, otherwise also groups
     simplified_home_set: bool,
+    // Present when the scheduling extension (RFC 6638) is enabled
+    scheduling: Option<SchedulingProps>,
 }
 
 impl ResourceName for PrincipalResource {
@@ -72,6 +80,39 @@ impl Resource for PrincipalResource {
                     ),
                     PrincipalPropName::CalendarUserAddressSet => {
                         PrincipalProp::CalendarUserAddressSet(principal_url.into())
+                    }
+                    PrincipalPropName::ScheduleInboxUrl => {
+                        PrincipalProp::ScheduleInboxUrl(self.scheduling.is_some().then(|| {
+                            HrefElement::from(
+                                Uri::from_str(&format!("{principal_url}inbox/"))
+                                    .expect("principal URL plus suffix is a valid URI"),
+                            )
+                        }))
+                    }
+                    PrincipalPropName::ScheduleOutboxUrl => {
+                        PrincipalProp::ScheduleOutboxUrl(self.scheduling.is_some().then(|| {
+                            HrefElement::from(
+                                Uri::from_str(&format!("{principal_url}outbox/"))
+                                    .expect("principal URL plus suffix is a valid URI"),
+                            )
+                        }))
+                    }
+                    PrincipalPropName::ScheduleDefaultCalendarUrl => {
+                        let default_calendar_id = self
+                            .scheduling
+                            .as_ref()
+                            .and_then(|scheduling| scheduling.default_calendar_id.as_deref());
+                        PrincipalProp::ScheduleDefaultCalendarUrl(
+                            default_calendar_id
+                                .and_then(|cal_id| {
+                                    Uri::from_str(&format!(
+                                        "{principal_url}{}/",
+                                        rfc_3986_percent_encode(cal_id)
+                                    ))
+                                    .ok()
+                                })
+                                .map(HrefElement::from),
+                        )
                     }
                     PrincipalPropName::GroupMemberSet => {
                         PrincipalProp::GroupMemberSet(GroupMemberSet(

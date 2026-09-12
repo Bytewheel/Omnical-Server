@@ -1,0 +1,52 @@
+<h2>{{ user.id }}'s share links</h2>
+<p class="description">
+  A share link is a secret URL anyone can subscribe to (Apple "Add Subscribed
+  Calendar", Google "From URL", any webcal client) — no account needed.
+  Anyone with the URL can read the collection; revoke to make it stop
+  working immediately.
+</p>
+{% if let Some(error) = error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+{% if !enabled %}
+<p class="error">Share links are disabled on this server ([subscriptions] enabled = false).</p>
+{% endif %}
+{% if entries.is_empty() %}
+<p>No calendars or addressbooks to share yet — create a calendar first.</p>
+{% else %}
+<ul class="collection-list">
+  {% for entry in entries %}
+  <li class="collection-list-item">
+    <div class="inner">
+      <span class="title">{{ entry.displayname }}</span>
+      <span class="description">
+        {{ entry.kind }} · {{ entry.owner_label }} / {{ entry.collection_id }}
+        {% if let Some(created_at) = entry.created_at %} · created {{ created_at }}{% endif %}
+      </span>
+      {% if let Some(url) = entry.url %}
+      <div class="metadata"><a href="{{ url }}">{{ url }}</a></div>
+      {% endif %}
+      <div class="actions">
+        {% if let Some(sub_id) = entry.sub_id %}
+        {% if enabled %}
+        <form method="POST" action="/frontend/user/{{ user.id }}/share/{{ sub_id }}/revoke">
+          <input type="hidden" name="principal" value="{{ entry.principal }}">
+          <button type="submit" class="delete">Revoke</button>
+        </form>
+        {% endif %}
+        {% else %}
+        {% if enabled %}
+        <form method="POST" action="/frontend/user/{{ user.id }}/share/create">
+          <input type="hidden" name="principal" value="{{ entry.principal }}">
+          <input type="hidden" name="kind" value="{{ entry.kind }}">
+          <input type="hidden" name="collection_id" value="{{ entry.collection_id }}">
+          <button type="submit">Create share link</button>
+        </form>
+        {% endif %}
+        {% endif %}
+      </div>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}

@@ -8,11 +8,19 @@ mod addressbook_store;
 pub use addressbook_store::SqliteAddressbookStore;
 mod calendar_store;
 pub use calendar_store::SqliteCalendarStore;
+mod calendar_source_store;
+pub use calendar_source_store::SqliteCalendarSourceStore;
 mod dav_push_store;
 pub use dav_push_store::SqliteDavPushStore;
 pub mod error;
+mod invite_store;
+pub use invite_store::SqliteInviteStore;
 mod principal_store;
 pub use principal_store::SqlitePrincipalStore;
+mod scheduling_store;
+pub use scheduling_store::SqliteSchedulingStore;
+mod subscription_store;
+pub use subscription_store::SqliteSubscriptionStore;
 
 // Begin statement for write transactions
 pub const BEGIN_IMMEDIATE: &str = "BEGIN IMMEDIATE";

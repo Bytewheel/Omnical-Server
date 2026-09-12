@@ -1,4 +1,7 @@
 use crate::config::NextcloudLoginConfig;
+use crate::export::export_router;
+use crate::register::{RegistrationContext, register_router};
+use crate::rsvp::rsvp_router;
 use axum::Router;
 use axum::body::{Body, HttpBody};
 use axum::extract::{DefaultBodyLimit, Request};
@@ -15,9 +18,12 @@ use rustical_dav_push::DavPushStore;
 use rustical_frontend::nextcloud_login::nextcloud_login_router;
 use rustical_frontend::{FrontendConfig, frontend_router};
 use rustical_oidc::OidcConfig;
+use rustical_scheduling::Scheduler;
+use rustical_store::SubscriptionStore;
 use rustical_store::auth::AuthenticationProvider;
 use rustical_store::{
-    AddressbookStore, CalendarStore, CombinedCalendarStore, PrefixedCalendarStore,
+    AddressbookStore, CalendarSourceStore, CalendarStore, CombinedCalendarStore,
+    PrefixedCalendarStore,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,14 +53,19 @@ pub fn make_app<
     frontend_config: FrontendConfig,
     oidc_config: Option<OidcConfig>,
     caldav_config: CalDavConfig,
+    scheduler: Option<Arc<Scheduler>>,
+    subscriptions: Option<Arc<dyn SubscriptionStore>>,
+    registration: Option<Arc<RegistrationContext>>,
     nextcloud_login_config: &NextcloudLoginConfig,
     dav_push_enabled: bool,
     session_cookie_samesite_strict: bool,
     payload_limit_mb: usize,
+    source_store: Arc<dyn CalendarSourceStore>,
+    subscriptions_public_url: String,
 ) -> Router<()> {
     let birthday_store = addr_store.clone();
     let combined_cal_store =
-        Arc::new(CombinedCalendarStore::new(cal_store).with_store(birthday_store));
+        Arc::new(CombinedCalendarStore::new(cal_store.clone()).with_store(birthday_store));
 
     let caldav_config = Arc::new(caldav_config);
 
@@ -68,6 +79,7 @@ pub fn make_app<
             dav_push_store.clone(),
             false,
             caldav_config.clone(),
+            scheduler.clone(),
         ))
         .merge(caldav_router(
             "/caldav-compat",
@@ -76,6 +88,7 @@ pub fn make_app<
             dav_push_store.clone(),
             true,
             caldav_config,
+            scheduler.clone(),
         ))
         .route(
             "/.well-known/caldav",
@@ -122,14 +135,56 @@ pub fn make_app<
     );
 
     let session_store = MemoryStore::default();
+
+    // Omnical share-links extension (§17.7): public token export URLs, mounted
+    // OUTSIDE the DAV `AuthenticationLayer` — the token in the URL is the
+    // only credential. Merging before the frontend block keeps
+    // `combined_cal_store` available; the combined store preserves
+    // owner-export parity and keeps `_birthdays_*` collections feed-capable.
+    if let Some(sub_store) = subscriptions.clone() {
+        router = router.merge(export_router(
+            addr_store.clone(),
+            combined_cal_store.clone(),
+            sub_store,
+        ));
+    }
+
+    // Omnical RSVP-links extension (PLAN_SHARING.md §9 item 3): public
+    // one-click response page for the tokens carried in iMIP invitation
+    // emails. Like the export router it mounts OUTSIDE the DAV
+    // `AuthenticationLayer` (the token is the only credential) and only
+    // exists while fully configured, so a disabled config has zero
+    // public footprint. `scheduler` was cloned into the second
+    // caldav_router above, so it is still available here.
+    if let Some(sched) = scheduler.as_ref().filter(|s| s.rsvp_links_enabled()) {
+        router = router.merge(rsvp_router(sched.clone()));
+    }
+
+    // Omnical registration extension (§17.8): public invite-gated
+    // self-service registration, mounted OUTSIDE the DAV `AuthenticationLayer`
+    // like the export router. Only present while `[registration] enabled`, so
+    // a disabled config has zero registration footprint.
+    if let Some(registration) = registration {
+        let auth: Arc<dyn AuthenticationProvider> = auth_provider.clone();
+        router = router.merge(register_router(
+            addr_store.clone(),
+            combined_cal_store.clone(),
+            auth,
+            registration,
+        ));
+    }
+
     if frontend_config.enabled {
         router = router.merge(frontend_router(
             "/frontend",
             auth_provider.clone(),
-            combined_cal_store,
+            cal_store,
             addr_store,
             frontend_config,
             oidc_config,
+            subscriptions.clone(),
+            source_store,
+            subscriptions_public_url,
         ));
     }
 

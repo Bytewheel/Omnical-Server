@@ -1,22 +1,30 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 pub mod addressbook;
 pub mod addressbook_store;
+mod calendar_source_store;
 pub mod calendar_store;
 pub mod error;
 pub use error::Error;
 pub mod auth;
 mod calendar;
 mod combined_calendar_store;
+mod invite_store;
+mod scheduling_store;
 mod secret;
+mod subscription_store;
 pub mod synctoken;
 
 #[cfg(test)]
 pub mod tests;
 
 pub use addressbook_store::*;
+pub use calendar_source_store::*;
 pub use calendar_store::*;
 pub use combined_calendar_store::{CombinedCalendarStore, PrefixedCalendarStore};
+pub use invite_store::*;
+pub use scheduling_store::*;
 pub use secret::Secret;
+pub use subscription_store::*;
 
 pub use addressbook::Addressbook;
 pub use calendar::{Calendar, CalendarMetadata};

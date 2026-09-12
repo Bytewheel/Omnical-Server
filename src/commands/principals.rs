@@ -101,7 +101,8 @@ pub enum PrincipalsCommand {
     clippy::too_many_lines
 )]
 pub async fn cmd_principals(args: PrincipalsArgs, config: Config) -> anyhow::Result<()> {
-    let (_, _, _, principal_store, _) = get_data_stores(true, &config.data_store).await?;
+    let (_, _, _, principal_store, _, _, _, _, _) =
+        get_data_stores(true, &config.data_store).await?;
     match args.command {
         PrincipalsCommand::List => {
             for principal in principal_store.get_principals().await? {

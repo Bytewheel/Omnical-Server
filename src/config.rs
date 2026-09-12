@@ -6,6 +6,7 @@ use reqwest::Url;
 use rustical_caldav::CalDavConfig;
 use rustical_frontend::FrontendConfig;
 use rustical_oidc::OidcConfig;
+use rustical_scheduling::SchedulingConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -248,6 +249,79 @@ pub struct MaintenanceConfig {
     pub trash_retention_days: Option<NonZeroU32>,
 }
 
+/// Omnical share-links extension (PLAN.md §17.7): public read-only
+/// subscription export feeds for calendars and addressbooks.
+///
+/// While disabled (the default) the build behaves byte-for-byte like the
+/// current one: no `/export/*` routes are mounted and the `subscriptions`
+/// CLI's tokens do not serve anything.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct SubscriptionsConfig {
+    /// Master switch: mounts the unauthenticated `/export/<token>.{ics,vcf}`
+    /// routes (the token in the URL is the only credential).
+    pub enabled: bool,
+    /// Public base URL the `subscriptions` CLI prints for export feeds (e.g.
+    /// `https://0115d8cf.duckdns.org:8443`). Falls back to the HTTP bind
+    /// address when unset, which is not necessarily publicly reachable (the
+    /// production deployment fronts this server with a TLS tunnel).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+}
+
+/// Omnical self-service registration extension (PLAN.md §17.8).
+///
+/// While disabled (the default) the build behaves byte-for-byte like the
+/// current one: no `/register` routes are mounted and no registration state
+/// is constructed. When enabled, invite-gated registration provisions a full
+/// account (principal, app tokens, seed collections, share feed) and
+/// auto-logs the new user in.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields, default)]
+pub struct RegistrationConfig {
+    /// Master switch: mounts the public `/register` form and POST handler.
+    pub enabled: bool,
+    /// Require a single-use invitation code (issued via `rustical invites`)
+    /// before an account is provisioned. When `false` the form skips the
+    /// invite field entirely.
+    pub invite_required: bool,
+    /// Minimum accepted password length.
+    pub min_password_length: usize,
+    /// Client app-token names created automatically for every new registrant.
+    /// These are shown (and then never again) on the success card.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub auto_app_tokens: Vec<String>,
+    /// Create `personal` calendar + addressbook share feeds for every new
+    /// registrant (requires `[subscriptions] enabled = true` to serve them).
+    pub auto_subscription: bool,
+    /// Group the new principal is joined to on registration (unset = no group).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub default_group: String,
+    /// Max registrations per client IP (by `X-Forwarded-For` first hop, else
+    /// a single global bucket) within a sliding one hour window.
+    pub rate_limit_per_hour: u32,
+}
+
+impl Default for RegistrationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            invite_required: true,
+            min_password_length: 12,
+            auto_app_tokens: vec![
+                "vdirsyncer".to_owned(),
+                "davx5".to_owned(),
+                "thunderbird".to_owned(),
+                "apple".to_owned(),
+                "i3status".to_owned(),
+            ],
+            auto_subscription: true,
+            default_group: String::new(),
+            rate_limit_per_hour: 10,
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -266,6 +340,12 @@ pub struct Config {
     pub nextcloud_login: NextcloudLoginConfig,
     #[serde(default)]
     pub caldav: CalDavConfig,
+    #[serde(default)]
+    pub scheduling: SchedulingConfig,
+    #[serde(default)]
+    pub subscriptions: SubscriptionsConfig,
+    #[serde(default)]
+    pub registration: RegistrationConfig,
     #[serde(default)]
     pub maintenance: MaintenanceConfig,
 }

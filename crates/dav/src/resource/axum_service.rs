@@ -6,7 +6,7 @@ use crate::resource::{
 };
 use axum::{
     body::Body,
-    extract::FromRequestParts,
+    extract::{FromRequestParts, State},
     handler::Handler,
     http::{Request, Response},
     response::IntoResponse,
@@ -59,7 +59,8 @@ where
             Handler::with_state(axum_route_move::<RS>, self.resource_service.clone());
         let mut copy_service =
             Handler::with_state(axum_route_copy::<RS>, self.resource_service.clone());
-        let mut options_service = Handler::with_state(route_options::<RS>, ());
+        let mut options_service =
+            Handler::with_state(route_options::<RS>, self.resource_service.clone());
         match req.method().as_str() {
             "PROPFIND" => return Box::pin(Service::call(&mut propfind_service, req)),
             "PROPPATCH" => return Box::pin(Service::call(&mut proppatch_service, req)),
@@ -113,13 +114,17 @@ where
     }
 }
 
-async fn route_options<RS: ResourceService + AxumMethods>() -> Response<Body> {
+async fn route_options<RS: ResourceService + AxumMethods>(
+    State(resource_service): State<RS>,
+) -> Response<Body> {
     // Semantically NO_CONTENT would also make sense,
     // but GNOME Accounts only works when returning OK
     // https://gitlab.gnome.org/GNOME/gnome-online-accounts/-/blob/master/src/goabackend/goadavclient.c#L289
     let mut resp = Response::builder().status(StatusCode::OK);
     let headers = resp.headers_mut().unwrap();
-    headers.insert("DAV", HeaderValue::from_static(RS::DAV_HEADER));
+    let dav_value = HeaderValue::from_str(&resource_service.dav_header())
+        .unwrap_or_else(|_| HeaderValue::from_static(RS::DAV_HEADER));
+    headers.insert("DAV", dav_value);
     headers.typed_insert(RS::allow_header());
     resp.body(Body::empty()).unwrap()
 }

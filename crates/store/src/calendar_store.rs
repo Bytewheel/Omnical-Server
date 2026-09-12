@@ -70,6 +70,11 @@ pub trait CalendarWriteStore: Send + Sync + 'static {
         calendar: Calendar,
     ) -> Result<(), Error>;
     async fn insert_calendar(&self, calendar: Calendar) -> Result<(), Error>;
+    async fn check_displayname_unique(
+        &self,
+        displayname: &str,
+        principal: &str,
+    ) -> Result<(), Error>;
     async fn delete_calendar(
         &self,
         principal: &str,

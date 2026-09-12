@@ -7,7 +7,7 @@ use rustical_store::{
     Error, Secret,
     auth::{AppToken, AuthenticationProvider, Principal},
 };
-use sqlx::{SqlitePool, types::Json};
+use sqlx::{Row, SqlitePool, types::Json};
 use tracing::instrument;
 
 #[derive(Debug, Default, Clone)]
@@ -232,6 +232,81 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         .map_err(crate::Error::from)?
         .into_iter()
         .map(|record| record.principal)
+        .collect())
+    }
+
+    #[instrument]
+    async fn list_groups_for_user(&self, user_id: &str) -> Result<Vec<(String, String)>, Error> {
+        Ok(sqlx::query(
+            r#"
+            SELECT memberships.member_of AS id, principals.displayname
+            FROM memberships
+            JOIN principals ON memberships.member_of = principals.id
+            WHERE memberships.principal = ? AND principals.principal_type = 'GROUP'
+            "#,
+        )
+        .bind(user_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(crate::Error::from)?
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("id"),
+                row.get::<Option<String>, _>("displayname")
+                    .unwrap_or_default(),
+            )
+        })
+        .collect())
+    }
+
+    #[instrument]
+    async fn get_group_owner(&self, group_id: &str) -> Result<Option<String>, Error> {
+        Ok(
+            sqlx::query(r#"SELECT owner_id FROM group_owners WHERE group_id = ?"#)
+                .bind(group_id)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(crate::Error::from)?
+                .map(|row| row.get("owner_id")),
+        )
+    }
+
+    #[instrument]
+    async fn set_group_owner(&self, group_id: &str, owner_id: &str) -> Result<(), Error> {
+        sqlx::query(r#"INSERT INTO group_owners (group_id, owner_id) VALUES (?, ?)"#)
+            .bind(group_id)
+            .bind(owner_id)
+            .execute(&self.db)
+            .await
+            .map_err(crate::Error::from)?;
+        Ok(())
+    }
+
+    #[instrument]
+    async fn search_users(&self, query: &str) -> Result<Vec<(String, String)>, Error> {
+        let pattern = format!("%{query}%");
+        Ok(sqlx::query(
+            r#"
+            SELECT id, displayname
+            FROM principals
+            WHERE principal_type = 'INDIVIDUAL' AND (id LIKE ? OR displayname LIKE ?)
+            LIMIT 20
+            "#,
+        )
+        .bind(&pattern)
+        .bind(&pattern)
+        .fetch_all(&self.db)
+        .await
+        .map_err(crate::Error::from)?
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("id"),
+                row.get::<Option<String>, _>("displayname")
+                    .unwrap_or_default(),
+            )
+        })
         .collect())
     }
 }

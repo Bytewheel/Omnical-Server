@@ -49,6 +49,11 @@ pub trait AddressbookWriteStore: Send + Sync + 'static {
         addressbook: Addressbook,
     ) -> Result<(), Error>;
     async fn insert_addressbook(&self, addressbook: Addressbook) -> Result<(), Error>;
+    async fn check_displayname_unique(
+        &self,
+        displayname: &str,
+        principal: &str,
+    ) -> Result<(), Error>;
 
     async fn delete_addressbook(
         &self,

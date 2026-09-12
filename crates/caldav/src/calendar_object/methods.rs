@@ -24,6 +24,7 @@ pub async fn get_event<C: CalendarStore>(
     State(CalendarObjectResourceService {
         cal_store,
         config: _,
+        scheduler: _,
     }): State<CalendarObjectResourceService<C>>,
     user: Principal,
     method: Method,
@@ -54,16 +55,18 @@ pub async fn get_event<C: CalendarStore>(
     }
 }
 
-#[instrument(skip(cal_store))]
+#[instrument(skip(cal_store, scheduler))]
 pub async fn put_event<C: CalendarStore>(
     Path(CalendarObjectPathComponents {
         principal,
         calendar_id,
         object_id,
     }): Path<CalendarObjectPathComponents>,
-    State(CalendarObjectResourceService { cal_store, config }): State<
-        CalendarObjectResourceService<C>,
-    >,
+    State(CalendarObjectResourceService {
+        cal_store,
+        config,
+        scheduler,
+    }): State<CalendarObjectResourceService<C>>,
     user: Principal,
     mut if_none_match: Option<TypedHeader<IfNoneMatch>>,
     mut if_match: Option<TypedHeader<IfMatch>>,
@@ -82,19 +85,28 @@ pub async fn put_event<C: CalendarStore>(
         if_match = None;
     }
 
-    if if_match.is_some() || if_none_match.is_some() {
-        // TODO: Put into transaction?
-        let existing = match cal_store
+    let user_agent = header_map
+        .get(http::header::USER_AGENT)
+        .and_then(|val| val.to_str().ok());
+
+    // Fetch the previous object for the precondition checks below and for
+    // implicit scheduling (it compares old vs. new attendees)
+    let existing = if if_match.is_some() || if_none_match.is_some() || scheduler.is_some() {
+        match cal_store
             .get_object(&principal, &calendar_id, &object_id, false)
             .await
         {
             Ok(existing) => Some(existing),
             Err(rustical_store::Error::NotFound) => None,
             Err(err) => Err(err)?,
-        };
+        }
+    } else {
+        None
+    };
 
+    if if_match.is_some() || if_none_match.is_some() {
         // There's an already existing object
-        if let Some(existing) = existing {
+        if let Some(existing) = &existing {
             let etag: Option<ETag> = existing.get_etag().parse().ok();
 
             if let Some(if_match) = if_match.as_ref()
@@ -147,6 +159,20 @@ pub async fn put_event<C: CalendarStore>(
     cal_store
         .put_object(&principal, &calendar_id, &object_id, object, true)
         .await?;
+
+    // Implicit scheduling (RFC 6638 subset): fire-and-forget style — the
+    // object is stored, a scheduling failure must not fail the PUT
+    if let Some(scheduler) = scheduler.as_ref() {
+        scheduler
+            .handle_put(
+                &user.id,
+                (&principal, &calendar_id, &object_id),
+                existing.as_ref().map(|obj| obj.get_ics()),
+                &body,
+                user_agent,
+            )
+            .await;
+    }
 
     let mut headers = HeaderMap::new();
     headers.insert(
