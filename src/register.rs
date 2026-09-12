@@ -292,12 +292,41 @@ async fn validate<AS: AddressbookStore, CS: CalendarStore>(
         return Err(FormError::render("Please enter a valid email address."));
     }
 
-    if state
+    let already_exists = state
         .auth_provider
         .get_principal(email)
         .await
-        .is_ok_and(|p| p.is_some())
-    {
+        .is_ok_and(|p| p.is_some());
+
+    // For existing users with a group invite, skip all other checks — just
+    // join the group.
+    if already_exists && state.context.config.invite_required {
+        let now = now_str();
+        if let Ok(Some(invite)) = state
+            .context
+            .invite_store
+            .get_invite(form.invite.trim())
+            .await
+        {
+            if invite.used_by.is_none()
+                && invite
+                    .expires_at
+                    .as_deref()
+                    .is_none_or(|at| at > now.as_str())
+                && invite.target_group.is_some()
+            {
+                // Email binding check
+                if let Some(target) = invite.target_email.as_deref() {
+                    if target != email {
+                        return Err(FormError::render(INVALID_INVITE_EMAIL_MSG));
+                    }
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    if already_exists {
         return Err(FormError::render(
             "An account with that email address already exists.",
         ));
@@ -406,6 +435,28 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
                 }
             };
         }
+    }
+
+    // Check if the user already exists (invite-only group join path).
+    let existing_user = state
+        .auth_provider
+        .get_principal(email)
+        .await
+        .ok()
+        .flatten();
+
+    if let Some(_existing) = existing_user {
+        // User already exists — just join the target group if set.
+        if let Some(group) = &target_group {
+            if let Err(err) = state.auth_provider.add_membership(email, group).await {
+                error!(%err, "registration: target_group membership failed");
+            }
+        }
+        // Log them in and show success.
+        if session.insert("user", email).await.is_err() {
+            warn!("registration: session persist failed for {email}");
+        }
+        return render_existing_user_success(email, displayname, host, &target_group).into_response();
     }
 
     // Provision the account. The invite is already burned, so a mid-provision
@@ -767,6 +818,44 @@ fn render_success(
         </table>
         <h2>Share feeds</h2>
         <ul>{feeds_html}</ul>
+        <p><a class="button" href="/frontend/user/{email}">Continue to your account →</a></p>"#,
+        email = escape_html(email),
+    ))
+}
+
+/// Render the success page for an existing user who just joined a group.
+fn render_existing_user_success(
+    email: &str,
+    displayname: &str,
+    host: &str,
+    target_group: &Option<String>,
+) -> Html<String> {
+    let host_html = if host.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<p>Server: <code>https://{host}/</code></p>",
+            host = escape_html(host),
+        )
+    };
+    let greeting = if displayname.is_empty() {
+        String::new()
+    } else {
+        format!(" <strong>{}</strong>", escape_html(displayname))
+    };
+    let group_msg = match target_group {
+        Some(group) => format!(
+            "<p>You have been added to the <code>{}</code> group.</p>",
+            escape_html(group)
+        ),
+        None => String::new(),
+    };
+
+    render_page(&format!(
+        r#"<h1>Welcome back{greeting}</h1>
+        <p>Your account <code>{email}</code> already exists. You have been signed in automatically.</p>
+        {group_msg}
+        {host_html}
         <p><a class="button" href="/frontend/user/{email}">Continue to your account →</a></p>"#,
         email = escape_html(email),
     ))

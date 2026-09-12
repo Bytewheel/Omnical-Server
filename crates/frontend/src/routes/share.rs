@@ -11,7 +11,7 @@ use axum_extra::extract::TypedHeader;
 use headers::Host;
 use http::StatusCode;
 use rustical_store::{
-    AddressbookStore, CalendarStore, SubscriptionKind, SubscriptionStore,
+    AddressbookStore, CalendarStore, InviteStore, SubscriptionKind, SubscriptionStore,
     auth::{AuthenticationProvider, Principal},
 };
 use serde::Deserialize;
@@ -52,6 +52,9 @@ pub struct ShareSection {
     /// Whether the subscriptions extension is enabled (share links servable).
     pub enabled: bool,
     pub error: Option<String>,
+    /// When set, show the newly created invite link.
+    pub invite_url: Option<String>,
+    pub invited_email: Option<String>,
 }
 
 /// The principals whose collections this user may share: their own, plus
@@ -184,6 +187,8 @@ async fn share_page<AP: AuthenticationProvider, CS: CalendarStore, AS: Addressbo
             entries,
             enabled: sub_store.is_some(),
             error,
+            invite_url: None,
+            invited_email: None,
         },
         user: user.clone(),
     }
@@ -372,4 +377,165 @@ pub async fn route_share_revoke<AP: AuthenticationProvider>(
         let _ = store.delete_subscription(&form.principal, &id).await;
     }
     Redirect::to(&format!("/frontend/user/{}/share", user.id)).into_response()
+}
+
+/// Invite code alphabet (unambiguous: no 0/O/1/l/I) and length.
+const CODE_ALPHABET: &[u8] = b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const CODE_LENGTH: usize = 12;
+
+fn generate_invite_code() -> String {
+    use rand::RngExt;
+    let mut rng = rand::rng();
+    (0..CODE_LENGTH)
+        .map(|_| CODE_ALPHABET[rng.random_range(0..CODE_ALPHABET.len())] as char)
+        .collect()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SendInviteForm {
+    pub principal: String,
+    pub email: String,
+}
+
+/// POST /{user}/share/invite — create a one-time invite code tied to a group
+/// and return the registration link. The caller copies the link and sends it
+/// to the invitee.
+#[allow(clippy::too_many_arguments)]
+pub async fn route_share_invite<
+    AP: AuthenticationProvider,
+    CS: CalendarStore,
+    AS: AddressbookStore,
+>(
+    Path(user_id): Path<String>,
+    Extension(auth_provider): Extension<Arc<AP>>,
+    Extension(cal_store): Extension<Arc<CS>>,
+    Extension(addr_store): Extension<Arc<AS>>,
+    Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
+    Extension(public_url): Extension<String>,
+    Extension(invite_store): Extension<Arc<dyn InviteStore>>,
+    TypedHeader(host): TypedHeader<Host>,
+    user: Principal,
+    Form(form): Form<SendInviteForm>,
+) -> Response {
+    if user_id != user.id {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    // Ownership check: user's own principal or a group they own.
+    let owned = if form.principal == user.id {
+        true
+    } else {
+        auth_provider
+            .get_group_owner(&form.principal)
+            .await
+            .unwrap_or(None)
+            .as_deref()
+            == Some(&user.id)
+    };
+    if !owned {
+        return (
+            StatusCode::FORBIDDEN,
+            "You can only send invites for your own or your groups' collections.",
+        )
+            .into_response();
+    }
+
+    let email = form.email.trim().to_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        return share_page(
+            &auth_provider,
+            &cal_store,
+            &addr_store,
+            sub_store.as_ref(),
+            &public_url,
+            &host,
+            &user,
+            Some("Please enter a valid email address.".to_owned()),
+        )
+        .await;
+    }
+
+    let code = generate_invite_code();
+    let target_group = if form.principal == user.id {
+        None
+    } else {
+        Some(form.principal.clone())
+    };
+
+    if let Err(err) = invite_store
+        .add_invite(
+            &code,
+            &Some(email.clone()),
+            &target_group,
+            &user.id,
+            &None,
+        )
+        .await
+    {
+        return share_page(
+            &auth_provider,
+            &cal_store,
+            &addr_store,
+            sub_store.as_ref(),
+            &public_url,
+            &host,
+            &user,
+            Some(format!("Could not create invite: {err}")),
+        )
+        .await;
+    }
+
+    let base_url = resolve_base_url(&public_url, &host);
+    let invite_url = format!("{base_url}/register?code={code}");
+    share_page_with_invite(
+        &auth_provider,
+        &cal_store,
+        &addr_store,
+        sub_store.as_ref(),
+        &public_url,
+        &host,
+        &user,
+        &invite_url,
+        &email,
+    )
+    .await
+}
+
+async fn share_page_with_invite<
+    AP: AuthenticationProvider,
+    CS: CalendarStore,
+    AS: AddressbookStore,
+>(
+    auth_provider: &Arc<AP>,
+    cal_store: &Arc<CS>,
+    addr_store: &Arc<AS>,
+    sub_store: Option<&Arc<dyn SubscriptionStore>>,
+    public_url: &str,
+    host: &Host,
+    user: &Principal,
+    invite_url: &str,
+    invited_email: &str,
+) -> Response {
+    let base_url = resolve_base_url(public_url, host);
+    let entries = build_share_entries(
+        auth_provider,
+        cal_store,
+        addr_store,
+        sub_store,
+        user,
+        &base_url,
+    )
+    .await;
+    UserPage {
+        section: ShareSection {
+            user: user.clone(),
+            entries,
+            enabled: sub_store.is_some(),
+            error: None,
+            invite_url: Some(invite_url.to_owned()),
+            invited_email: Some(invited_email.to_owned()),
+        },
+        user: user.clone(),
+    }
+    .into_response()
 }

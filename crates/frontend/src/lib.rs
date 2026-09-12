@@ -13,7 +13,7 @@ use routes::{addressbooks::route_addressbooks, calendars::route_calendars};
 use rustical_oidc::{OidcConfig, OidcServiceConfig, oidc_router};
 use rustical_store::SubscriptionStore;
 use rustical_store::{
-    AddressbookStore, CalendarSourceStore, CalendarStore, PrefixedCalendarStore,
+    AddressbookStore, CalendarSourceStore, CalendarStore, InviteStore, PrefixedCalendarStore,
     auth::{AuthenticationProvider, middleware::AuthenticationLayer},
 };
 use std::sync::Arc;
@@ -40,7 +40,7 @@ use crate::routes::{
         route_post_linked_platforms_refresh, route_post_linked_platforms_remove,
     },
     login::{route_get_login, route_post_login, route_post_logout},
-    share::{route_get_share, route_share_create, route_share_revoke},
+    share::{route_get_share, route_share_create, route_share_invite, route_share_revoke},
     timezones::route_timezones,
     user::{route_get_home, route_root, route_user_named},
 };
@@ -63,6 +63,7 @@ pub fn frontend_router<
     sub_store: Option<Arc<dyn SubscriptionStore>>,
     source_store: Arc<dyn CalendarSourceStore>,
     subscriptions_public_url: String,
+    invite_store: Arc<dyn InviteStore>,
 ) -> Router {
     let user_router = Router::new()
         .route("/", get(route_get_home))
@@ -115,6 +116,11 @@ pub fn frontend_router<
             post(route_share_create::<AP, CS, AS>),
         )
         .route("/{user}/share/{id}/revoke", post(route_share_revoke::<AP>))
+        // Send invite (Omnical registration extension)
+        .route(
+            "/{user}/share/invite",
+            post(route_share_invite::<AP, CS, AS>),
+        )
         // Groups (Omnical §17.9)
         .route("/{user}/groups", get(route_groups::<AP, CS, AS>))
         .route("/{user}/groups/new", get(route_group_new))
@@ -170,7 +176,8 @@ pub fn frontend_router<
         .layer(Extension(oidc_config))
         .layer(Extension(sub_store))
         .layer(Extension(source_store))
-        .layer(Extension(subscriptions_public_url));
+        .layer(Extension(subscriptions_public_url))
+        .layer(Extension(invite_store));
 
     Router::new()
         .nest(prefix, router)

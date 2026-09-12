@@ -195,7 +195,7 @@ pub async fn cmd_serve(
         &config.registration,
         scheduling_store,
         subscription_store.clone(),
-        invite_store,
+        invite_store.clone(),
     );
 
     // Inbound iMIP ingestion: poll the configured IMAP mailboxes for
@@ -237,6 +237,7 @@ pub async fn cmd_serve(
         config.http.payload_limit_mb,
         _calendar_source_store,
         subscriptions_public_url,
+        invite_store.clone(),
     );
     let app = ServiceExt::<Request>::into_make_service(
         NormalizePathLayer::trim_trailing_slash().layer(app),

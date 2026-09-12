@@ -62,6 +62,7 @@ pub fn make_app<
     payload_limit_mb: usize,
     source_store: Arc<dyn CalendarSourceStore>,
     subscriptions_public_url: String,
+    invite_store: Arc<dyn rustical_store::InviteStore>,
 ) -> Router<()> {
     let birthday_store = addr_store.clone();
     let combined_cal_store =
@@ -185,6 +186,7 @@ pub fn make_app<
             subscriptions.clone(),
             source_store,
             subscriptions_public_url,
+            invite_store,
         ));
     }
 

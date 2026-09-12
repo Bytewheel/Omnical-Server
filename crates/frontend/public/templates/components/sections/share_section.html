@@ -8,6 +8,13 @@
 {% if let Some(error) = error %}
 <p class="error">{{ error }}</p>
 {% endif %}
+{% if let Some(url) = invite_url.as_ref() %}
+<div class="success">
+  <p><strong>Invite sent!</strong> Share this registration link with <code>{{ invited_email.as_deref().unwrap_or("") }}</code>:</p>
+  <p><code>{{ url }}</code></p>
+  <p>When they register, they will be automatically added to the group.</p>
+</div>
+{% endif %}
 {% if !enabled %}
 <p class="error">Share links are disabled on this server ([subscriptions] enabled = false).</p>
 {% endif %}
@@ -43,6 +50,13 @@
           <button type="submit">Create share link</button>
         </form>
         {% endif %}
+        {% endif %}
+        {% if entry.kind == "calendar" %}
+        <form method="POST" action="/frontend/user/{{ user.id }}/share/invite" class="inline-form">
+          <input type="hidden" name="principal" value="{{ entry.principal }}">
+          <input type="email" name="email" placeholder="email@example.com" required>
+          <button type="submit">Send invite</button>
+        </form>
         {% endif %}
       </div>
     </div>

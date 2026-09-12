@@ -5,7 +5,7 @@ use rustical::{app::make_app, config::NextcloudLoginConfig};
 use rustical_caldav::CalDavConfig;
 use rustical_frontend::FrontendConfig;
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
-use rustical_store_sqlite::{SqliteCalendarSourceStore, SqliteSubscriptionStore};
+use rustical_store_sqlite::{SqliteCalendarSourceStore, SqliteInviteStore, SqliteSubscriptionStore};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -23,6 +23,7 @@ pub fn get_app(context: TestStoreContext) -> axum::Router {
     // app mounts the same extension as production.
     let subscription_store = Arc::new(SqliteSubscriptionStore::new(cal_store.clone()));
     let source_store = Arc::new(SqliteCalendarSourceStore::new(cal_store.clone()));
+    let invite_store = Arc::new(SqliteInviteStore::new(cal_store.clone()));
 
     make_app(
         Arc::new(addr_store),
@@ -44,6 +45,7 @@ pub fn get_app(context: TestStoreContext) -> axum::Router {
         20,
         source_store,
         "https://public.example".to_owned(),
+        invite_store,
     )
 }
 
