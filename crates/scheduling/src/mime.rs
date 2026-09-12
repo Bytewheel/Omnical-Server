@@ -120,6 +120,9 @@ pub fn invite_body(
     ));
     body.push_str(&format!("  Event: {summary}\r\n"));
     body.push_str(&format!("  When:  {when}{recurring}\r\n"));
+    if let Some(url) = &event.url {
+        body.push_str(&format!("  URL:   {url}\r\n"));
+    }
     body.push_str("\r\n");
     if let Some(url) = rsvp_url {
         body.push_str(
@@ -162,6 +165,9 @@ pub fn cancel_body(event: &ics::EventInfo, organizer: &str) -> String {
     ));
     body.push_str(&format!("  Event: {summary}\r\n"));
     body.push_str(&format!("  When:  {when}\r\n"));
+    if let Some(url) = &event.url {
+        body.push_str(&format!("  URL:   {url}\r\n"));
+    }
     body.push_str("\r\n");
     body.push_str(
         "The calendar cancellation is attached (invite.ics); opening it updates your \r\n\

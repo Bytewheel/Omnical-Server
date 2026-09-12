@@ -234,6 +234,7 @@ pub struct EventInfo {
     pub dtend: Option<Line>,
     pub duration: Option<String>,
     pub rrule: bool,
+    pub url: Option<String>,
 }
 
 /// Extract scheduling-relevant properties from the first VEVENT of an ICS body.
@@ -301,6 +302,7 @@ pub fn parse_event(ics: &str) -> Option<EventInfo> {
             "DTEND" => info.dtend = Some(line),
             "DURATION" => info.duration = Some(line.value.to_owned()),
             "RRULE" => info.rrule = true,
+            "URL" if info.url.is_none() => info.url = Some(line.value.to_owned()),
             _ => {}
         }
     }
