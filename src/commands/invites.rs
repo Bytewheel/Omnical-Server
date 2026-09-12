@@ -51,6 +51,9 @@ pub struct CreateArgs {
     /// Restrict the invite to one email address
     #[arg(long)]
     pub email: Option<String>,
+    /// Auto-join this group on registration (grants shared calendar access)
+    #[arg(long)]
+    pub group: Option<String>,
     /// Expiry as YYYY-MM-DD or ISO 8601 date-time (dates expire at end of day)
     #[arg(long)]
     pub expires: Option<String>,
@@ -94,6 +97,7 @@ pub async fn cmd_invites(args: InvitesArgs, config: Config) -> anyhow::Result<()
     match args.command {
         InvitesCommand::Create(CreateArgs {
             email,
+            group,
             expires,
             created_by,
         }) => {
@@ -104,11 +108,12 @@ pub async fn cmd_invites(args: InvitesArgs, config: Config) -> anyhow::Result<()
                 .transpose()
                 .context("invalid --expires value")?;
             let id = invite_store
-                .add_invite(&code, &email, &created_by, &expires)
+                .add_invite(&code, &email, &group, &created_by, &expires)
                 .await?;
             eprintln!(
-                "Invite created (id: {id}, for: {}, expiry: {})",
+                "Invite created (id: {id}, for: {}, group: {}, expiry: {})",
                 email.as_deref().unwrap_or("anyone"),
+                group.as_deref().unwrap_or("none"),
                 expires.as_deref().unwrap_or("none")
             );
             println!("{code}");
@@ -116,20 +121,23 @@ pub async fn cmd_invites(args: InvitesArgs, config: Config) -> anyhow::Result<()
         InvitesCommand::List(ListArgs { all }) => {
             for invite in invite_store.list_invites(all).await? {
                 let target = invite.target_email.as_deref().unwrap_or("anyone");
+                let group = invite.target_group.as_deref().unwrap_or("none");
                 let expiry = invite.expires_at.as_deref().unwrap_or("none");
                 if let Some(used_by) = invite.used_by.as_deref() {
                     println!(
-                        "{}  used by {} (expired {}, created {})",
+                        "{}  used by {}  group: {}  (expired {}, created {})",
                         invite.code,
                         used_by,
+                        group,
                         expiry,
                         invite.created_at.as_deref().unwrap_or("unknown")
                     );
                 } else {
                     println!(
-                        "{}  for {}  expires {}  created {}",
+                        "{}  for {}  group: {}  expires {}  created {}",
                         invite.code,
                         target,
+                        group,
                         expiry,
                         invite.created_at.as_deref().unwrap_or("unknown")
                     );

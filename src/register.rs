@@ -370,8 +370,19 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
     // Atomic commit point: only one concurrent redemption of the same code
     // can succeed. Everything written after this failing is a burned code by
     // design (PLAN.md §17.8.2) — admins reissue via `invites create`.
+    let mut target_group: Option<String> = None;
     if state.context.config.invite_required {
         let now = now_str();
+        // Look up the invite to get the target group before redemption
+        // (the invite row is needed for group assignment).
+        let invite = state
+            .context
+            .invite_store
+            .get_invite(invite_code.trim())
+            .await
+            .ok()
+            .flatten();
+        target_group = invite.and_then(|i| i.target_group);
         if let Err(err) = state
             .context
             .invite_store
@@ -438,6 +449,13 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
             .await
     {
         error!(%err, "registration: group membership failed");
+    }
+
+    // Auto-join the invite's target group (grants shared calendar access).
+    if let Some(group) = &target_group {
+        if let Err(err) = state.auth_provider.add_membership(email, group).await {
+            error!(%err, "registration: invite target_group membership failed");
+        }
     }
 
     // App tokens (full values shown once on the card).
@@ -941,6 +959,7 @@ mod tests {
             .add_invite(
                 "unused-abc",
                 &Some("new@example.com".to_owned()),
+                &None,
                 "test",
                 &None,
             )
@@ -1013,6 +1032,7 @@ mod tests {
             .add_invite(
                 "used-cde",
                 &Some("sess@example.com".to_owned()),
+                &None,
                 "test",
                 &None,
             )
@@ -1040,7 +1060,7 @@ mod tests {
         let rig = TestRig::new(base_config()).await;
         rig.get_form().await;
         rig.invite_store
-            .add_invite("single-use", &None, "test", &None)
+            .add_invite("single-use", &None, &None, "test", &None)
             .await
             .unwrap();
         let fields = &[
@@ -1092,7 +1112,7 @@ mod tests {
         // Used code.
         rig.get_form().await;
         rig.invite_store
-            .add_invite("used-zz", &None, "test", &None)
+            .add_invite("used-zz", &None, &None, "test", &None)
             .await
             .unwrap();
         rig.invite_store
@@ -1115,6 +1135,7 @@ mod tests {
         rig.invite_store
             .add_invite(
                 "expired-1",
+                &None,
                 &None,
                 "test",
                 &Some("2000-01-01T00:00:00Z".to_owned()),
@@ -1143,6 +1164,7 @@ mod tests {
             .add_invite(
                 "bound-1",
                 &Some("expected@example.com".to_owned()),
+                &None,
                 "test",
                 &None,
             )
@@ -1173,7 +1195,7 @@ mod tests {
         let rig = TestRig::new(base_config()).await;
         rig.get_form().await;
         rig.invite_store
-            .add_invite("repeat-1", &None, "test", &None)
+            .add_invite("repeat-1", &None, &None, "test", &None)
             .await
             .unwrap();
         rig.principal_store

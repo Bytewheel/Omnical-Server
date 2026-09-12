@@ -13,6 +13,8 @@ pub struct Invite {
     pub code: String,
     /// When set, only that exact email address may redeem the invite.
     pub target_email: Option<String>,
+    /// When set, the redeeming user is auto-joined to this group on registration.
+    pub target_group: Option<String>,
     /// Who issued the invite (an admin id or CLI marker).
     pub created_by: String,
     pub created_at: Option<String>,
@@ -42,6 +44,7 @@ pub trait InviteStore: Send + Sync + 'static {
         &self,
         _code: &str,
         _target_email: &Option<String>,
+        _target_group: &Option<String>,
         _created_by: &str,
         _expires_at: &Option<String>,
     ) -> Result<String, Error> {

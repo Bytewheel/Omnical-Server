@@ -28,7 +28,7 @@ mod tests {
 
         // Create (unbound, no expiry)
         let id = store
-            .add_invite("test-code-1", &None, "admin", &None)
+            .add_invite("test-code-1", &None, &None, "admin", &None)
             .await
             .unwrap();
 
@@ -97,12 +97,12 @@ mod tests {
         let store = SqliteInviteStore::new(context.await.cal_store);
 
         store
-            .add_invite("dup-code", &None, "admin", &None)
+            .add_invite("dup-code", &None, &None, "admin", &None)
             .await
             .unwrap();
         assert!(
             matches!(
-                store.add_invite("dup-code", &None, "admin", &None).await,
+                store.add_invite("dup-code", &None, &None, "admin", &None).await,
                 Err(rustical_store::Error::AlreadyExists)
             ),
             "a duplicated code must be rejected"
@@ -121,7 +121,7 @@ mod tests {
         // Expires in the past: pre-check reveals it, redeem refuses it.
         let past = "2026-09-01T00:00:00Z";
         store
-            .add_invite("expired", &None, "admin", &Some(past.to_owned()))
+            .add_invite("expired", &None, &None, "admin", &Some(past.to_owned()))
             .await
             .unwrap();
         let invite = store.get_invite("expired").await.unwrap().unwrap();
@@ -137,7 +137,7 @@ mod tests {
         // Expires in the future: redeemable normally.
         let future = "2026-12-31T23:59:59Z";
         store
-            .add_invite("fresh", &None, "admin", &Some(future.to_owned()))
+            .add_invite("fresh", &None, &None, "admin", &Some(future.to_owned()))
             .await
             .unwrap();
         store.redeem_invite("fresh", "user", NOW).await.unwrap();
@@ -163,6 +163,7 @@ mod tests {
             .add_invite(
                 "bound-code",
                 &Some("target@example.com".to_owned()),
+                &None,
                 "admin",
                 &None,
             )

@@ -666,6 +666,7 @@ async fn test_register_enabled_provisions() {
                 InvitesArgs {
                     command: InvitesCommand::Create(InviteCreateArgs {
                         email: Some("new@example.com".to_owned()),
+                        group: None,
                         expires: None,
                         created_by: "test".to_owned(),
                     }),
