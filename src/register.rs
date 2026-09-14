@@ -589,7 +589,11 @@ async fn seed_collections<AS: AddressbookStore, CS: CalendarStore>(
         id: "personal".to_owned(),
         principal: email.to_owned(),
         meta: CalendarMetadata {
-            displayname: Some("Personal".to_owned()),
+            // `displayname` is GLOBALLY unique (idx_calendars_displayname_unique
+            // + check_displayname_unique), so a hard-coded "Personal" would
+            // collide with any existing user's row — seed NULL like the
+            // Phase 5.4 MKCOL results (clients fall back to the id "personal").
+            displayname: None,
             order: 0,
             description: None,
             color: Some("blue".to_owned()),
@@ -606,7 +610,7 @@ async fn seed_collections<AS: AddressbookStore, CS: CalendarStore>(
         id: "tasks".to_owned(),
         principal: email.to_owned(),
         meta: CalendarMetadata {
-            displayname: Some("Tasks".to_owned()),
+            displayname: None,
             order: 1,
             description: None,
             color: Some("green".to_owned()),
@@ -645,7 +649,7 @@ async fn seed_collections<AS: AddressbookStore, CS: CalendarStore>(
     let personal_book = Addressbook {
         id: "personal".to_owned(),
         principal: email.to_owned(),
-        displayname: Some("Personal".to_owned()),
+        displayname: None,
         description: None,
         deleted_at: None,
         synctoken: 0,

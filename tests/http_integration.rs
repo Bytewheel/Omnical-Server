@@ -764,19 +764,26 @@ async fn test_register_enabled_provisions() {
 
             let (send, _recv) = tokio::sync::mpsc::channel(1);
             let cal_store = SqliteCalendarStore::new(db.clone(), send, false);
-            cal_store
+            // Seeded displaynames must be NULL: calendar/addressbook
+            // displaynames are globally unique, so a hard-coded "Personal"/
+            // "Tasks" would 500 the next registration (see the second
+            // registration below, which regression-locks this).
+            let personal_cal = cal_store
                 .get_calendar(&principal.id, "personal", false)
                 .await
                 .unwrap();
-            cal_store
+            let tasks_cal = cal_store
                 .get_calendar(&principal.id, "tasks", false)
                 .await
                 .unwrap();
+            assert_eq!(personal_cal.meta.displayname, None);
+            assert_eq!(tasks_cal.meta.displayname, None);
             let (send, _recv) = tokio::sync::mpsc::channel(1);
-            SqliteAddressbookStore::new(db.clone(), send, false)
+            let personal_book = SqliteAddressbookStore::new(db.clone(), send, false)
                 .get_addressbook(&principal.id, "personal", false)
                 .await
                 .unwrap();
+            assert_eq!(personal_book.displayname, None);
             let (send, _recv) = tokio::sync::mpsc::channel(1);
             let subs =
                 SqliteSubscriptionStore::new(SqliteCalendarStore::new(db.clone(), send, false))
@@ -794,6 +801,97 @@ async fn test_register_enabled_provisions() {
                     .unwrap();
                 assert_eq!(resp.status(), StatusCode::OK, "{}.{ext}", sub.token);
             }
+
+            // Second registration against the same DB: regression-locks the
+            // globally-unique displayname collision (before the fix, seeding
+            // "Personal"/"Tasks" for a second user collided with the first
+            // user's rows and every registration after the first would 500).
+            cmd_invites(
+                InvitesArgs {
+                    command: InvitesCommand::Create(InviteCreateArgs {
+                        email: Some("second@example.com".to_owned()),
+                        group: None,
+                        expires: None,
+                        created_by: "test".to_owned(),
+                    }),
+                },
+                config.clone(),
+            )
+            .await
+            .unwrap();
+            let db = create_db_pool(&db_path, false).await.unwrap();
+            let (send, _recv) = tokio::sync::mpsc::channel(1);
+            let invite_store = SqliteInviteStore::new(SqliteCalendarStore::new(db, send, false));
+            let second_code = invite_store
+                .list_invites(false)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|invite| invite.code.as_str() != code.as_str())
+                .expect("second invite (the first is hidden as used)")
+                .code;
+
+            let client3 = reqwest::Client::builder()
+                .redirect(Policy::none())
+                .cookie_store(true)
+                .build()
+                .unwrap();
+            let form_html = client3
+                .get(format!("{origin}/register"))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            let csrf = csrf_from(&form_html);
+            assert!(!csrf.is_empty(), "{form_html}");
+            let mut form = HashMap::new();
+            form.insert("email", "second@example.com");
+            form.insert("displayname", "Second User");
+            form.insert("password", "correct horse battery staple");
+            form.insert("password_confirm", "correct horse battery staple");
+            form.insert("invite", second_code.as_str());
+            form.insert("csrf", csrf.as_str());
+            let resp = client3
+                .post(format!("{origin}/register"))
+                .form(&form)
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status();
+            let body = resp.text().await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(body.contains("second@example.com"), "{body}");
+
+            let db = create_db_pool(&db_path, false).await.unwrap();
+            let principal_store = SqlitePrincipalStore::new(db.clone());
+            let second_principal = principal_store
+                .get_principal("second@example.com")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(second_principal.password.is_some());
+            assert_eq!(
+                principal_store
+                    .get_app_tokens(&second_principal.id)
+                    .await
+                    .unwrap()
+                    .len(),
+                5
+            );
+            let (send, _recv) = tokio::sync::mpsc::channel(1);
+            let cal_store = SqliteCalendarStore::new(db, send, false);
+            let second_personal = cal_store
+                .get_calendar(&second_principal.id, "personal", false)
+                .await
+                .unwrap();
+            let second_tasks = cal_store
+                .get_calendar(&second_principal.id, "tasks", false)
+                .await
+                .unwrap();
+            assert_eq!(second_personal.meta.displayname, None);
+            assert_eq!(second_tasks.meta.displayname, None);
 
             let resp = client
                 .get(format!("{origin}/register"))
