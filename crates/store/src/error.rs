@@ -24,6 +24,14 @@ pub enum Error {
     #[error("Error generating password hash")]
     PasswordHash,
 
+    /// The last remaining admin of a group cannot be demoted or removed.
+    #[error("The last admin of a group cannot be demoted or removed")]
+    LastAdmin,
+
+    /// The group owner is an implicit admin and cannot be demoted below it.
+    #[error("The group owner cannot be demoted below admin")]
+    OwnerNotDemotable,
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 
@@ -37,7 +45,7 @@ impl Error {
         match self {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::AlreadyExists => StatusCode::CONFLICT,
-            Self::ReadOnly => StatusCode::FORBIDDEN,
+            Self::ReadOnly | Self::LastAdmin | Self::OwnerNotDemotable => StatusCode::FORBIDDEN,
             Self::InvalidPrincipalId | Self::InvalidPrincipalType(_) => StatusCode::BAD_REQUEST,
             Self::IcalError(_err) => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::INTERNAL_SERVER_ERROR,

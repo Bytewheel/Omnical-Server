@@ -98,6 +98,7 @@ async fn setup_fixtures(context: &TestStoreContext) {
                 password: None,
                 principal_type: PrincipalType::Individual,
                 needs_password_change: false,
+                privileges: Default::default(),
             },
             false,
         )

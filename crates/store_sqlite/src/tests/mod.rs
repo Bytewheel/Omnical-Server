@@ -39,6 +39,7 @@ pub async fn test_store_context() -> TestStoreContext {
                 password: None,
                 principal_type: PrincipalType::Individual,
                 needs_password_change: false,
+                privileges: Default::default(),
             },
             false,
         )
@@ -78,6 +79,7 @@ async fn test_invalid_principal_id(
                         password: None,
                         memberships: vec![],
                         needs_password_change: false,
+                        privileges: Default::default(),
                     },
                     false,
                 )
@@ -98,6 +100,7 @@ async fn test_invalid_principal_id(
                         password: None,
                         memberships: vec![],
                         needs_password_change: false,
+                        privileges: Default::default(),
                     },
                     false,
                 )

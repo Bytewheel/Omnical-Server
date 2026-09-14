@@ -20,6 +20,7 @@ fn test_propfind() {
         password: None,
         memberships: vec!["group".to_string()],
         needs_password_change: false,
+        privileges: Default::default(),
     };
 
     let resource = PrincipalResource {

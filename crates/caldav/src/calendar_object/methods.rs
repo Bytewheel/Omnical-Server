@@ -76,6 +76,10 @@ pub async fn put_event<C: CalendarStore>(
     if !user.is_principal(&principal) {
         return Err(crate::Error::Unauthorized);
     }
+    // Omnical §17.9.2: `view` members are members but may not write.
+    if !user.can_write(&principal) {
+        return Err(crate::Error::DavError(rustical_dav::Error::Forbidden));
+    }
 
     // https://github.com/hyperium/headers/issues/204
     if !header_map.contains_key("If-None-Match") {

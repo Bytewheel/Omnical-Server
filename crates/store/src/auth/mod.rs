@@ -1,5 +1,6 @@
 pub mod middleware;
 mod principal;
+mod privilege;
 use crate::error::Error;
 use async_trait::async_trait;
 
@@ -10,6 +11,7 @@ mod error;
 pub use error::UnauthorizedError;
 
 pub use principal::{AppToken, Principal};
+pub use privilege::Privilege;
 
 /// The `AuthenticationProvider` is the principal store for rustical.
 #[async_trait]
@@ -87,6 +89,56 @@ pub trait AuthenticationProvider: Send + Sync + 'static {
     async fn add_membership(&self, principal: &str, member_of: &str) -> Result<(), Error>;
 
     async fn remove_membership(&self, principal: &str, member_of: &str) -> Result<(), Error>;
+
+    /// Returns the stored privilege of `member_id` within `group_id`.
+    /// Memberships without a stored privilege default to [`Privilege::Edit`]
+    /// (the pre-privilege "full r/w" semantics).
+    ///
+    /// # Errors
+    /// Any store error.
+    async fn get_privilege(&self, member_id: &str, group_id: &str) -> Result<Privilege, Error> {
+        let _ = (member_id, group_id);
+        Ok(Privilege::Edit)
+    }
+
+    /// Sets the privilege of `member_id` within `group_id`. Implementations
+    /// must uphold the invariants: the last remaining admin cannot be demoted
+    /// and must not become the only admin without an explicit admin row.
+    ///
+    /// # Errors
+    /// - [`Error::LastAdmin`] when demoting the last admin of the group.
+    async fn set_privilege(
+        &self,
+        member_id: &str,
+        group_id: &str,
+        privilege: Privilege,
+    ) -> Result<(), Error> {
+        let _ = (member_id, group_id, privilege);
+        Ok(())
+    }
+
+    /// Returns all members of `group_id` with their privileges. The default
+    /// implementation treats every member as [`Privilege::Edit`] and the
+    /// group owner (if any) as [`Privilege::Admin`].
+    ///
+    /// # Errors
+    /// Any store error.
+    async fn list_members_with_privileges(
+        &self,
+        group_id: &str,
+    ) -> Result<Vec<(String, Privilege)>, Error> {
+        let owner = self.get_group_owner(group_id).await?;
+        let mut members = Vec::new();
+        for member in self.list_members(group_id).await? {
+            let privilege = if owner.as_deref() == Some(member.as_str()) {
+                Privilege::Admin
+            } else {
+                Privilege::Edit
+            };
+            members.push((member, privilege));
+        }
+        Ok(members)
+    }
 
     /// Updates a principal's stored password hash. Used by the portal
     /// password-change flow (and anything else that must rotate a password

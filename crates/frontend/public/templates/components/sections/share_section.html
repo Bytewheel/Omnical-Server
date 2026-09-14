@@ -45,6 +45,22 @@
       {% if let Some(url) = entry.url %}
       <div class="metadata"><a href="{{ url }}">{{ url }}</a></div>
       {% endif %}
+      {% for invite in entry.invites %}
+      <div class="metadata">
+        Invite link{% if let Some(email) = invite.invited_email %} for {{ email }}{% endif %}
+        {% if let Some(created_at) = invite.created_at %} · created {{ created_at }}{% endif %}:
+        <a href="{{ invite.url }}">{{ invite.url }}</a>
+        <span class="invite-actions">
+          <button type="button" onclick="navigator.clipboard.writeText('{{ invite.url }}')">Copy</button>
+          {% if entry.can_invite %}
+          <form method="POST" action="/frontend/user/{{ user.id }}/share/invite/{{ invite.code }}/revoke">
+            <input type="hidden" name="principal" value="{{ entry.principal }}">
+            <button type="submit" class="delete">Revoke</button>
+          </form>
+          {% endif %}
+        </span>
+      </div>
+      {% endfor %}
       <div class="actions">
         {% if let Some(sub_id) = entry.sub_id %}
         {% if enabled %}
@@ -63,14 +79,18 @@
         </form>
         {% endif %}
         {% endif %}
-        {% if entry.kind == "calendar" %}
+        {% if entry.kind == "calendar" && entry.can_invite %}
         <form method="POST" action="/frontend/user/{{ user.id }}/share/invite" class="inline-form">
           <input type="hidden" name="principal" value="{{ entry.principal }}">
+          <input type="hidden" name="kind" value="{{ entry.kind }}">
+          <input type="hidden" name="collection_id" value="{{ entry.collection_id }}">
           <input type="email" name="email" placeholder="email@example.com" required>
           <button type="submit">Send invite</button>
         </form>
         <form method="POST" action="/frontend/user/{{ user.id }}/share/invite" class="inline-form">
           <input type="hidden" name="principal" value="{{ entry.principal }}">
+          <input type="hidden" name="kind" value="{{ entry.kind }}">
+          <input type="hidden" name="collection_id" value="{{ entry.collection_id }}">
           <button type="submit">Generate invite link</button>
         </form>
         {% endif %}

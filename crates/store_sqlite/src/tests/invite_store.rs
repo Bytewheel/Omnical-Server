@@ -28,7 +28,7 @@ mod tests {
 
         // Create (unbound, no expiry)
         let id = store
-            .add_invite("test-code-1", &None, &None, "admin", &None)
+            .add_invite("test-code-1", &None, &None, "admin", &None, &None, &None)
             .await
             .unwrap();
 
@@ -39,6 +39,8 @@ mod tests {
         assert!(invite.target_email.is_none());
         assert!(invite.expires_at.is_none());
         assert!(invite.used_by.is_none());
+        assert!(invite.collection_id.is_none());
+        assert!(invite.kind.is_none());
         assert!(
             invite.created_at.is_some(),
             "created_at is set by the database"
@@ -97,12 +99,14 @@ mod tests {
         let store = SqliteInviteStore::new(context.await.cal_store);
 
         store
-            .add_invite("dup-code", &None, &None, "admin", &None)
+            .add_invite("dup-code", &None, &None, "admin", &None, &None, &None)
             .await
             .unwrap();
         assert!(
             matches!(
-                store.add_invite("dup-code", &None, &None, "admin", &None).await,
+                store
+                    .add_invite("dup-code", &None, &None, "admin", &None, &None, &None)
+                    .await,
                 Err(rustical_store::Error::AlreadyExists)
             ),
             "a duplicated code must be rejected"
@@ -121,7 +125,15 @@ mod tests {
         // Expires in the past: pre-check reveals it, redeem refuses it.
         let past = "2026-09-01T00:00:00Z";
         store
-            .add_invite("expired", &None, &None, "admin", &Some(past.to_owned()))
+            .add_invite(
+                "expired",
+                &None,
+                &None,
+                "admin",
+                &Some(past.to_owned()),
+                &None,
+                &None,
+            )
             .await
             .unwrap();
         let invite = store.get_invite("expired").await.unwrap().unwrap();
@@ -137,7 +149,15 @@ mod tests {
         // Expires in the future: redeemable normally.
         let future = "2026-12-31T23:59:59Z";
         store
-            .add_invite("fresh", &None, &None, "admin", &Some(future.to_owned()))
+            .add_invite(
+                "fresh",
+                &None,
+                &None,
+                "admin",
+                &Some(future.to_owned()),
+                &None,
+                &None,
+            )
             .await
             .unwrap();
         store.redeem_invite("fresh", "user", NOW).await.unwrap();
@@ -166,6 +186,8 @@ mod tests {
                 &None,
                 "admin",
                 &None,
+                &None,
+                &None,
             )
             .await
             .unwrap();
@@ -178,5 +200,41 @@ mod tests {
             .redeem_invite("bound-code", "target@example.com", NOW)
             .await
             .unwrap();
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_invite_collection_binding(
+        #[future]
+        #[from(test_store_context)]
+        context: TestStoreContext,
+    ) {
+        let store = SqliteInviteStore::new(context.await.cal_store);
+
+        store
+            .add_invite(
+                "collection-bound",
+                &None,
+                &Some("testgroup".to_owned()),
+                "user",
+                &None,
+                &Some("groupcal".to_owned()),
+                &Some("calendar".to_owned()),
+            )
+            .await
+            .unwrap();
+        let invite = store.get_invite("collection-bound").await.unwrap().unwrap();
+        assert_eq!(invite.target_group.as_deref(), Some("testgroup"));
+        assert_eq!(invite.collection_id.as_deref(), Some("groupcal"));
+        assert_eq!(invite.kind.as_deref(), Some("calendar"));
+
+        // Collection columns are optional: a plain invite leaves them NULL.
+        store
+            .add_invite("plain-code", &None, &None, "admin", &None, &None, &None)
+            .await
+            .unwrap();
+        let invite = store.get_invite("plain-code").await.unwrap().unwrap();
+        assert!(invite.collection_id.is_none());
+        assert!(invite.kind.is_none());
     }
 }

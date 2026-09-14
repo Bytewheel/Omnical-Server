@@ -61,6 +61,14 @@ async fn create_collection<
         ));
     }
 
+    // Omnical §17.9.2: creating collections on the group is a write — `view`
+    // members may subscribe but not create.
+    if !principal.can_write(&req.group_id) {
+        return Err(ApiError::Forbidden(
+            "You have read-only (view) access to this group".into(),
+        ));
+    }
+
     let collection_id = uuid::Uuid::new_v4().to_string();
     let push_topic = uuid::Uuid::new_v4().to_string();
 

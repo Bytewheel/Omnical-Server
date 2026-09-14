@@ -148,6 +148,7 @@ pub async fn cmd_principals(args: PrincipalsArgs, config: Config) -> anyhow::Res
                         password,
                         memberships: vec![],
                         needs_password_change: false,
+                        privileges: Default::default(),
                     },
                     overwrite,
                 )

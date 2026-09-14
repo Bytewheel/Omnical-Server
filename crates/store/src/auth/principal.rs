@@ -1,10 +1,11 @@
 use crate::{
     Secret,
-    auth::{PrincipalType, UnauthorizedError},
+    auth::{PrincipalType, Privilege, UnauthorizedError},
 };
 use axum::extract::{FromRequestParts, OptionalFromRequestParts};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -32,6 +33,14 @@ pub struct Principal {
     /// changed.
     #[serde(default)]
     pub needs_password_change: bool,
+    /// Per-group privileges of the memberships (Omnical §17.9.2): maps a
+    /// group principal id to the [`Privilege`] the user holds there. Loaded
+    /// by the store; a missing entry means the pre-privilege default
+    /// ([`Privilege::Edit`]). When a user impersonates `user$group` the auth
+    /// middleware stamps the impersonated principal with `{group: privilege}`
+    /// so write checks inherit the acting user's privilege.
+    #[serde(default, skip_serializing)]
+    pub privileges: BTreeMap<String, Privilege>,
 }
 
 impl Principal {
@@ -57,6 +66,43 @@ impl Principal {
 
     pub fn memberships_without_self(&self) -> Vec<&str> {
         self.memberships.iter().map(String::as_str).collect()
+    }
+
+    /// The privilege the user holds over `principal`: `Admin` over
+    /// themselves, their stored privilege for memberships (defaulting to
+    /// `Edit`), `View` for principals they have no access to at all.
+    #[must_use]
+    pub fn privilege_for(&self, principal: &str) -> Privilege {
+        if self.id == principal {
+            return self
+                .privileges
+                .get(principal)
+                .copied()
+                .unwrap_or(Privilege::Admin);
+        }
+        if self.memberships.iter().any(|m| m == principal) {
+            return self
+                .privileges
+                .get(principal)
+                .copied()
+                .unwrap_or(Privilege::Edit);
+        }
+        Privilege::View
+    }
+
+    /// Whether the user may modify the collections of `principal` (own
+    /// collections, or memberships with `edit`/`admin` privilege).
+    #[must_use]
+    pub fn can_write(&self, principal: &str) -> bool {
+        self.privilege_for(principal).can_write()
+    }
+
+    /// Whether the user may manage `principal`'s members (invites, privilege
+    /// and membership changes): themselves, or a membership with `admin`
+    /// privilege.
+    #[must_use]
+    pub fn is_admin(&self, principal: &str) -> bool {
+        self.privilege_for(principal).can_admin()
     }
 }
 

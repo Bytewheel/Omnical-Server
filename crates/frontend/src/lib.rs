@@ -34,14 +34,20 @@ use crate::routes::{
     addressbook::{route_addressbook, route_addressbook_restore},
     app_token::{route_delete_app_token, route_post_app_token},
     calendar::{route_calendar, route_calendar_restore},
-    groups::{route_group_detail, route_group_new, route_groups},
+    groups::{
+        route_group_detail, route_group_member_privilege, route_group_member_remove,
+        route_group_new, route_groups,
+    },
     linked_platforms::{
         route_get_linked_platforms, route_post_linked_platforms_add,
         route_post_linked_platforms_refresh, route_post_linked_platforms_remove,
     },
     login::{route_get_login, route_post_login, route_post_logout},
     password::{password_change_gate, route_get_password_change, route_post_password_change},
-    share::{route_get_share, route_share_create, route_share_invite, route_share_revoke},
+    share::{
+        route_get_share, route_share_create, route_share_invite, route_share_invite_revoke,
+        route_share_revoke,
+    },
     timezones::route_timezones,
     user::{route_get_home, route_root, route_user_named},
 };
@@ -49,7 +55,7 @@ use crate::routes::{
 use assets::{Assets, EmbedService};
 use rustical_api::api_router;
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn frontend_router<
     AP: AuthenticationProvider,
     CS: CalendarStore,
@@ -122,12 +128,24 @@ pub fn frontend_router<
             "/{user}/share/invite",
             post(route_share_invite::<AP, CS, AS>),
         )
+        .route(
+            "/{user}/share/invite/{code}/revoke",
+            post(route_share_invite_revoke::<AP>),
+        )
         // Groups (Omnical §17.9)
         .route("/{user}/groups", get(route_groups::<AP, CS, AS>))
         .route("/{user}/groups/new", get(route_group_new))
         .route(
             "/{user}/groups/{group}",
             get(route_group_detail::<AP, CS, AS>),
+        )
+        .route(
+            "/{user}/groups/{group}/members/{member}/privilege",
+            post(route_group_member_privilege::<AP>),
+        )
+        .route(
+            "/{user}/groups/{group}/members/{member}/remove",
+            post(route_group_member_remove::<AP>),
         )
         // Forced password change (Omnical sharing: first-ever calendar/group
         // join until the password is rotated)

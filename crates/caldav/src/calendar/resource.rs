@@ -329,15 +329,20 @@ impl Resource for CalendarResource {
     }
 
     fn get_user_privileges(&self, user: &Principal) -> Result<UserPrivilegeSet, Self::Error> {
-        if self.cal.subscription_url.is_some() || self.read_only {
-            return Ok(UserPrivilegeSet::owner_write_properties(
-                user.is_principal(&self.cal.principal),
-            ));
+        let is_member = user.is_principal(&self.cal.principal);
+        if !is_member {
+            return Ok(UserPrivilegeSet::default());
         }
-
-        Ok(UserPrivilegeSet::owner_only(
-            user.is_principal(&self.cal.principal),
-        ))
+        // Omnical §17.9.2: `view` members keep read access but lose every
+        // write privilege (the central DELETE/PROPPATCH checks render a 403
+        // for read-only principals).
+        if !user.can_write(&self.cal.principal) {
+            return Ok(UserPrivilegeSet::read_only());
+        }
+        if self.cal.subscription_url.is_some() || self.read_only {
+            return Ok(UserPrivilegeSet::write_properties());
+        }
+        Ok(UserPrivilegeSet::all())
     }
 }
 

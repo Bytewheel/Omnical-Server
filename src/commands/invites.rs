@@ -108,7 +108,7 @@ pub async fn cmd_invites(args: InvitesArgs, config: Config) -> anyhow::Result<()
                 .transpose()
                 .context("invalid --expires value")?;
             let id = invite_store
-                .add_invite(&code, &email, &group, &created_by, &expires)
+                .add_invite(&code, &email, &group, &created_by, &expires, &None, &None)
                 .await?;
             eprintln!(
                 "Invite created (id: {id}, for: {}, group: {}, expiry: {})",

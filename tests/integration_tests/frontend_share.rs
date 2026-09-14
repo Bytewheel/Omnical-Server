@@ -29,6 +29,7 @@ async fn insert_group(context: &TestStoreContext, group_id: &str, displayname: &
                 password: None,
                 principal_type: PrincipalType::Group,
                 needs_password_change: false,
+                privileges: Default::default(),
             },
             false,
         )
@@ -57,6 +58,7 @@ async fn insert_user(context: &TestStoreContext, id: &str) {
                 password: None,
                 principal_type: PrincipalType::Individual,
                 needs_password_change: false,
+                privileges: Default::default(),
             },
             false,
         )
@@ -578,7 +580,7 @@ async fn test_share_generate_invite_link_without_email(
         "/frontend/user/user/share/invite",
         "user",
         "pass",
-        form("principal=testgroup"),
+        form("principal=testgroup&kind=calendar&collection_id=groupcal"),
     );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -596,6 +598,8 @@ async fn test_share_generate_invite_link_without_email(
         .expect("invite stored");
     assert_eq!(invite.target_email, None);
     assert_eq!(invite.target_group.as_deref(), Some("testgroup"));
+    assert_eq!(invite.collection_id.as_deref(), Some("groupcal"));
+    assert_eq!(invite.kind.as_deref(), Some("calendar"));
     assert_eq!(invite.created_by, "user");
 }
 
@@ -616,7 +620,7 @@ async fn test_share_invite_with_email_binds_target_email(
         "/frontend/user/user/share/invite",
         "user",
         "pass",
-        form("principal=testgroup&email=Alice%40example.com"),
+        form("principal=testgroup&kind=calendar&collection_id=groupcal&email=Alice%40example.com"),
     );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -633,6 +637,8 @@ async fn test_share_invite_with_email_binds_target_email(
         .expect("invite stored");
     assert_eq!(invite.target_email.as_deref(), Some("alice@example.com"));
     assert_eq!(invite.target_group.as_deref(), Some("testgroup"));
+    assert_eq!(invite.collection_id.as_deref(), Some("groupcal"));
+    assert_eq!(invite.kind.as_deref(), Some("calendar"));
 }
 
 #[rstest]
@@ -652,7 +658,7 @@ async fn test_share_invite_rejects_invalid_email(
         "/frontend/user/user/share/invite",
         "user",
         "pass",
-        form("principal=testgroup&email=notanemail"),
+        form("principal=testgroup&kind=calendar&collection_id=groupcal&email=notanemail"),
     );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -677,8 +683,237 @@ async fn test_share_invite_rejects_unowned_group(
         "/frontend/user/user/share/invite",
         "user",
         "pass",
-        form("principal=foreigngroup"),
+        form("principal=foreigngroup&kind=calendar&collection_id=foreigncal"),
     );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_invite_rejects_unknown_collection(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let invite_store = SqliteInviteStore::new(context.cal_store.clone());
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/invite",
+        "user",
+        "pass",
+        form("principal=user&kind=calendar&collection_id=nope"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    assert!(body.contains("No such calendar"));
+    assert!(body.contains("nope"));
+    assert!(invite_store.list_invites(true).await.unwrap().is_empty());
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_invite_rejects_addressbook_kind(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let invite_store = SqliteInviteStore::new(context.cal_store.clone());
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/invite",
+        "user",
+        "pass",
+        form("principal=user&kind=addressbook&collection_id=contacts"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    assert!(body.contains("Invites are only supported for calendars."));
+    assert!(invite_store.list_invites(true).await.unwrap().is_empty());
+}
+
+/// Mint an invite for one collection and read its code back from the store.
+async fn mint_invite(app: &axum::Router, invite_store: &SqliteInviteStore, form: &str) -> String {
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/invite",
+        "user",
+        "pass",
+        Some(form.to_owned()),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    let url = extract_register_url(&body);
+    let code = url
+        .trim_start_matches("https://public.example/register?code=")
+        .to_owned();
+    assert!(
+        invite_store.get_invite(&code).await.unwrap().is_some(),
+        "invite stored under {code}"
+    );
+    code
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_tile_shows_invite_link_and_revoke_removes_it(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let invite_store = SqliteInviteStore::new(context.cal_store.clone());
+    let app = get_app(context);
+
+    let code = mint_invite(
+        &app,
+        &invite_store,
+        "principal=testgroup&kind=calendar&collection_id=groupcal",
+    )
+    .await;
+    let url = format!("https://public.example/register?code={code}");
+
+    // On the next page load the link persists under the group-calendar tile
+    // (no one-time banner anymore).
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/share",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    assert!(body.contains("Invite link"));
+    assert!(body.contains(&url), "tile shows the link");
+    assert_eq!(
+        body.matches(&format!("/frontend/user/user/share/invite/{code}/revoke"))
+            .count(),
+        1,
+        "exactly one revoke form for the tile"
+    );
+
+    // Revoking the invite removes it from the tile immediately.
+    let req = request(
+        Method::POST,
+        &format!("/frontend/user/user/share/invite/{code}/revoke"),
+        "user",
+        "pass",
+        form("principal=testgroup"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/share",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let body = resp.extract_string().await;
+    assert!(!body.contains(&url), "revoked link is gone from the tile");
+    assert!(invite_store.get_invite(&code).await.unwrap().is_none());
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_tile_invite_scoped_to_its_collection(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    // A group calendar with the SAME id as the user's own calendar: an invite
+    // for one must not leak onto the other's tile.
+    context
+        .cal_store
+        .insert_calendar(Calendar {
+            id: "personal".to_owned(),
+            principal: "testgroup".to_owned(),
+            meta: CalendarMetadata {
+                displayname: Some("Group Personal".to_owned()),
+                order: 0,
+                description: None,
+                color: None,
+            },
+            timezone_id: None,
+            deleted_at: None,
+            synctoken: 0,
+            subscription_url: None,
+            push_topic: "share-test-group-personal".to_owned(),
+            components: vec![CalendarObjectType::Event],
+        })
+        .await
+        .unwrap();
+    let invite_store = SqliteInviteStore::new(context.cal_store.clone());
+    let app = get_app(context);
+
+    let own_code = mint_invite(
+        &app,
+        &invite_store,
+        "principal=user&kind=calendar&collection_id=personal",
+    )
+    .await;
+    let group_code = mint_invite(
+        &app,
+        &invite_store,
+        "principal=testgroup&kind=calendar&collection_id=personal",
+    )
+    .await;
+    let own_url = format!("https://public.example/register?code={own_code}");
+    let group_url = format!("https://public.example/register?code={group_code}");
+
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/share",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let body = resp.extract_string().await;
+    assert!(body.contains(&own_url));
+    assert!(body.contains(&group_url));
+
+    // Each tile revokes only its own invite.
+    let req = request(
+        Method::POST,
+        &format!("/frontend/user/user/share/invite/{own_code}/revoke"),
+        "user",
+        "pass",
+        form("principal=user"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/share",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    let body = resp.extract_string().await;
+    assert!(!body.contains(&own_url));
+    assert!(
+        body.contains(&group_url),
+        "the other tile's invite survives"
+    );
 }

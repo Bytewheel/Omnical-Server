@@ -37,6 +37,7 @@ async fn insert_user_with_password(context: &TestStoreContext, id: &str, passwor
                 password: Some(Secret::from(hash_password(password))),
                 memberships: vec![],
                 needs_password_change: false,
+                privileges: Default::default(),
             },
             false,
         )

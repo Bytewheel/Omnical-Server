@@ -55,7 +55,16 @@ pub async fn route_delete<R: ResourceService>(
     // Kind of a bodge since we don't get unbind from the parent
     let privileges = resource.get_user_privileges(principal)?;
     if !privileges.has(&UserPrivilege::WriteProperties) {
-        return Err(Error::Unauthorized.into());
+        // Omnical §17.9.2: an authenticated principal that can READ the
+        // resource but lacks write privileges (a `view` member) gets a clean
+        // 403 so read-only clients do not retry the write; principals with
+        // no privileges at all are not members and keep the 401.
+        return Err(if privileges.has(&UserPrivilege::Read) {
+            Error::Forbidden
+        } else {
+            Error::Unauthorized
+        }
+        .into());
     }
 
     if let Some(if_match) = if_match

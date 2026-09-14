@@ -92,8 +92,14 @@ impl Resource for CalendarObjectResource {
     }
 
     fn get_user_privileges(&self, user: &Principal) -> Result<UserPrivilegeSet, Self::Error> {
-        Ok(UserPrivilegeSet::owner_only(
-            user.is_principal(&self.principal),
-        ))
+        // Omnical §17.9.2: `view` members read but cannot write.
+        if !user.is_principal(&self.principal) {
+            return Ok(UserPrivilegeSet::default());
+        }
+        if user.can_write(&self.principal) {
+            Ok(UserPrivilegeSet::all())
+        } else {
+            Ok(UserPrivilegeSet::read_only())
+        }
     }
 }

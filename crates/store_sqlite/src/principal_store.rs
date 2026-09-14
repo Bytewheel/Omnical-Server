@@ -5,9 +5,10 @@ use pbkdf2::Params;
 use rand::rngs::SysRng;
 use rustical_store::{
     Error, Secret,
-    auth::{AppToken, AuthenticationProvider, Principal},
+    auth::{AppToken, AuthenticationProvider, Principal, Privilege},
 };
 use sqlx::{Row, SqlitePool, types::Json};
+use std::collections::BTreeMap;
 use tracing::instrument;
 
 #[derive(Debug, Clone, Constructor)]
@@ -34,6 +35,7 @@ fn principal_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Principal, Error>
             .flatten()
             .collect(),
         needs_password_change: row.get("needs_password_change"),
+        privileges: BTreeMap::new(),
     })
 }
 
@@ -57,10 +59,38 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         .fetch_all(&self.db)
         .await
         .map_err(crate::Error::from)?;
-        Ok(rows
+
+        // Omnical §17.9.2: attach each principal's group privileges (one
+        // bulk query; merging into the memberships JSON would need a second
+        // aggregate join and can silently drop rows).
+        let privilege_rows = sqlx::query("SELECT group_id, member_id, privilege FROM group_members")
+            .fetch_all(&self.db)
+            .await
+            .map_err(crate::Error::from)?;
+        let mut privileges_by_member: BTreeMap<String, BTreeMap<String, Privilege>> =
+            BTreeMap::new();
+        for row in privilege_rows {
+            let member_id: String = row.get("member_id");
+            let group_id: String = row.get("group_id");
+            let privilege: String = row.get("privilege");
+            if let Ok(privilege) = privilege.parse() {
+                privileges_by_member
+                    .entry(member_id)
+                    .or_default()
+                    .insert(group_id, privilege);
+            }
+        }
+
+        let mut principals = rows
             .into_iter()
             .map(|row| principal_from_row(&row))
-            .collect::<Result<Vec<_>, _>>()?)
+            .collect::<Result<Vec<_>, _>>()?;
+        for principal in &mut principals {
+            principal.privileges = privileges_by_member
+                .remove(&principal.id)
+                .unwrap_or_default();
+        }
+        Ok(principals)
     }
 
     #[instrument]
@@ -79,7 +109,26 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         .fetch_optional(&self.db)
         .await
         .map_err(crate::Error::from)?;
-        Ok(row.map(|row| principal_from_row(&row)).transpose()?)
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut principal = principal_from_row(&row)?;
+
+        let privilege_rows = sqlx::query(
+            "SELECT group_id, privilege FROM group_members WHERE member_id = ?",
+        )
+        .bind(id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(crate::Error::from)?;
+        for privilege_row in privilege_rows {
+            let group_id: String = privilege_row.get("group_id");
+            let privilege: String = privilege_row.get("privilege");
+            if let Ok(privilege) = privilege.parse() {
+                principal.privileges.insert(group_id, privilege);
+            }
+        }
+        Ok(Some(principal))
     }
 
     #[instrument]
@@ -218,6 +267,25 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         .await
         .map_err(crate::Error::from)?;
 
+        // Omnical §17.9.2: seed the default `edit` privilege row for group
+        // memberships (an existing row — e.g. the owner's `admin` row seeded
+        // by `set_group_owner` — is left untouched).
+        sqlx::query(
+            r#"
+            INSERT INTO group_members (group_id, member_id, privilege)
+            SELECT ?, ?, 'edit'
+            FROM principals
+            WHERE id = ? AND principal_type = 'GROUP'
+            ON CONFLICT(group_id, member_id) DO NOTHING
+            "#,
+        )
+        .bind(member_of)
+        .bind(principal)
+        .bind(member_of)
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::Error::from)?;
+
         // First-ever join of a real user ⇒ one-time password-change nudge on
         // the user's next portal login.
         if membership_count == 0 && has_password && result.rows_affected() == 1 {
@@ -271,15 +339,170 @@ impl AuthenticationProvider for SqlitePrincipalStore {
 
     #[instrument]
     async fn remove_membership(&self, principal: &str, member_of: &str) -> Result<(), Error> {
+        let mut tx = self.db.begin().await.map_err(crate::Error::from)?;
+
+        // Omnical §17.9.2 invariant: the last admin of a group cannot be
+        // removed.
+        let info = sqlx::query(
+            r#"
+            SELECT
+                (SELECT privilege FROM group_members
+                 WHERE group_id = ? AND member_id = ?) AS privilege,
+                (SELECT COUNT(*) FROM group_members
+                 WHERE group_id = ? AND member_id != ? AND privilege = 'admin')
+                 AS other_admins
+            "#,
+        )
+        .bind(member_of)
+        .bind(principal)
+        .bind(member_of)
+        .bind(principal)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(crate::Error::from)?;
+        let privilege: Option<String> = info.get("privilege");
+        let other_admins: i64 = info.get("other_admins");
+        if privilege.as_deref() == Some("admin") && other_admins == 0 {
+            return Err(Error::LastAdmin);
+        }
+
         sqlx::query!(
             r#"DELETE FROM memberships WHERE (principal, member_of) = (?, ?)"#,
             principal,
             member_of
         )
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await
         .map_err(crate::Error::from)?;
+
+        sqlx::query!(
+            r#"DELETE FROM group_members WHERE (group_id, member_id) = (?, ?)"#,
+            member_of,
+            principal
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::Error::from)?;
+
+        tx.commit().await.map_err(crate::Error::from)?;
         Ok(())
+    }
+
+    #[instrument]
+    async fn get_privilege(&self, member_id: &str, group_id: &str) -> Result<Privilege, Error> {
+        let row = sqlx::query(
+            "SELECT privilege FROM group_members WHERE group_id = ? AND member_id = ?",
+        )
+        .bind(group_id)
+        .bind(member_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(crate::Error::from)?;
+        let privilege = row
+            .map(|row| row.get::<String, _>("privilege"))
+            .unwrap_or_else(|| Privilege::Edit.as_str().to_owned());
+        privilege.parse().map_err(Error::Other)
+    }
+
+    #[instrument]
+    async fn set_privilege(
+        &self,
+        member_id: &str,
+        group_id: &str,
+        privilege: Privilege,
+    ) -> Result<(), Error> {
+        let mut tx = self.db.begin().await.map_err(crate::Error::from)?;
+
+        // Omnical §17.9.2 invariants: the owner is an implicit admin that can
+        // never be demoted; the last remaining admin cannot be demoted.
+        let owner: Option<String> = sqlx::query("SELECT owner_id FROM group_owners WHERE group_id = ?")
+            .bind(group_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(crate::Error::from)?
+            .map(|row| row.get("owner_id"));
+        if privilege != Privilege::Admin && owner.as_deref() == Some(member_id) {
+            return Err(Error::OwnerNotDemotable);
+        }
+        let current: Option<String> =
+            sqlx::query("SELECT privilege FROM group_members WHERE group_id = ? AND member_id = ?")
+                .bind(group_id)
+                .bind(member_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(crate::Error::from)?
+                .map(|row| row.get("privilege"));
+        if privilege != Privilege::Admin && current.as_deref() == Some("admin") {
+            let other_admins: i64 = sqlx::query(
+                "SELECT COUNT(*) FROM group_members WHERE group_id = ? AND member_id != ? AND privilege = 'admin'",
+            )
+            .bind(group_id)
+            .bind(member_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(crate::Error::from)?
+            .get("COUNT(*)");
+            if other_admins == 0 {
+                return Err(Error::LastAdmin);
+            }
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO group_members (group_id, member_id, privilege)
+            VALUES (?, ?, ?)
+            ON CONFLICT(group_id, member_id)
+            DO UPDATE SET privilege = excluded.privilege
+            "#,
+        )
+        .bind(group_id)
+        .bind(member_id)
+        .bind(privilege.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::Error::from)?;
+
+        tx.commit().await.map_err(crate::Error::from)?;
+        Ok(())
+    }
+
+    #[instrument]
+    async fn list_members_with_privileges(
+        &self,
+        group_id: &str,
+    ) -> Result<Vec<(String, Privilege)>, Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT m.principal AS member_id,
+                   COALESCE(gm.privilege, 'edit') AS privilege,
+                   o.owner_id IS NOT NULL AS is_owner
+            FROM memberships m
+            LEFT JOIN group_members gm
+                ON gm.group_id = m.member_of AND gm.member_id = m.principal
+            LEFT JOIN group_owners o
+                ON o.group_id = m.member_of AND o.owner_id = m.principal
+            WHERE m.member_of = ?
+            ORDER BY m.principal
+            "#,
+        )
+        .bind(group_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(crate::Error::from)?;
+
+        let mut members = Vec::with_capacity(rows.len());
+        for row in rows {
+            let member_id: String = row.get("member_id");
+            let is_owner: bool = row.get("is_owner");
+            let privilege: String = row.get("privilege");
+            let privilege = if is_owner {
+                Privilege::Admin
+            } else {
+                privilege.parse().map_err(Error::Other)?
+            };
+            members.push((member_id, privilege));
+        }
+        Ok(members)
     }
 
     #[instrument]
@@ -335,12 +558,29 @@ impl AuthenticationProvider for SqlitePrincipalStore {
 
     #[instrument]
     async fn set_group_owner(&self, group_id: &str, owner_id: &str) -> Result<(), Error> {
+        let mut tx = self.db.begin().await.map_err(crate::Error::from)?;
         sqlx::query(r#"INSERT INTO group_owners (group_id, owner_id) VALUES (?, ?)"#)
             .bind(group_id)
             .bind(owner_id)
-            .execute(&self.db)
+            .execute(&mut *tx)
             .await
             .map_err(crate::Error::from)?;
+        // Omnical §17.9.2: the owner is an implicit admin (upsert so the row
+        // wins even when the membership — and its default `edit` row — was
+        // created first).
+        sqlx::query(
+            r#"
+            INSERT INTO group_members (group_id, member_id, privilege)
+            VALUES (?, ?, 'admin')
+            ON CONFLICT(group_id, member_id) DO UPDATE SET privilege = 'admin'
+            "#,
+        )
+        .bind(group_id)
+        .bind(owner_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::Error::from)?;
+        tx.commit().await.map_err(crate::Error::from)?;
         Ok(())
     }
 

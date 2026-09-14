@@ -89,7 +89,14 @@ pub async fn route_proppatch<R: ResourceService>(
         .await?;
     let privileges = resource.get_user_privileges(principal)?;
     if !privileges.has(&UserPrivilege::WriteProperties) {
-        return Err(Error::Unauthorized.into());
+        // Omnical §17.9.2: see `route_delete` — `view` members (read access
+        // without write) get a clean 403, non-members keep the 401.
+        return Err(if privileges.has(&UserPrivilege::Read) {
+            Error::Forbidden
+        } else {
+            Error::Unauthorized
+        }
+        .into());
     }
 
     let mut props_ok = Vec::new();

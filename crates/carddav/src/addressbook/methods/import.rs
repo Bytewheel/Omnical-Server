@@ -24,6 +24,10 @@ pub async fn route_import<AS: AddressbookStore, DP: DavPushStore>(
     if !user.is_principal(&principal) {
         return Err(Error::Unauthorized);
     }
+    // Omnical §17.9.2: `view` members are members but may not write.
+    if !user.can_write(&principal) {
+        return Err(Error::DavError(rustical_dav::Error::Forbidden));
+    }
 
     let parser = VcardParser::from_slice(body.as_bytes());
 

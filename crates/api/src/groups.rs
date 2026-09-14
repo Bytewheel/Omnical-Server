@@ -129,6 +129,7 @@ async fn create_group<
         password: None,
         memberships: vec![],
         needs_password_change: false,
+        privileges: Default::default(),
     };
 
     state
@@ -248,15 +249,20 @@ async fn delete_group<
     Path(group_id): Path<String>,
     principal: Principal,
 ) -> Result<impl IntoResponse, ApiError> {
-    let owner = state
+    if state
         .auth_provider
         .get_group_owner(&group_id)
         .await?
-        .ok_or_else(|| ApiError::NotFound("Group not found".into()))?;
+        .is_none()
+    {
+        return Err(ApiError::NotFound("Group not found".into()));
+    }
 
-    if owner != principal.id {
+    // Omnical §17.9.2: deleting a group is admin-only (the owner is an
+    // implicit admin).
+    if !principal.is_admin(&group_id) {
         return Err(ApiError::Forbidden(
-            "Only the owner can delete this group".into(),
+            "Only an admin can delete this group".into(),
         ));
     }
 

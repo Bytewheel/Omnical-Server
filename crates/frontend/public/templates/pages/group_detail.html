@@ -5,7 +5,11 @@
 {% block content %}
 <h1>{{ displayname }}</h1>
 
-{% if owner %}
+{% if let Some(error) = error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+{% if admin %}
 <div class="actions">
   <form action="/frontend/api/v1/groups/{{ group_id }}" method="POST"
     onsubmit="return confirm('Delete this group and all its collections?')">
@@ -19,19 +23,30 @@
 <ul>
   {% for member in members %}
   <li>
-    {{ member.displayname.as_deref().unwrap_or(&member.id) }}
-    {% if owner && member.id != user.id %}
-    <form action="/frontend/api/v1/groups/{{ group_id }}/members/{{ member.id }}" method="POST"
+    {{ member.principal.displayname.as_deref().unwrap_or(&member.principal.id) }}
+    {% if admin && member.principal.id != user.id %}
+    <form method="POST"
+      action="/frontend/user/{{ user.id }}/groups/{{ group_id }}/members/{{ member.principal.id }}/privilege"
       style="display:inline">
-      <input type="hidden" name="_method" value="DELETE">
+      <select name="privilege" onchange="this.form.submit()">
+        <option value="view" {% if member.privilege.as_str() == "view" %}selected{% endif %}>View</option>
+        <option value="edit" {% if member.privilege.as_str() == "edit" %}selected{% endif %}>Edit</option>
+        <option value="admin" {% if member.privilege.as_str() == "admin" %}selected{% endif %}>Admin</option>
+      </select>
+    </form>
+    <form method="POST"
+      action="/frontend/user/{{ user.id }}/groups/{{ group_id }}/members/{{ member.principal.id }}/remove"
+      style="display:inline">
       <button type="submit" class="delete">Remove</button>
     </form>
+    {% else %}
+    <span class="chip">{{ member.privilege }}</span>
     {% endif %}
   </li>
   {% endfor %}
 </ul>
 
-{% if owner %}
+{% if admin %}
 <h3>Add Member</h3>
 <member-picker group-id="{{ group_id }}"></member-picker>
 {% endif %}

@@ -4,16 +4,18 @@ use crate::pages::user::UserPage;
 use crate::pages::{DefaultLayoutData, user::Section};
 use askama::Template;
 use askama_web::WebTemplate;
+use axum::Form;
 use axum::{
     Extension,
     extract::Path,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
 };
 use http::StatusCode;
 use rustical_store::{
     AddressbookStore, CalendarStore, PrefixedCalendarStore,
-    auth::{AuthenticationProvider, Principal},
+    auth::{AuthenticationProvider, Principal, Privilege},
 };
+use serde::Deserialize;
 
 impl Section for GroupsSection {
     fn name() -> &'static str {
@@ -24,7 +26,9 @@ impl Section for GroupsSection {
 pub struct GroupInfo {
     pub id: String,
     pub displayname: String,
-    pub owner: bool,
+    /// Whether the acting user may manage this group's members (Omnical
+    /// §17.9.2: `admin` privilege; the owner is an implicit admin).
+    pub admin: bool,
     pub member_count: usize,
     pub collection_count: usize,
 }
@@ -58,12 +62,7 @@ pub async fn route_groups<
 
     let mut groups = Vec::new();
     for (group_id, displayname) in raw_groups {
-        let owner = auth_provider
-            .get_group_owner(&group_id)
-            .await
-            .unwrap_or(None)
-            .as_deref()
-            == Some(&user.id);
+        let admin = user.is_admin(&group_id);
 
         let members = auth_provider
             .list_members(&group_id)
@@ -84,7 +83,7 @@ pub async fn route_groups<
         groups.push(GroupInfo {
             id: group_id,
             displayname,
-            owner,
+            admin,
             member_count: members.len(),
             collection_count: cal_count + addr_count,
         });
@@ -119,21 +118,96 @@ pub async fn route_group_new(Path(user_id): Path<String>, user: Principal) -> im
     GroupNewPage { user }.into_response()
 }
 
+/// One member row of the group detail page: the principal plus their
+/// privilege (Omnical §17.9.2).
+pub struct GroupMember {
+    pub principal: Principal,
+    pub privilege: Privilege,
+}
+
 #[derive(Template, WebTemplate)]
 #[template(path = "pages/group_detail.html")]
 struct GroupDetailPage {
     user: Principal,
     group_id: String,
     displayname: String,
-    owner: bool,
-    members: Vec<Principal>,
+    /// Whether the acting user may manage this group (delete, add/remove
+    /// members, change privileges).
+    admin: bool,
+    members: Vec<GroupMember>,
     collections: Vec<String>,
+    error: Option<String>,
 }
 
 impl DefaultLayoutData for GroupDetailPage {
     fn get_user(&self) -> Option<&Principal> {
         Some(&self.user)
     }
+}
+
+/// Shared builder for the group detail page; `error` renders an error banner
+/// (used by the member-management POST routes).
+async fn group_detail_page<
+    AP: AuthenticationProvider,
+    CS: CalendarStore,
+    AS: AddressbookStore + PrefixedCalendarStore,
+>(
+    auth_provider: &Arc<AP>,
+    cal_store: &Arc<CS>,
+    addr_store: &Arc<AS>,
+    user: &Principal,
+    group_id: &str,
+    error: Option<String>,
+) -> Result<Response, StatusCode> {
+    let group = auth_provider
+        .get_principal(group_id)
+        .await
+        .unwrap_or(None)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let mut members = Vec::new();
+    for (member_id, privilege) in auth_provider
+        .list_members_with_privileges(group_id)
+        .await
+        .unwrap_or_default()
+    {
+        let Some(principal) = auth_provider
+            .get_principal(&member_id)
+            .await
+            .unwrap_or(None)
+        else {
+            continue;
+        };
+        members.push(GroupMember {
+            principal,
+            privilege,
+        });
+    }
+
+    let calendars = cal_store
+        .get_calendars(group_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| format!("calendars/{}", c.id));
+    let addressbooks = addr_store
+        .get_addressbooks(group_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| format!("addressbooks/{}", a.id));
+    let collections: Vec<String> = calendars.chain(addressbooks).collect();
+
+    Ok(GroupDetailPage {
+        user: user.clone(),
+        displayname: group.displayname.unwrap_or_else(|| group_id.to_owned()),
+        group_id: group_id.to_owned(),
+        admin: user.is_admin(group_id),
+        members,
+        collections,
+        error,
+    }
+    .into_response())
 }
 
 pub async fn route_group_detail<
@@ -150,52 +224,96 @@ pub async fn route_group_detail<
     if user_id != user.id {
         return Err(StatusCode::UNAUTHORIZED);
     }
+    group_detail_page(
+        &auth_provider,
+        &cal_store,
+        &addr_store,
+        &user,
+        &group_id,
+        None,
+    )
+    .await
+}
 
-    let group = auth_provider
-        .get_principal(&group_id)
-        .await
-        .unwrap_or(None)
-        .ok_or(StatusCode::NOT_FOUND)?;
+#[derive(Debug, Deserialize)]
+pub struct SetPrivilegeForm {
+    pub privilege: String,
+}
 
-    let owner = auth_provider
-        .get_group_owner(&group_id)
-        .await
-        .unwrap_or(None)
-        .as_deref()
-        == Some(&user.id);
-
-    let member_ids = auth_provider
-        .list_members(&group_id)
-        .await
-        .unwrap_or_default();
-    let mut members = Vec::new();
-    for id in &member_ids {
-        if let Some(p) = auth_provider.get_principal(id).await.unwrap_or(None) {
-            members.push(p);
-        }
+/// POST /{user}/groups/{group}/members/{member}/privilege — change a
+/// member's privilege. Admin-only; the store upholds the last-admin and
+/// owner-never-demotable invariants.
+pub async fn route_group_member_privilege<AP: AuthenticationProvider>(
+    Path((user_id, group_id, member_id)): Path<(String, String, String)>,
+    Extension(auth_provider): Extension<Arc<AP>>,
+    user: Principal,
+    Form(form): Form<SetPrivilegeForm>,
+) -> Response {
+    if user_id != user.id {
+        return StatusCode::UNAUTHORIZED.into_response();
     }
-
-    let calendars = cal_store
-        .get_calendars(&group_id)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|c| format!("calendars/{}", c.id));
-    let addressbooks = addr_store
-        .get_addressbooks(&group_id)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|a| format!("addressbooks/{}", a.id));
-    let collections: Vec<String> = calendars.chain(addressbooks).collect();
-
-    Ok(GroupDetailPage {
-        user,
-        displayname: group.displayname.unwrap_or_else(|| group_id.clone()),
-        group_id,
-        owner,
-        members,
-        collections,
+    if !user.is_admin(&group_id) {
+        return (
+            StatusCode::FORBIDDEN,
+            "Only an admin can change member privileges.",
+        )
+            .into_response();
     }
-    .into_response())
+    if member_id == user.id {
+        return (
+            StatusCode::FORBIDDEN,
+            "You cannot change your own privilege.",
+        )
+            .into_response();
+    }
+    let Ok(privilege) = form.privilege.parse::<Privilege>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Invalid privilege — must be view, edit or admin.",
+        )
+            .into_response();
+    };
+    if let Err(err) = auth_provider
+        .set_privilege(&member_id, &group_id, privilege)
+        .await
+    {
+        return Redirect::to(&format!(
+            "/frontend/user/{user_id}/groups/{group_id}?error={}",
+            percent_encoding::utf8_percent_encode(
+                &err.to_string(),
+                percent_encoding::NON_ALPHANUMERIC
+            )
+        ))
+        .into_response();
+    }
+    Redirect::to(&format!("/frontend/user/{user_id}/groups/{group_id}")).into_response()
+}
+
+/// POST /{user}/groups/{group}/members/{member}/remove — remove a member.
+/// Admin-only; removing the last admin is rejected by the store.
+pub async fn route_group_member_remove<AP: AuthenticationProvider>(
+    Path((user_id, group_id, member_id)): Path<(String, String, String)>,
+    Extension(auth_provider): Extension<Arc<AP>>,
+    user: Principal,
+) -> Response {
+    if user_id != user.id {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !user.is_admin(&group_id) {
+        return (StatusCode::FORBIDDEN, "Only an admin can remove members.").into_response();
+    }
+    if member_id == user.id {
+        return (StatusCode::FORBIDDEN, "You cannot remove yourself.").into_response();
+    }
+    if let Err(err) = auth_provider.remove_membership(&member_id, &group_id).await {
+        return Redirect::to(&format!(
+            "/frontend/user/{user_id}/groups/{group_id}?error={}",
+            percent_encoding::utf8_percent_encode(
+                &err.to_string(),
+                percent_encoding::NON_ALPHANUMERIC
+            )
+        ))
+        .into_response();
+    }
+    Redirect::to(&format!("/frontend/user/{user_id}/groups/{group_id}")).into_response()
 }

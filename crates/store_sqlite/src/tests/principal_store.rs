@@ -29,6 +29,7 @@ mod tests {
                     password: None,
                     memberships: vec![],
                     needs_password_change: false,
+                    privileges: Default::default(),
                 },
                 false,
             )
@@ -48,6 +49,7 @@ mod tests {
                     password: Some(Secret::from(hash_password(password))),
                     memberships: vec![],
                     needs_password_change: false,
+                    privileges: Default::default(),
                 },
                 false,
             )
@@ -126,6 +128,7 @@ mod tests {
                     password: None,
                     memberships: vec![],
                     needs_password_change: false,
+                    privileges: Default::default(),
                 },
                 false,
             )

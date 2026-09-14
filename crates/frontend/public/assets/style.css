@@ -378,6 +378,22 @@ span.chip {
   margin: 0 .3em;
 }
 
+.invite-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: .4em;
+  margin-left: .5em;
+
+  form {
+    display: inline-flex;
+  }
+
+  button {
+    padding: .2em .6em;
+    font-size: .8em;
+  }
+}
+
 .tab-radio {
   display: grid;
   grid-auto-flow: column;

@@ -476,6 +476,7 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
         password: Some(Secret::from(password_hash)),
         memberships: vec![],
         needs_password_change: false,
+        privileges: Default::default(),
     };
     if let Err(err) = state.auth_provider.insert_principal(principal, false).await {
         // A concurrent registration won the race for the same email.
@@ -1067,6 +1068,8 @@ mod tests {
                 &None,
                 "test",
                 &None,
+                &None,
+                &None,
             )
             .await
             .unwrap();
@@ -1140,6 +1143,8 @@ mod tests {
                 &None,
                 "test",
                 &None,
+                &None,
+                &None,
             )
             .await
             .unwrap();
@@ -1165,7 +1170,7 @@ mod tests {
         let rig = TestRig::new(base_config()).await;
         rig.get_form().await;
         rig.invite_store
-            .add_invite("single-use", &None, &None, "test", &None)
+            .add_invite("single-use", &None, &None, "test", &None, &None, &None)
             .await
             .unwrap();
         let fields = &[
@@ -1217,7 +1222,7 @@ mod tests {
         // Used code.
         rig.get_form().await;
         rig.invite_store
-            .add_invite("used-zz", &None, &None, "test", &None)
+            .add_invite("used-zz", &None, &None, "test", &None, &None, &None)
             .await
             .unwrap();
         rig.invite_store
@@ -1244,6 +1249,8 @@ mod tests {
                 &None,
                 "test",
                 &Some("2000-01-01T00:00:00Z".to_owned()),
+                &None,
+                &None,
             )
             .await
             .unwrap();
@@ -1271,6 +1278,8 @@ mod tests {
                 &Some("expected@example.com".to_owned()),
                 &None,
                 "test",
+                &None,
+                &None,
                 &None,
             )
             .await
@@ -1300,7 +1309,7 @@ mod tests {
         let rig = TestRig::new(base_config()).await;
         rig.get_form().await;
         rig.invite_store
-            .add_invite("repeat-1", &None, &None, "test", &None)
+            .add_invite("repeat-1", &None, &None, "test", &None, &None, &None)
             .await
             .unwrap();
         rig.principal_store
@@ -1312,6 +1321,7 @@ mod tests {
                     password: None,
                     memberships: vec![],
                     needs_password_change: false,
+                    privileges: Default::default(),
                 },
                 false,
             )

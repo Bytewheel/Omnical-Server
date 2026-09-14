@@ -101,8 +101,16 @@ where
                     // Make sure user is authorized to impersonate another principal
                     if let Some(impersonating) = impersonating {
                         if user.memberships().contains(&impersonating)
-                            && let Ok(Some(impersonating)) = ap.get_principal(impersonating).await
+                            && let Ok(Some(mut impersonating)) = ap.get_principal(impersonating).await
                         {
+                            // Omnical §17.9.2: `user$group` impersonation
+                            // inherits the acting user's privilege — stamp
+                            // the impersonated principal so write checks see
+                            // the real privilege instead of "self = admin".
+                            impersonating.privileges.insert(
+                                impersonating.id.to_owned(),
+                                user.privilege_for(&impersonating.id),
+                            );
                             request.extensions_mut().insert(impersonating);
                         }
                     } else {

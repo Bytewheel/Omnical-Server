@@ -243,6 +243,7 @@ async fn test_report_email_principal(
                 password: None,
                 principal_type: PrincipalType::Individual,
                 needs_password_change: false,
+                privileges: Default::default(),
             },
             false,
         )

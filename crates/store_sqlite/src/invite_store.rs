@@ -39,6 +39,11 @@ fn row_to_invite(row: &sqlx::sqlite::SqliteRow) -> Invite {
             .try_get::<Option<String>, _>("target_group")
             .ok()
             .flatten(),
+        collection_id: row
+            .try_get::<Option<String>, _>("collection_id")
+            .ok()
+            .flatten(),
+        kind: row.try_get::<Option<String>, _>("kind").ok().flatten(),
         created_by: row.get("created_by"),
         created_at: row
             .try_get::<Option<String>, _>("created_at")
@@ -63,13 +68,16 @@ impl InviteStore for SqliteInviteStore {
         target_group: &Option<String>,
         created_by: &str,
         expires_at: &Option<String>,
+        collection_id: &Option<String>,
+        kind: &Option<String>,
     ) -> Result<String, Error> {
         let id = uuid::Uuid::new_v4().to_string();
         // A duplicated code surfaces as `Error::AlreadyExists` through the
         // `From<sqlx::Error>` conversion (unique-violation mapping).
         sqlx::query(
-            "INSERT INTO invites (id, code, target_email, target_group, created_by, expires_at) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO invites (id, code, target_email, target_group, created_by, expires_at, \
+                    collection_id, kind) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(code)
@@ -77,6 +85,8 @@ impl InviteStore for SqliteInviteStore {
         .bind(target_group)
         .bind(created_by)
         .bind(expires_at)
+        .bind(collection_id)
+        .bind(kind)
         .execute(self.cal_store.db_pool())
         .await
         .map_err(crate::Error::from)?;
@@ -86,8 +96,8 @@ impl InviteStore for SqliteInviteStore {
     #[instrument]
     async fn get_invite(&self, code: &str) -> Result<Option<Invite>, Error> {
         let row = sqlx::query(
-            "SELECT id, code, target_email, target_group, created_by, created_at, expires_at, \
-                    used_by, used_at \
+            "SELECT id, code, target_email, target_group, collection_id, kind, created_by, \
+                    created_at, expires_at, used_by, used_at \
              FROM invites WHERE code = ?",
         )
         .bind(code)
@@ -123,15 +133,15 @@ impl InviteStore for SqliteInviteStore {
     async fn list_invites(&self, include_used: bool) -> Result<Vec<Invite>, Error> {
         let rows = if include_used {
             sqlx::query(
-                "SELECT id, code, target_email, target_group, created_by, created_at, expires_at, \
-                        used_by, used_at \
+                "SELECT id, code, target_email, target_group, collection_id, kind, created_by, \
+                        created_at, expires_at, used_by, used_at \
                  FROM invites ORDER BY created_at, id",
             )
             .fetch_all(self.cal_store.db_pool())
         } else {
             sqlx::query(
-                "SELECT id, code, target_email, target_group, created_by, created_at, expires_at, \
-                        used_by, used_at \
+                "SELECT id, code, target_email, target_group, collection_id, kind, created_by, \
+                        created_at, expires_at, used_by, used_at \
                  FROM invites WHERE used_by IS NULL ORDER BY created_at, id",
             )
             .fetch_all(self.cal_store.db_pool())

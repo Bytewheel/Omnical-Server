@@ -34,6 +34,7 @@ async fn setup_group(context: &TestStoreContext) -> (String, String) {
                         password: None,
                         principal_type: PrincipalType::Individual,
                         needs_password_change: false,
+                        privileges: Default::default(),
                     },
                     false,
                 )
@@ -64,6 +65,7 @@ async fn setup_group(context: &TestStoreContext) -> (String, String) {
                     password: None,
                     principal_type: PrincipalType::Group,
                     needs_password_change: false,
+                    privileges: Default::default(),
                 },
                 false,
             )

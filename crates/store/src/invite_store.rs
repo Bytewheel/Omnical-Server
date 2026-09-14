@@ -15,6 +15,11 @@ pub struct Invite {
     pub target_email: Option<String>,
     /// When set, the redeeming user is auto-joined to this group on registration.
     pub target_group: Option<String>,
+    /// When set, the invite was minted for this exact collection (the Share
+    /// tile it belongs to). Portal invites always set it; CLI invites do not.
+    pub collection_id: Option<String>,
+    /// `calendar` or `addressbook` — the kind of [`Invite::collection_id`].
+    pub kind: Option<String>,
     /// Who issued the invite (an admin id or CLI marker).
     pub created_by: String,
     pub created_at: Option<String>,
@@ -37,9 +42,14 @@ pub struct Invite {
 pub trait InviteStore: Send + Sync + 'static {
     /// Store a new invite. The caller generates the (unique) code.
     ///
+    /// `collection_id`/`kind` (both set or both `None`) attribute the invite
+    /// to one collection tile; `target_group` still controls the auto-join on
+    /// redemption.
+    ///
     /// # Errors
     /// - [`Error::ReadOnly`] if the store does not implement invites
     /// - [`Error::AlreadyExists`] if the code is already in use
+    #[allow(clippy::too_many_arguments)]
     async fn add_invite(
         &self,
         _code: &str,
@@ -47,6 +57,8 @@ pub trait InviteStore: Send + Sync + 'static {
         _target_group: &Option<String>,
         _created_by: &str,
         _expires_at: &Option<String>,
+        _collection_id: &Option<String>,
+        _kind: &Option<String>,
     ) -> Result<String, Error> {
         Err(Error::ReadOnly)
     }
