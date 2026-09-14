@@ -40,6 +40,7 @@ use crate::routes::{
         route_post_linked_platforms_refresh, route_post_linked_platforms_remove,
     },
     login::{route_get_login, route_post_login, route_post_logout},
+    password::{password_change_gate, route_get_password_change, route_post_password_change},
     share::{route_get_share, route_share_create, route_share_invite, route_share_revoke},
     timezones::route_timezones,
     user::{route_get_home, route_root, route_user_named},
@@ -128,7 +129,17 @@ pub fn frontend_router<
             "/{user}/groups/{group}",
             get(route_group_detail::<AP, CS, AS>),
         )
-        .layer(middleware::from_fn(unauthorized_handler));
+        // Forced password change (Omnical sharing: first-ever calendar/group
+        // join until the password is rotated)
+        .route(
+            "/{user}/password",
+            get(route_get_password_change).post(route_post_password_change::<AP>),
+        )
+        .layer(middleware::from_fn(unauthorized_handler))
+        // Innermost-first mounting, so this one is applied outermost: it
+        // short-circuits every portal page (except the password page itself)
+        // to the change form while the user still must rotate their password.
+        .layer(middleware::from_fn(password_change_gate));
 
     let router = Router::new()
         .route("/", get(route_root))

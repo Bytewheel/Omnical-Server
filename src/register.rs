@@ -456,7 +456,8 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
         if session.insert("user", email).await.is_err() {
             warn!("registration: session persist failed for {email}");
         }
-        return render_existing_user_success(email, displayname, host, &target_group).into_response();
+        return render_existing_user_success(email, displayname, host, &target_group)
+            .into_response();
     }
 
     // Provision the account. The invite is already burned, so a mid-provision
@@ -474,6 +475,7 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
         principal_type: PrincipalType::default(),
         password: Some(Secret::from(password_hash)),
         memberships: vec![],
+        needs_password_change: false,
     };
     if let Err(err) = state.auth_provider.insert_principal(principal, false).await {
         // A concurrent registration won the race for the same email.
@@ -507,6 +509,16 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
         if let Err(err) = state.auth_provider.add_membership(email, group).await {
             error!(%err, "registration: invite target_group membership failed");
         }
+    }
+
+    // The registrant chose their password in this very request, so the
+    // first-join password-change nudge must not force them to change it again.
+    if let Err(err) = state
+        .auth_provider
+        .set_needs_password_change(email, false)
+        .await
+    {
+        error!(%err, "registration: needs_password_change clear failed");
     }
 
     // App tokens (full values shown once on the card).
@@ -1295,6 +1307,7 @@ mod tests {
                     principal_type: PrincipalType::default(),
                     password: None,
                     memberships: vec![],
+                    needs_password_change: false,
                 },
                 false,
             )

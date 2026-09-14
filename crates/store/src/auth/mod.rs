@@ -88,6 +88,35 @@ pub trait AuthenticationProvider: Send + Sync + 'static {
 
     async fn remove_membership(&self, principal: &str, member_of: &str) -> Result<(), Error>;
 
+    /// Updates a principal's stored password hash. Used by the portal
+    /// password-change flow (and anything else that must rotate a password
+    /// without touching the rest of the principal).
+    ///
+    /// # Errors
+    /// - [`Error::ReadOnly`] if the store does not implement password updates
+    async fn update_password(&self, _principal: &str, _password_hash: &str) -> Result<(), Error> {
+        Err(Error::ReadOnly)
+    }
+
+    /// Gets the `needs_password_change` flag of a principal.
+    ///
+    /// # Errors
+    /// Any store error.
+    async fn get_needs_password_change(&self, _principal: &str) -> Result<bool, Error> {
+        Ok(false)
+    }
+
+    /// Sets the `needs_password_change` flag of a principal (forced
+    /// password-change nudge, cleared by the store when the password is
+    /// updated). The default is a no-op so non-SQLite (test) stores keep
+    /// compiling; the SQLite store persists the change.
+    ///
+    /// # Errors
+    /// Any store error.
+    async fn set_needs_password_change(&self, _principal: &str, _value: bool) -> Result<(), Error> {
+        Ok(())
+    }
+
     async fn list_members(&self, principal: &str) -> Result<Vec<String>, Error>;
 
     async fn list_groups_for_user(&self, user_id: &str) -> Result<Vec<(String, String)>, Error> {

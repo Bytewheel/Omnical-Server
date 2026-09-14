@@ -5,7 +5,9 @@ use rustical::{app::make_app, config::NextcloudLoginConfig};
 use rustical_caldav::CalDavConfig;
 use rustical_frontend::FrontendConfig;
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
-use rustical_store_sqlite::{SqliteCalendarSourceStore, SqliteInviteStore, SqliteSubscriptionStore};
+use rustical_store_sqlite::{
+    SqliteCalendarSourceStore, SqliteInviteStore, SqliteSubscriptionStore,
+};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -33,6 +35,7 @@ pub fn get_app(context: TestStoreContext) -> axum::Router {
         FrontendConfig {
             enabled: true,
             allow_password_login: true,
+            ..FrontendConfig::default()
         },
         None,
         CalDavConfig::default(),
@@ -84,4 +87,5 @@ mod caldav;
 mod carddav;
 mod frontend_groups;
 mod frontend_linked_platforms;
+mod frontend_password;
 mod frontend_share;

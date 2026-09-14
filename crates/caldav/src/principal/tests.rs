@@ -68,6 +68,7 @@ async fn test_propfind() {
         principal_type: Individual,
         password: None,
         memberships: vec!["group".to_string()],
+        needs_password_change: false,
     };
 
     let resource = PrincipalResource {

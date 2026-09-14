@@ -12,8 +12,9 @@ use rstest::rstest;
 use rustical_ical::CalendarObjectType;
 use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType};
 use rustical_store::{
-    Addressbook, AddressbookWriteStore, Calendar, CalendarMetadata, CalendarWriteStore,
+    Addressbook, AddressbookWriteStore, Calendar, CalendarMetadata, CalendarWriteStore, InviteStore,
 };
+use rustical_store_sqlite::SqliteInviteStore;
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
 use tower::ServiceExt;
 
@@ -27,6 +28,7 @@ async fn insert_group(context: &TestStoreContext, group_id: &str, displayname: &
                 memberships: vec![],
                 password: None,
                 principal_type: PrincipalType::Group,
+                needs_password_change: false,
             },
             false,
         )
@@ -54,6 +56,7 @@ async fn insert_user(context: &TestStoreContext, id: &str) {
                 memberships: vec![],
                 password: None,
                 principal_type: PrincipalType::Individual,
+                needs_password_change: false,
             },
             false,
         )
@@ -545,4 +548,137 @@ async fn test_share_page_wrong_user(
     let req = request(Method::GET, "/frontend/user/user/share", "bob", "bob", None);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// The `https://public.example/register?code=…` URL printed in the invite
+/// banner (terminated by the closing `</code>` element).
+fn extract_register_url(body: &str) -> String {
+    const MARKER: &str = "https://public.example/register?code=";
+    let start = body.find(MARKER).expect("register URL in body");
+    let rest = &body[start..];
+    let end = rest.find('<').expect("end of register URL");
+    rest[..end].to_owned()
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_generate_invite_link_without_email(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let invite_store = SqliteInviteStore::new(context.cal_store.clone());
+    let app = get_app(context);
+
+    // "Generate invite link": no email field is posted at all.
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/invite",
+        "user",
+        "pass",
+        form("principal=testgroup"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    assert!(body.contains("Invite link generated"));
+
+    // The invite was stored bound to the group, without any email.
+    let url = extract_register_url(&body);
+    let code = url.trim_start_matches("https://public.example/register?code=");
+    assert_eq!(code.len(), 12);
+    let invite = invite_store
+        .get_invite(code)
+        .await
+        .unwrap()
+        .expect("invite stored");
+    assert_eq!(invite.target_email, None);
+    assert_eq!(invite.target_group.as_deref(), Some("testgroup"));
+    assert_eq!(invite.created_by, "user");
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_invite_with_email_binds_target_email(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let invite_store = SqliteInviteStore::new(context.cal_store.clone());
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/invite",
+        "user",
+        "pass",
+        form("principal=testgroup&email=Alice%40example.com"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    assert!(body.contains("Invite sent"));
+    assert!(body.contains("alice@example.com"));
+
+    let url = extract_register_url(&body);
+    let code = url.trim_start_matches("https://public.example/register?code=");
+    let invite = invite_store
+        .get_invite(code)
+        .await
+        .unwrap()
+        .expect("invite stored");
+    assert_eq!(invite.target_email.as_deref(), Some("alice@example.com"));
+    assert_eq!(invite.target_group.as_deref(), Some("testgroup"));
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_invite_rejects_invalid_email(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let invite_store = SqliteInviteStore::new(context.cal_store.clone());
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/invite",
+        "user",
+        "pass",
+        form("principal=testgroup&email=notanemail"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    assert!(body.contains("Please enter a valid email address."));
+    assert!(invite_store.list_invites(true).await.unwrap().is_empty());
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_invite_rejects_unowned_group(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/invite",
+        "user",
+        "pass",
+        form("principal=foreigngroup"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }

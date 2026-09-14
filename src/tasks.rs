@@ -87,6 +87,7 @@ mod tests {
             password: None,
             principal_type: rustical_store::auth::PrincipalType::Individual,
             memberships: Vec::new(),
+            needs_password_change: false,
         };
         principal_store
             .insert_principal(principal, false)

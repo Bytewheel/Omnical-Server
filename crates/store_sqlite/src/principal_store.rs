@@ -10,83 +10,76 @@ use rustical_store::{
 use sqlx::{Row, SqlitePool, types::Json};
 use tracing::instrument;
 
-#[derive(Debug, Default, Clone)]
-struct PrincipalRow {
-    id: String,
-    displayname: Option<String>,
-    principal_type: String,
-    password_hash: Option<String>,
-    memberships: Option<Json<Vec<Option<String>>>>,
-}
-
-impl TryFrom<PrincipalRow> for Principal {
-    type Error = Error;
-
-    fn try_from(value: PrincipalRow) -> Result<Self, Self::Error> {
-        Ok(Self {
-            id: value.id,
-            displayname: value.displayname,
-            password: value.password_hash.map(Secret::from),
-            principal_type: value.principal_type.as_str().try_into()?,
-            memberships: value
-                .memberships
-                .map(|val| val.0)
-                .unwrap_or_default()
-                .into_iter()
-                .flatten()
-                .collect(),
-        })
-    }
-}
-
 #[derive(Debug, Clone, Constructor)]
 pub struct SqlitePrincipalStore {
     db: SqlitePool,
+}
+
+/// Map a `principals` row (with its JSON-aggregated memberships) into a
+/// [`Principal`]. Runtime `Row::get` decodes the nullable memberships JSON
+/// the same way the old `query_as!` row did (`Json<Vec<Option<String>>>`).
+fn principal_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Principal, Error> {
+    Ok(Principal {
+        id: row.get("id"),
+        displayname: row.get("displayname"),
+        password: row
+            .get::<Option<String>, _>("password_hash")
+            .map(Secret::from),
+        principal_type: row.get::<String, _>("principal_type").as_str().try_into()?,
+        memberships: row
+            .get::<Option<Json<Vec<Option<String>>>>, _>("memberships")
+            .map(|val| val.0)
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .collect(),
+        needs_password_change: row.get("needs_password_change"),
+    })
 }
 
 #[async_trait]
 impl AuthenticationProvider for SqlitePrincipalStore {
     #[instrument]
     async fn get_principals(&self) -> Result<Vec<Principal>, Error> {
-        let result: Result<Vec<Principal>, Error> = sqlx::query_as!(
-            PrincipalRow,
+        // Runtime query (not `query_as!`) so the planner-selected rows can
+        // carry the `needs_password_change` column without regenerating the
+        // committed `.sqlx/` offline metadata for the old statement shape.
+        let rows = sqlx::query(
             r#"
-            SELECT id, displayname, principal_type, password_hash, json_group_array(member_of) AS "memberships: Json<Vec<Option<String>>>"
-            FROM principals
-            LEFT JOIN memberships ON principals.id == memberships.principal
-            GROUP BY principals.id
+            SELECT p.id, p.displayname, p.principal_type, p.password_hash,
+                   p.needs_password_change,
+                   json_group_array(m.member_of) AS memberships
+            FROM principals p
+            LEFT JOIN memberships m ON p.id == m.principal
+            GROUP BY p.id
         "#,
         )
         .fetch_all(&self.db)
         .await
-        .map_err(crate::Error::from)?
-        .into_iter()
-        .map(Principal::try_from)
-        .collect();
-        Ok(result?)
+        .map_err(crate::Error::from)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| principal_from_row(&row))
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     #[instrument]
     async fn get_principal(&self, id: &str) -> Result<Option<Principal>, Error> {
-        let row= sqlx::query_as!(
-            PrincipalRow,
+        let row = sqlx::query(
             r#"
-            SELECT id, displayname, principal_type, password_hash, json_group_array(member_of) AS "memberships: Json<Vec<Option<String>>>"
-            FROM (SELECT * FROM principals WHERE id = ?) AS principals
-            LEFT JOIN memberships ON principals.id == memberships.principal
-            GROUP BY principals.id
+            SELECT p.id, p.displayname, p.principal_type, p.password_hash,
+                   p.needs_password_change,
+                   json_group_array(m.member_of) AS memberships
+            FROM (SELECT * FROM principals WHERE id = ?) AS p
+            LEFT JOIN memberships m ON p.id == m.principal
+            GROUP BY p.id
         "#,
-            id
         )
-            .fetch_optional(&self.db)
-            .await
-            .map_err(crate::Error::from)?
-            .map(Principal::try_from);
-        if let Some(row) = row {
-            Ok(Some(row?))
-        } else {
-            Ok(None)
-        }
+        .bind(id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(crate::Error::from)?;
+        Ok(row.map(|row| principal_from_row(&row)).transpose()?)
     }
 
     #[instrument]
@@ -197,11 +190,79 @@ impl AuthenticationProvider for SqlitePrincipalStore {
 
     #[instrument]
     async fn add_membership(&self, principal: &str, member_of: &str) -> Result<(), Error> {
-        sqlx::query!(
+        let mut tx = self.db.begin().await.map_err(crate::Error::from)?;
+        // Whether this is the principal's FIRST membership, and whether they
+        // are a real user (have a stored password) — group principals never
+        // get the forced password-change nudge.
+        let info = sqlx::query(
+            r#"
+            SELECT
+                (SELECT COUNT(*) FROM memberships WHERE principal = ?) AS membership_count,
+                (SELECT password_hash FROM principals WHERE id = ?) AS password_hash
+            "#,
+        )
+        .bind(principal)
+        .bind(principal)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(crate::Error::from)?;
+        let membership_count: i64 = info.get("membership_count");
+        let has_password: bool = info.get::<Option<String>, _>("password_hash").is_some();
+
+        let result = sqlx::query!(
             r#"REPLACE INTO memberships (principal, member_of) VALUES (?, ?)"#,
             principal,
             member_of
         )
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::Error::from)?;
+
+        // First-ever join of a real user ⇒ one-time password-change nudge on
+        // the user's next portal login.
+        if membership_count == 0 && has_password && result.rows_affected() == 1 {
+            sqlx::query("UPDATE principals SET needs_password_change = 1 WHERE id = ?")
+                .bind(principal)
+                .execute(&mut *tx)
+                .await
+                .map_err(crate::Error::from)?;
+        }
+
+        tx.commit().await.map_err(crate::Error::from)?;
+        Ok(())
+    }
+
+    #[instrument]
+    async fn get_needs_password_change(&self, principal: &str) -> Result<bool, Error> {
+        Ok(
+            sqlx::query("SELECT needs_password_change FROM principals WHERE id = ?")
+                .bind(principal)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(crate::Error::from)?
+                .is_some_and(|row| row.get("needs_password_change")),
+        )
+    }
+
+    #[instrument]
+    async fn set_needs_password_change(&self, principal: &str, value: bool) -> Result<(), Error> {
+        sqlx::query("UPDATE principals SET needs_password_change = ? WHERE id = ?")
+            .bind(value)
+            .bind(principal)
+            .execute(&self.db)
+            .await
+            .map_err(crate::Error::from)?;
+        Ok(())
+    }
+
+    #[instrument]
+    async fn update_password(&self, principal: &str, password_hash: &str) -> Result<(), Error> {
+        // Rotating the password also clears the forced-change nudge.
+        sqlx::query(
+            "UPDATE principals SET password_hash = ?, needs_password_change = 0 WHERE id = ?",
+        )
+        .bind(password_hash)
+        .bind(principal)
         .execute(&self.db)
         .await
         .map_err(crate::Error::from)?;

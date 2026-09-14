@@ -394,7 +394,11 @@ fn generate_invite_code() -> String {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SendInviteForm {
     pub principal: String,
-    pub email: String,
+    /// Optional invitee email. `None` (or blank — the "Generate invite link"
+    /// form posts no `email` field) mints an unbound invite: a registration
+    /// link anyone can use.
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 /// POST /{user}/share/invite — create a one-time invite code tied to a group
@@ -440,8 +444,18 @@ pub async fn route_share_invite<
             .into_response();
     }
 
-    let email = form.email.trim().to_lowercase();
-    if email.is_empty() || !email.contains('@') {
+    // An unbound ("generate link") invite carries no email; the name of the
+    // group principal is enough. A provided-but-invalid email is still an
+    // error.
+    let email = form
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(str::to_lowercase);
+    if let Some(email) = email.as_deref()
+        && !email.contains('@')
+    {
         return share_page(
             &auth_provider,
             &cal_store,
@@ -463,13 +477,7 @@ pub async fn route_share_invite<
     };
 
     if let Err(err) = invite_store
-        .add_invite(
-            &code,
-            &Some(email.clone()),
-            &target_group,
-            &user.id,
-            &None,
-        )
+        .add_invite(&code, &email, &target_group, &user.id, &None)
         .await
     {
         return share_page(
@@ -496,7 +504,7 @@ pub async fn route_share_invite<
         &host,
         &user,
         &invite_url,
-        &email,
+        email.as_deref(),
     )
     .await
 }
@@ -514,7 +522,7 @@ async fn share_page_with_invite<
     host: &Host,
     user: &Principal,
     invite_url: &str,
-    invited_email: &str,
+    invited_email: Option<&str>,
 ) -> Response {
     let base_url = resolve_base_url(public_url, host);
     let entries = build_share_entries(
@@ -533,7 +541,7 @@ async fn share_page_with_invite<
             enabled: sub_store.is_some(),
             error: None,
             invite_url: Some(invite_url.to_owned()),
-            invited_email: Some(invited_email.to_owned()),
+            invited_email: invited_email.map(ToOwned::to_owned),
         },
         user: user.clone(),
     }

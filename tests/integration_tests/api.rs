@@ -33,6 +33,7 @@ async fn setup_group(context: &TestStoreContext) -> (String, String) {
                         memberships: vec![],
                         password: None,
                         principal_type: PrincipalType::Individual,
+                        needs_password_change: false,
                     },
                     false,
                 )
@@ -62,6 +63,7 @@ async fn setup_group(context: &TestStoreContext) -> (String, String) {
                     memberships: vec![],
                     password: None,
                     principal_type: PrincipalType::Group,
+                    needs_password_change: false,
                 },
                 false,
             )

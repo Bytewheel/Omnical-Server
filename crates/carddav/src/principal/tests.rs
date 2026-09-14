@@ -19,6 +19,7 @@ fn test_propfind() {
         principal_type: rustical_store::auth::PrincipalType::Individual,
         password: None,
         memberships: vec!["group".to_string()],
+        needs_password_change: false,
     };
 
     let resource = PrincipalResource {

@@ -27,6 +27,7 @@ async fn setup_group(context: &TestStoreContext) {
                     memberships: vec![],
                     password: None,
                     principal_type: PrincipalType::Group,
+                    needs_password_change: false,
                 },
                 false,
             )

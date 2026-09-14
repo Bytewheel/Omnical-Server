@@ -26,6 +26,12 @@ pub struct Principal {
     pub password: Option<Secret<String>>,
     #[serde(default)]
     pub memberships: Vec<String>,
+    /// When set, the next portal login must show a forced password-change
+    /// page before any other portal section. Used for the one-time nudge on a
+    /// user's first-ever calendar/group join; cleared once the password is
+    /// changed.
+    #[serde(default)]
+    pub needs_password_change: bool,
 }
 
 impl Principal {

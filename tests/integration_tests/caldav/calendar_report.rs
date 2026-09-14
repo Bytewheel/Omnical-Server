@@ -242,6 +242,7 @@ async fn test_report_email_principal(
                 memberships: vec![],
                 password: None,
                 principal_type: PrincipalType::Individual,
+                needs_password_change: false,
             },
             false,
         )

@@ -381,8 +381,33 @@ async fn test_principal_impersonation() {
         }
 
         {
+            // First-ever membership (the CLI assign above) forces a password
+            // change on the user's next portal login (Omnical sharing), so
+            // the portal redirects everything to the change form first.
             let url = origin.clone() + "/frontend/user";
             let resp = client.request(Method::GET, &url).send().await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+            let location = resp.headers().get("Location").unwrap().to_str().unwrap();
+            assert_eq!(location, "/frontend/user/user/password");
+        }
+
+        {
+            // The change form requires the current password, then applies the
+            // new hash and lifts the gate.
+            let url = origin.clone() + "/frontend/user/user/password";
+            let resp = client.request(Method::GET, &url).send().await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let mut form = HashMap::new();
+            form.insert("current_password", "pass");
+            form.insert("new_password", "super-secret-new-pass");
+            form.insert("new_password_confirm", "super-secret-new-pass");
+            let resp = client
+                .request(Method::POST, &url)
+                .form(&form)
+                .send()
+                .await
+                .unwrap();
             assert_eq!(resp.status(), StatusCode::SEE_OTHER);
             let location = resp.headers().get("Location").unwrap().to_str().unwrap();
             assert_eq!(location, "/frontend/user/user");

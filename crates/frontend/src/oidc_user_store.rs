@@ -34,6 +34,7 @@ impl<AP: AuthenticationProvider> UserStore for OidcUserStore<AP> {
                     principal_type: PrincipalType::default(),
                     password: None,
                     memberships: vec![],
+                    needs_password_change: false,
                 },
                 false,
             )

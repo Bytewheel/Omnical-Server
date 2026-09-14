@@ -6,6 +6,7 @@ pub mod calendars;
 pub mod groups;
 pub mod linked_platforms;
 pub mod login;
+pub mod password;
 pub mod share;
 pub mod timezones;
 pub mod user;

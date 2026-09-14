@@ -1,0 +1,1 @@
+ALTER TABLE principals DROP COLUMN needs_password_change;

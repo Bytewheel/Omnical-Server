@@ -4489,6 +4489,7 @@ dependencies = [
 name = "rustical_frontend"
 version = "0.16.1"
 dependencies = [
+ "argon2",
  "askama",
  "askama_web",
  "async-trait",
@@ -4622,6 +4623,7 @@ dependencies = [
 name = "rustical_store_sqlite"
 version = "0.16.1"
 dependencies = [
+ "argon2",
  "async-trait",
  "caldata",
  "chrono",

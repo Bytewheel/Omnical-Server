@@ -128,6 +128,7 @@ async fn create_group<
         principal_type: PrincipalType::Group,
         password: None,
         memberships: vec![],
+        needs_password_change: false,
     };
 
     state

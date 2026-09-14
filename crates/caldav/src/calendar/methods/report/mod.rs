@@ -340,6 +340,7 @@ END:VCALENDAR"
                 principal_type: rustical_store::auth::PrincipalType::Individual,
                 password: None,
                 memberships: vec![],
+                needs_password_change: false,
             },
             &PropfindType::Propname,
         )

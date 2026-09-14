@@ -36,6 +36,7 @@ pub fn cmd_gen_config(_args: GenConfigArgs) -> anyhow::Result<()> {
         frontend: FrontendConfig {
             enabled: true,
             allow_password_login: true,
+            ..FrontendConfig::default()
         },
         oidc: None,
         dav_push: DavPushConfig::default(),

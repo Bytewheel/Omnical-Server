@@ -147,6 +147,7 @@ pub async fn cmd_principals(args: PrincipalsArgs, config: Config) -> anyhow::Res
                         principal_type: principal_type.unwrap_or_default(),
                         password,
                         memberships: vec![],
+                        needs_password_change: false,
                     },
                     overwrite,
                 )

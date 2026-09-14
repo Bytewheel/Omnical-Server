@@ -5,14 +5,26 @@
   Anyone with the URL can read the collection; revoke to make it stop
   working immediately.
 </p>
+<p class="description">
+  For a calendar, you can also send a one-time registration invite: the
+  invitee joins the group and gets full add/delete/modify/read access to its
+  shared collections. Use "Generate invite link" to get a shareable link
+  without needing their email.
+</p>
 {% if let Some(error) = error %}
 <p class="error">{{ error }}</p>
 {% endif %}
 {% if let Some(url) = invite_url.as_ref() %}
 <div class="success">
-  <p><strong>Invite sent!</strong> Share this registration link with <code>{{ invited_email.as_deref().unwrap_or("") }}</code>:</p>
+  {% if let Some(email) = invited_email.as_ref() %}
+  <p><strong>Invite sent!</strong> Share this registration link with <code>{{ email }}</code>:</p>
   <p><code>{{ url }}</code></p>
   <p>When they register, they will be automatically added to the group.</p>
+  {% else %}
+  <p><strong>Invite link generated!</strong> Anyone with this registration link can join:</p>
+  <p><code>{{ url }}</code></p>
+  <p>On registration they are added to the group and get full access to its shared collections.</p>
+  {% endif %}
 </div>
 {% endif %}
 {% if !enabled %}
@@ -56,6 +68,10 @@
           <input type="hidden" name="principal" value="{{ entry.principal }}">
           <input type="email" name="email" placeholder="email@example.com" required>
           <button type="submit">Send invite</button>
+        </form>
+        <form method="POST" action="/frontend/user/{{ user.id }}/share/invite" class="inline-form">
+          <input type="hidden" name="principal" value="{{ entry.principal }}">
+          <button type="submit">Generate invite link</button>
         </form>
         {% endif %}
       </div>

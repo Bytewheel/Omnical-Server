@@ -97,6 +97,7 @@ async fn setup_fixtures(context: &TestStoreContext) {
                 memberships: vec![],
                 password: None,
                 principal_type: PrincipalType::Individual,
+                needs_password_change: false,
             },
             false,
         )

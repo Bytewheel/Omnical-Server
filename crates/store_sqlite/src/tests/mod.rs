@@ -10,6 +10,7 @@ mod addressbook_store;
 mod calendar_source_store;
 mod calendar_store;
 mod invite_store;
+mod principal_store;
 mod subscription_store;
 
 #[derive(Debug, Clone)]
@@ -37,6 +38,7 @@ pub async fn test_store_context() -> TestStoreContext {
                 memberships: vec![],
                 password: None,
                 principal_type: PrincipalType::Individual,
+                needs_password_change: false,
             },
             false,
         )
@@ -75,6 +77,7 @@ async fn test_invalid_principal_id(
                         principal_type: PrincipalType::Individual,
                         password: None,
                         memberships: vec![],
+                        needs_password_change: false,
                     },
                     false,
                 )
@@ -94,6 +97,7 @@ async fn test_invalid_principal_id(
                         principal_type: PrincipalType::Individual,
                         password: None,
                         memberships: vec![],
+                        needs_password_change: false,
                     },
                     false,
                 )

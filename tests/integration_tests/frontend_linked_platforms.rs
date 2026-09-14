@@ -94,6 +94,7 @@ async fn insert_user(context: &TestStoreContext, id: &str) {
                 memberships: vec![],
                 password: None,
                 principal_type: PrincipalType::Individual,
+                needs_password_change: false,
             },
             false,
         )
