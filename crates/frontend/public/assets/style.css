@@ -311,14 +311,15 @@ ul.collection-list {
         ".           color-chip"
         "title       color-chip"
         "description color-chip"
-        "sub-url     color-chip"
+        /*"sub-url     color-chip"*/
         "metadata    color-chip"
         "actions     color-chip"
         ".           color-chip";
-      row-gap: .1em;
+      row-gap: .7em;
       column-gap: 1em;
       grid-template-rows: 1em auto auto auto auto auto 1em;
       padding-left: 1em;
+      padding-top: 1em;
 
       button, a {
         pointer-events: all;
@@ -328,12 +329,16 @@ ul.collection-list {
       .title {
         grid-area: title;
         font-weight: 600;
+        grid-row: inherit;
+        line-height: 1em;
       }
 
       .description {
         grid-area: description;
         color: var(--text-muted);
         font-size: .9em;
+        grid-row: inherit;
+        padding-bottom: 2.3em;
       }
 
       .subscription-url {
@@ -341,12 +346,18 @@ ul.collection-list {
         font-size: .9em;
         color: var(--text-muted);
         word-break: break-all;
+        grid-row: inherit;
       }
 
       .metadata {
         grid-area: metadata;
         font-size: .8em;
         color: var(--text-muted);
+        grid-row: inherit;
+        display: grid;
+        grid-auto-flow: column;
+        column-gap: 3rem;
+        grid-template-columns: 1fr;
       }
 
       .actions {
@@ -355,8 +366,22 @@ ul.collection-list {
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        gap: .5em;
-        margin-top: .3em;
+        gap: 4.5em;
+        margin-top: 3.3em;
+        grid-row: inherit;
+        display: grid;
+        grid-auto-flow: column;
+        column-gap: 2rem;
+        .invite-form {
+          display: grid;
+          grid-auto-flow: column;
+          column-gap: .3rem;
+          grid-template-columns: 1fr;
+        }
+        .invite-email {
+          font-size: 15px;
+          line-height: inherit;
+        }
       }
 
       .color-chip {

@@ -18,34 +18,6 @@
   username and the token, and they add the calendar in any CalDAV client.
   Revoke to stop their access immediately.
 </p>
-{% if let Some(error) = error %}
-<p class="error">{{ error }}</p>
-{% endif %}
-{% if let Some(url) = invite_url.as_ref() %}
-<div class="success">
-  {% if let Some(email) = invited_email.as_ref() %}
-  <p><strong>Invite sent!</strong> Share this registration link with <code>{{ email }}</code>:</p>
-  <p><code>{{ url }}</code></p>
-  <p>When they register, they will be automatically added to the group.</p>
-  {% else %}
-  <p><strong>Invite link generated!</strong> Anyone with this registration link can join:</p>
-  <p><code>{{ url }}</code></p>
-  <p>On registration they are added to the group and get full access to its shared collections.</p>
-  {% endif %}
-</div>
-{% endif %}
-{% if let Some(server_url) = guest_share_server_url.as_ref() %}
-<div class="success">
-  {% if let Some(email) = guest_share_email.as_ref() %}
-  <p><strong>Guest access sent to {{ email }}!</strong> This one-time credential was created for <code>{{ guest_share_calendar_id.as_ref().unwrap() }}</code>:</p>
-  {% else %}
-  <p><strong>Guest access created!</strong> This one-time credential was created for <code>{{ guest_share_calendar_id.as_ref().unwrap() }}</code> — send the setup below to your guest:</p>
-  {% endif %}
-  <p>Server URL: <code>{{ server_url }}</code></p>
-  <p>Username: <code>{{ guest_share_username.as_ref().unwrap() }}</code></p>
-  <p>App token: <code>{{ guest_share_credential.as_ref().unwrap() }}</code></p>
-</div>
-{% endif %}
 {% if !enabled %}
 <p class="error">Share links are disabled on this server ([subscriptions] enabled = false).</p>
 {% endif %}
@@ -62,87 +34,118 @@
         {% if let Some(created_at) = entry.created_at %} · created {{ created_at }}{% endif %}
       </span>
       {% if let Some(url) = entry.url %}
-      <div class="metadata"><a href="{{ url }}">{{ url }}</a></div>
-      {% endif %}
-      {% for invite in entry.invites %}
       <div class="metadata">
-        Invite link{% if let Some(email) = invite.invited_email %} for {{ email }}{% endif %}
-        {% if let Some(created_at) = invite.created_at %} · created {{ created_at }}{% endif %}:
-        <a href="{{ invite.url }}">{{ invite.url }}</a>
-        <span class="invite-actions">
-          <button type="button" onclick="navigator.clipboard.writeText('{{ invite.url }}')">Copy</button>
-          {% if entry.can_invite %}
-          <form method="POST" action="/frontend/user/{{ user.id }}/share/invite/{{ invite.code }}/revoke">
+        <a href="{{ url }}">{{ url }}</a>
+          <span class="invite-actions">
+            {% if let Some(sub_id) = entry.sub_id %}
+            {% if enabled %}
+            <form method="POST" action="/frontend/user/{{ user.id }}/share/{{ sub_id }}/revoke">
+              <input type="hidden" name="principal" value="{{ entry.principal }}">
+              <button type="submit" class="delete">Revoke</button>
+            </form>
+            {% else %}
+            <form method="POST" action="/frontend/user/{{ user.id }}/share/create">
+              <input type="hidden" name="principal" value="{{ entry.principal }}">
+              <input type="hidden" name="kind" value="{{ entry.kind }}">
+              <input type="hidden" name="collection_id" value="{{ entry.collection_id }}">
+              <button type="submit">Create share link</button>
+            </form>
+            {% endif %}
+            {% endif %}
+              <button type="button" onclick="navigator.clipboard.writeText('{{ url }}')">Copy</button>
+            </span>
+        </div>
+        {% endif %}
+        {% for invite in entry.invites %}
+        <div class="metadata">
+          Invite link{% if let Some(email) = invite.invited_email %} for {{ email }}{% endif %}
+          {% if let Some(created_at) = invite.created_at %} · created {{ created_at }}{% endif %}:
+            {% if let Some(error) = error %}
+            <p class="error">{{ error }}</p>
+            {% endif %}
+            {% if let Some(url) = invite_url.as_ref() %}
+            <div class="success">
+              {% if let Some(email) = invited_email.as_ref() %}
+              <p><strong>Invite sent!</strong> Share this registration link with <code>{{ email }}</code>:</p>
+              <p><code>{{ url }}</code></p>
+              <p>When they register, they will be automatically added to the group.</p>
+              {% else %}
+              <p><strong>Invite link generated!</strong> Anyone with this registration link can join:</p>
+              <p><code>{{ url }}</code></p>
+              <p>On registration they are added to the group and get full access to its shared collections.</p>
+              {% endif %}
+            </div>
+            {% endif %}
+            {% if let Some(server_url) = guest_share_server_url.as_ref() %}
+            <div class="success">
+              {% if let Some(email) = guest_share_email.as_ref() %}
+              <p><strong>Guest access sent to {{ email }}!</strong> This one-time credential was created for <code>{{ guest_share_calendar_id.as_ref().unwrap() }}</code>:</p>
+              {% else %}
+              <p><strong>Guest access created!</strong> This one-time credential was created for <code>{{ guest_share_calendar_id.as_ref().unwrap() }}</code> — send the setup below to your guest:</p>
+              {% endif %}
+              <p>Server URL: <code>{{ server_url }}</code></p>
+              <p>Username: <code>{{ guest_share_username.as_ref().unwrap() }}</code></p>
+              <p>App token: <code>{{ guest_share_credential.as_ref().unwrap() }}</code></p>
+            </div>
+            {% endif %}
+                  <a href="{{ invite.url }}">{{ invite.url }}</a>
+                  <span class="invite-actions">
+                    <button type="button" onclick="navigator.clipboard.writeText('{{ invite.url }}')">Copy</button>
+                    {% if entry.can_invite %}
+                    <form method="POST" action="/frontend/user/{{ user.id }}/share/invite/{{ invite.code }}/revoke">
+                      <input type="hidden" name="principal" value="{{ entry.principal }}">
+                      <button type="submit" class="delete">Revoke</button>
+                    </form>
+                    {% endif %}
+                  </span>
+                </div>
+                {% endfor %}
+                {% for guest in entry.guest_shares %}
+                <div class="metadata">
+                  Guest {{ guest.guest_principal }}
+                  {%- if let Some(email) = guest.target_email %} ({{ email }}){% endif %}
+          · {{ guest.privilege }} access
+          {% if let Some(created_at) = guest.created_at %} · created {{ created_at }}{% endif %}
+          {% if guest.can_manage %}
+          <span class="invite-actions">
+            <form method="POST" action="/frontend/user/{{ user.id }}/share/guest-invite/{{ guest.share_id }}/revoke">
+              <input type="hidden" name="principal" value="{{ entry.principal }}">
+              <button type="submit" class="delete">Revoke</button>
+            </form>
+          </span>
+          {% endif %}
+        </div>
+        {% endfor %}
+        <div class="actions">
+          {% if entry.kind == "calendar" && entry.can_invite %}
+        <form method="POST" action="/frontend/user/{{ user.id }}/share/invite" class="inline-form" style="{ height: 2em; }">
             <input type="hidden" name="principal" value="{{ entry.principal }}">
-            <button type="submit" class="delete">Revoke</button>
+            <input type="hidden" name="kind" value="{{ entry.kind }}">
+            <input type="hidden" name="collection_id" value="{{ entry.collection_id }}">
+            <input class="invite-email" type="email" name="email" placeholder="email@example.com" required>
+          <button type="submit" style="{ height: 2.35em; }">Send invite</button>
+          </form>
+          <form method="POST" action="/frontend/user/{{ user.id }}/share/invite" class="inline-form">
+            <input type="hidden" name="principal" value="{{ entry.principal }}">
+            <input type="hidden" name="kind" value="{{ entry.kind }}">
+            <input type="hidden" name="collection_id" value="{{ entry.collection_id }}">
+            <button type="submit">Generate invite link</button>
+          </form>
+        <form method="POST" action="/frontend/user/{{ user.id }}/share/guest-invite" class="inline-form invite-form" style="">
+            <input type="hidden" name="principal" value="{{ entry.principal }}">
+            <input type="hidden" name="collection_id" value="{{ entry.collection_id }}">
+            <select name="privilege">
+              <option value="view">View</option>
+              <option value="edit">Edit</option>
+              <option value="admin">Admin</option>
+            </select>
+            <input type="email" name="email" placeholder="email@example.com">
+            <button type="submit" title="Create a guest account with app-token access">Invite guest</button>
           </form>
           {% endif %}
-        </span>
+        </div>
       </div>
-      {% endfor %}
-      {% for guest in entry.guest_shares %}
-      <div class="metadata">
-        Guest {{ guest.guest_principal }}
-        {%- if let Some(email) = guest.target_email %} ({{ email }}){% endif %}
-        · {{ guest.privilege }} access
-        {% if let Some(created_at) = guest.created_at %} · created {{ created_at }}{% endif %}
-        {% if guest.can_manage %}
-        <span class="invite-actions">
-          <form method="POST" action="/frontend/user/{{ user.id }}/share/guest-invite/{{ guest.share_id }}/revoke">
-            <input type="hidden" name="principal" value="{{ entry.principal }}">
-            <button type="submit" class="delete">Revoke</button>
-          </form>
-        </span>
-        {% endif %}
-      </div>
-      {% endfor %}
-      <div class="actions">
-        {% if let Some(sub_id) = entry.sub_id %}
-        {% if enabled %}
-        <form method="POST" action="/frontend/user/{{ user.id }}/share/{{ sub_id }}/revoke">
-          <input type="hidden" name="principal" value="{{ entry.principal }}">
-          <button type="submit" class="delete">Revoke</button>
-        </form>
-        {% endif %}
-        {% else %}
-        {% if enabled %}
-        <form method="POST" action="/frontend/user/{{ user.id }}/share/create">
-          <input type="hidden" name="principal" value="{{ entry.principal }}">
-          <input type="hidden" name="kind" value="{{ entry.kind }}">
-          <input type="hidden" name="collection_id" value="{{ entry.collection_id }}">
-          <button type="submit">Create share link</button>
-        </form>
-        {% endif %}
-        {% endif %}
-        {% if entry.kind == "calendar" && entry.can_invite %}
-        <form method="POST" action="/frontend/user/{{ user.id }}/share/invite" class="inline-form">
-          <input type="hidden" name="principal" value="{{ entry.principal }}">
-          <input type="hidden" name="kind" value="{{ entry.kind }}">
-          <input type="hidden" name="collection_id" value="{{ entry.collection_id }}">
-          <input type="email" name="email" placeholder="email@example.com" required>
-          <button type="submit">Send invite</button>
-        </form>
-        <form method="POST" action="/frontend/user/{{ user.id }}/share/invite" class="inline-form">
-          <input type="hidden" name="principal" value="{{ entry.principal }}">
-          <input type="hidden" name="kind" value="{{ entry.kind }}">
-          <input type="hidden" name="collection_id" value="{{ entry.collection_id }}">
-          <button type="submit">Generate invite link</button>
-        </form>
-        <form method="POST" action="/frontend/user/{{ user.id }}/share/guest-invite" class="inline-form">
-          <input type="hidden" name="principal" value="{{ entry.principal }}">
-          <input type="hidden" name="collection_id" value="{{ entry.collection_id }}">
-          <select name="privilege">
-            <option value="view">View</option>
-            <option value="edit">Edit</option>
-            <option value="admin">Admin</option>
-          </select>
-          <input type="email" name="email" placeholder="email@example.com">
-          <button type="submit" title="Create a guest account with app-token access">Invite guest</button>
-        </form>
-        {% endif %}
-      </div>
-    </div>
-  </li>
-  {% endfor %}
-</ul>
-{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
