@@ -6,7 +6,8 @@ use figment::providers::{Env, Format, Toml};
 use rustical::config::Config;
 use rustical::{Args, Command};
 use rustical::{
-    cmd_gen_config, cmd_health, cmd_invites, cmd_principals, cmd_serve, cmd_subscriptions,
+    cmd_gen_config, cmd_guest_shares, cmd_health, cmd_invites, cmd_principals, cmd_serve,
+    cmd_subscriptions,
 };
 use tracing::warn;
 
@@ -32,6 +33,9 @@ async fn main() -> Result<()> {
             cmd_subscriptions(subscriptions_args, parse_config()?).await
         }
         Command::Invites(invites_args) => cmd_invites(invites_args, parse_config()?).await,
+        Command::GuestShare(guest_share_args) => {
+            cmd_guest_shares(guest_share_args, parse_config()?).await
+        }
         Command::Health(health_args) => {
             let config: Config = parse_config()?;
             cmd_health(config.http, health_args).await

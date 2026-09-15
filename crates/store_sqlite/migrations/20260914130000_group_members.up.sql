@@ -20,7 +20,6 @@ FROM memberships m
 JOIN principals p ON p.id = m.member_of
 WHERE p.principal_type = 'GROUP';
 
-INSERT INTO group_members (group_id, member_id, privilege)
+INSERT OR REPLACE INTO group_members (group_id, member_id, privilege)
 SELECT group_id, owner_id, 'admin'
-FROM group_owners
-ON CONFLICT(group_id, member_id) DO UPDATE SET privilege = 'admin';
+FROM group_owners;

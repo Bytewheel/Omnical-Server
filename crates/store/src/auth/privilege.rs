@@ -9,9 +9,7 @@ use serde::{Deserialize, Serialize};
 ///   "membership = full r/w" level)
 /// - [`Privilege::Admin`] — `Edit` plus member management (change privileges,
 ///   invite/remove members)
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Privilege {
     View,

@@ -221,4 +221,171 @@ mod tests {
                 .is_some()
         );
     }
+
+    // --- Omnical §17.10: guest share privilege stamping ---------------------
+
+    use crate::SqliteCollectionShareStore;
+    use rustical_store::CollectionShareStore;
+
+    /// Insert a guest principal and grant it a share over `owner/collection`.
+    async fn insert_guest_with_share(
+        context: &TestStoreContext,
+        guest: &str,
+        privilege: rustical_store::auth::Privilege,
+    ) {
+        context
+            .principal_store
+            .insert_principal(
+                Principal {
+                    id: guest.to_owned(),
+                    displayname: None,
+                    principal_type: PrincipalType::Individual,
+                    password: None,
+                    memberships: vec![],
+                    needs_password_change: false,
+                    privileges: Default::default(),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        let shares = SqliteCollectionShareStore::new(context.cal_store.clone());
+        shares
+            .add_share("user", "work", "calendar", privilege, guest, &None, "user")
+            .await
+            .unwrap();
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn guest_privilege_is_stamped(
+        #[from(test_store_context)]
+        #[future]
+        context: TestStoreContext,
+    ) {
+        let context = context.await;
+        let principal_store = context.principal_store.clone();
+
+        insert_guest_with_share(
+            &context,
+            "guest-view",
+            rustical_store::auth::Privilege::View,
+        )
+        .await;
+        let guest = principal_store
+            .get_principal("guest-view")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            guest.privilege_for("guest-view"),
+            rustical_store::auth::Privilege::View,
+            "a view guest is stamped read-only instead of the self-default Admin"
+        );
+        assert!(!guest.can_write("guest-view"));
+
+        insert_guest_with_share(
+            &context,
+            "guest-edit",
+            rustical_store::auth::Privilege::Edit,
+        )
+        .await;
+        let guest = principal_store
+            .get_principal("guest-edit")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            guest.privilege_for("guest-edit"),
+            rustical_store::auth::Privilege::Edit
+        );
+        assert!(guest.can_write("guest-edit"));
+
+        // `validate_app_token` (the DAV auth path) returns the same stamped
+        // principal.
+        let token_value = "s3cret-token-value";
+        let token_id = principal_store
+            .add_app_token(
+                "guest-edit",
+                "test-token".to_string(),
+                token_value.to_string(),
+            )
+            .await
+            .unwrap();
+        let principal = principal_store
+            .validate_app_token("guest-edit", &format!("{token_id}_{token_value}"))
+            .await
+            .unwrap()
+            .expect("valid app token authenticates the guest");
+        assert_eq!(
+            principal.privilege_for("guest-edit"),
+            rustical_store::auth::Privilege::Edit
+        );
+        assert!(principal.can_write("guest-edit"));
+
+        // And the bulk listing agrees.
+        let listed = principal_store.get_principals().await.unwrap();
+        let listed = listed
+            .iter()
+            .find(|p| p.id == "guest-edit")
+            .expect("guest listed");
+        assert_eq!(
+            listed.privilege_for("guest-edit"),
+            rustical_store::auth::Privilege::Edit
+        );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn non_guest_is_not_stamped(
+        #[from(test_store_context)]
+        #[future]
+        context: TestStoreContext,
+    ) {
+        let context = context.await;
+        let principal_store = context.principal_store.clone();
+
+        // The fixture's `user` has no share → no own-id privilege row, so the
+        // self-default stays Admin.
+        let user = principal_store
+            .get_principal("user")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !user.privileges.contains_key("user"),
+            "a regular principal must not be stamped as a guest"
+        );
+        assert_eq!(
+            user.privilege_for("user"),
+            rustical_store::auth::Privilege::Admin
+        );
+        assert!(user.can_write("user"));
+
+        // A revoked share must not stamp the guest anymore.
+        insert_guest_with_share(
+            &context,
+            "guest-revoked",
+            rustical_store::auth::Privilege::View,
+        )
+        .await;
+        let share = SqliteCollectionShareStore::new(context.cal_store.clone())
+            .get_share_by_guest("guest-revoked")
+            .await
+            .unwrap()
+            .unwrap();
+        SqliteCollectionShareStore::new(context.cal_store.clone())
+            .revoke_share(&share.id)
+            .await
+            .unwrap();
+        let guest = principal_store
+            .get_principal("guest-revoked")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !guest.privileges.contains_key("guest-revoked"),
+            "revoked shares must not stamp a privilege"
+        );
+    }
 }

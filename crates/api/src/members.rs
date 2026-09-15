@@ -89,9 +89,7 @@ async fn add_member<
     // Omnical §17.9.2: member management is admin-only (the owner is an
     // implicit admin via the `group_members` backfill).
     if !principal.is_admin(&group_id) {
-        return Err(ApiError::Forbidden(
-            "Only an admin can add members".into(),
-        ));
+        return Err(ApiError::Forbidden("Only an admin can add members".into()));
     }
 
     state

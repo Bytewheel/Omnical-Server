@@ -635,7 +635,8 @@ impl AddressbookWriteStore for SqliteAddressbookStore {
         addressbook: Addressbook,
     ) -> Result<(), rustical_store::Error> {
         if let Some(ref displayname) = addressbook.displayname {
-            self.check_displayname_unique(displayname, &addressbook.principal).await?;
+            self.check_displayname_unique(displayname, &addressbook.principal)
+                .await?;
         }
         let mut tx = self
             .db

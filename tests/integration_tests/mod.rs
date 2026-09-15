@@ -6,7 +6,8 @@ use rustical_caldav::CalDavConfig;
 use rustical_frontend::FrontendConfig;
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
 use rustical_store_sqlite::{
-    SqliteCalendarSourceStore, SqliteInviteStore, SqliteSubscriptionStore,
+    SqliteCalendarSourceStore, SqliteCollectionShareStore, SqliteInviteStore,
+    SqliteSubscriptionStore,
 };
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -26,6 +27,7 @@ pub fn get_app(context: TestStoreContext) -> axum::Router {
     let subscription_store = Arc::new(SqliteSubscriptionStore::new(cal_store.clone()));
     let source_store = Arc::new(SqliteCalendarSourceStore::new(cal_store.clone()));
     let invite_store = Arc::new(SqliteInviteStore::new(cal_store.clone()));
+    let share_store = Arc::new(SqliteCollectionShareStore::new(cal_store.clone()));
 
     make_app(
         Arc::new(addr_store),
@@ -49,6 +51,8 @@ pub fn get_app(context: TestStoreContext) -> axum::Router {
         source_store,
         "https://public.example".to_owned(),
         invite_store,
+        share_store,
+        vec![],
     )
 }
 

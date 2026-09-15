@@ -12,14 +12,17 @@ use rustical_dav_push::{DavPushService, DavPushStore, VapidStore};
 use rustical_scheduling::Scheduler;
 use rustical_store::auth::AuthenticationProvider;
 use rustical_store::{AddressbookStore, CalendarStore, CollectionOperation, PrefixedCalendarStore};
-use rustical_store::{CalendarSourceStore, InviteStore, SchedulingStore, SubscriptionStore};
+use rustical_store::{
+    CalendarSourceStore, CollectionShareStore, InviteStore, SchedulingStore, SubscriptionStore,
+};
 use rustical_store_sqlite::SqliteAddressbookStore;
 use rustical_store_sqlite::SqliteCalendarStore;
 use rustical_store_sqlite::SqlitePrincipalStore;
 use rustical_store_sqlite::SqliteSchedulingStore;
 use rustical_store_sqlite::SqliteSubscriptionStore;
 use rustical_store_sqlite::{
-    SqliteCalendarSourceStore, SqliteDavPushStore, SqliteInviteStore, create_db_pool,
+    SqliteCalendarSourceStore, SqliteCollectionShareStore, SqliteDavPushStore, SqliteInviteStore,
+    create_db_pool,
 };
 use setup_tracing::setup_tracing;
 use std::fs;
@@ -68,6 +71,8 @@ pub enum Command {
     Principals(PrincipalsArgs),
     Subscriptions(SubscriptionsArgs),
     Invites(InvitesArgs),
+    #[command(about = "Manage per-calendar guest shares (Omnical §17.10)")]
+    GuestShare(GuestSharesArgs),
 }
 
 #[allow(clippy::missing_errors_doc)]
@@ -84,6 +89,7 @@ pub async fn get_data_stores(
     Arc<dyn SubscriptionStore>,
     Arc<dyn InviteStore>,
     Arc<dyn CalendarSourceStore>,
+    Arc<dyn CollectionShareStore>,
 )> {
     Ok(match &config {
         DataStoreConfig::Sqlite(SqliteDataStoreConfig {
@@ -113,6 +119,10 @@ pub async fn get_data_stores(
                 Arc::new(SqliteInviteStore::new(cal_store.clone()));
             let calendar_source_store: Arc<dyn CalendarSourceStore> =
                 Arc::new(SqliteCalendarSourceStore::new(cal_store.clone()));
+            // Guest calendar shares (Omnical §17.10) share the pool and push
+            // channel too.
+            let share_store: Arc<dyn CollectionShareStore> =
+                Arc::new(SqliteCollectionShareStore::new(cal_store.clone()));
             let cal_store = Arc::new(cal_store);
             if *run_repairs {
                 info!("Running repair tasks");
@@ -141,6 +151,7 @@ pub async fn get_data_stores(
                 subscription_store,
                 invite_store,
                 calendar_source_store,
+                share_store,
             )
         }
     })
@@ -170,6 +181,7 @@ pub async fn cmd_serve(
         subscription_store,
         invite_store,
         _calendar_source_store,
+        share_store,
     ) = get_data_stores(!args.no_migrations, &config.data_store).await?;
 
     if config.dav_push.enabled {
@@ -238,6 +250,8 @@ pub async fn cmd_serve(
         _calendar_source_store,
         subscriptions_public_url,
         invite_store.clone(),
+        share_store,
+        config.scheduling.smtp.clone(),
     );
     let app = ServiceExt::<Request>::into_make_service(
         NormalizePathLayer::trim_trailing_slash().layer(app),

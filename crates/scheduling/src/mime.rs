@@ -221,6 +221,65 @@ pub fn itip_subject(method: &str, event: &ics::EventInfo) -> String {
     }
 }
 
+/// Build a plaintext guest-calendar-share email (Omnical §17.10.7): the
+/// one-time credential the owner has just minted, with the server URL, the
+/// guest username and the app token a CalDAV client needs.
+///
+/// The credential is shown once in the portal banner and mailed here so the
+/// owner does not have to copy it manually. CRLF line endings, single `-`-free
+/// body so `send_mail` dot-stuffing never kicks in.
+#[must_use]
+pub fn build_guest_invite(
+    account: &SmtpAccount,
+    to: &str,
+    server_url: &str,
+    username: &str,
+    credential: &str,
+    calendar_id: &str,
+    owner: &str,
+) -> String {
+    let from_domain = account
+        .identity
+        .rsplit('@')
+        .next()
+        .unwrap_or("omnical.local");
+    let message_id = uuid::Uuid::new_v4();
+    let date = chrono::Utc::now().to_rfc2822();
+    let from_header = match &account.displayname {
+        Some(name) => format!("{} <{}>", rfc2047_encode(name), account.identity),
+        None => account.identity.clone(),
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!("From: {from_header}\r\n"));
+    out.push_str(&format!("To: <{to}>\r\n"));
+    out.push_str(&format!(
+        "Subject: =?utf-8?B?{}?=\r\n",
+        base64::engine::general_purpose::STANDARD
+            .encode(format!("Calendar access for you: {calendar_id}").as_bytes(),)
+    ));
+    out.push_str(&format!("Date: {date}\r\n"));
+    out.push_str(&format!("Message-ID: <{message_id}@{from_domain}>\r\n"));
+    out.push_str("X-Mailer: Omnical (RustiCal guest share)\r\n");
+    out.push_str("MIME-Version: 1.0\r\n");
+    out.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+    out.push_str("Content-Transfer-Encoding: 8bit\r\n");
+    out.push_str("\r\n");
+    out.push_str(&format!(
+        "You have been given access to the calendar \"{calendar_id}\" by {owner}.\r\n\
+         \r\n\
+         Add it to your CalDAV calendar app (Apple Calendar, DAVx5, ...) with:\r\n\
+         \r\n\
+         Server URL: {server_url}\r\n\
+         Username: {username}\r\n\
+         App token: {credential}\r\n\
+         \r\n\
+         The app token is only shown here and in the Share page right after \
+         creating it. Keep it secret.\r\n"
+    ));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +294,26 @@ mod tests {
             password: "secret".to_owned(),
             displayname: Some("Nick Example".to_owned()),
         }
+    }
+
+    #[test]
+    fn guest_invite_is_plaintext_with_credential() {
+        let account = account();
+        let mail = build_guest_invite(
+            &account,
+            "guest@example.org",
+            "https://cal.example.com/caldav",
+            "guest-abc",
+            "defg_zQ9W...",
+            "Personal",
+            "nick",
+        );
+        assert!(mail.starts_with("From: Nick Example <nick@example.com>\r\n"));
+        assert!(mail.contains("To: <guest@example.org>\r\n"));
+        assert!(mail.contains("Server URL: https://cal.example.com/caldav\r\n"));
+        assert!(mail.contains("Username: guest-abc\r\n"));
+        assert!(mail.contains("App token: defg_zQ9W...\r\n"));
+        assert!(mail.contains("only shown here and in the Share page right after"));
     }
 
     #[test]

@@ -73,7 +73,10 @@ pub async fn route_mkcol<AS: AddressbookStore, DP: DavPushStore>(
     };
 
     if let Some(ref displayname) = addressbook.displayname {
-        match addr_store.check_displayname_unique(displayname, &principal).await {
+        match addr_store
+            .check_displayname_unique(displayname, &principal)
+            .await
+        {
             Err(rustical_store::Error::AlreadyExists) => {
                 return Ok((
                     StatusCode::CONFLICT,

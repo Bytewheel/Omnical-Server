@@ -168,7 +168,10 @@ impl Scheduler {
             // No ORGANIZER on the event (e.g. khal-created events):
             // the acting user acts as the organizer if they are an
             // attendee or own the calendar being written to.
-            let is_attendee = event.attendees.iter().any(|a| a.email.eq_ignore_ascii_case(acting_user));
+            let is_attendee = event
+                .attendees
+                .iter()
+                .any(|a| a.email.eq_ignore_ascii_case(acting_user));
             let owns_calendar = current.0.eq_ignore_ascii_case(acting_user);
             if is_attendee || owns_calendar {
                 self.organizer_put(acting_user, current, &event, old_ics, new_ics, acting_user)
@@ -549,25 +552,42 @@ impl Scheduler {
                 let mut principals = vec![attendee_email.to_owned()];
                 match self.store.principal_memberships(attendee_email).await {
                     Ok(memberships) => principals.extend(memberships),
-                    Err(err) => warn!("scheduling: memberships lookup failed for {attendee_email}: {err}"),
+                    Err(err) => {
+                        warn!("scheduling: memberships lookup failed for {attendee_email}: {err}")
+                    }
                 }
                 for principal in principals {
-                    let Ok(copies) = self.store.find_calendar_objects_by_uid(&principal, &event.uid).await else {
+                    let Ok(copies) = self
+                        .store
+                        .find_calendar_objects_by_uid(&principal, &event.uid)
+                        .await
+                    else {
                         success = false;
                         continue;
                     };
                     for (cal_id, object_id, stored_ics) in copies {
                         if let Some(parsed) = ics::parse_event(&stored_ics) {
-                            if parsed.organizer.as_deref().is_none_or(|o| !o.eq_ignore_ascii_case(organizer)) {
+                            if parsed
+                                .organizer
+                                .as_deref()
+                                .is_none_or(|o| !o.eq_ignore_ascii_case(organizer))
+                            {
                                 continue;
                             }
                         }
-                        let updated = ics::set_attendee_partstat(&stored_ics, attendee_email, partstat);
+                        let updated =
+                            ics::set_attendee_partstat(&stored_ics, attendee_email, partstat);
                         if updated == stored_ics {
                             continue;
                         }
-                        if let Err(err) = self.store.update_calendar_object_ics(&principal, &cal_id, &object_id, &updated).await {
-                            warn!("scheduling: could not update attendee copy {principal}/{cal_id}/{object_id}: {err}");
+                        if let Err(err) = self
+                            .store
+                            .update_calendar_object_ics(&principal, &cal_id, &object_id, &updated)
+                            .await
+                        {
+                            warn!(
+                                "scheduling: could not update attendee copy {principal}/{cal_id}/{object_id}: {err}"
+                            );
                             success = false;
                         }
                     }

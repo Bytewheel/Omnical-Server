@@ -12,10 +12,11 @@ use rstest::rstest;
 use rustical_ical::CalendarObjectType;
 use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType};
 use rustical_store::{
-    Addressbook, AddressbookWriteStore, Calendar, CalendarMetadata, CalendarWriteStore, InviteStore,
+    Addressbook, AddressbookWriteStore, Calendar, CalendarMetadata, CalendarWriteStore,
+    CollectionShareStore, InviteStore,
 };
-use rustical_store_sqlite::SqliteInviteStore;
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
+use rustical_store_sqlite::{SqliteCollectionShareStore, SqliteInviteStore, SqlitePrincipalStore};
 use tower::ServiceExt;
 
 async fn insert_group(context: &TestStoreContext, group_id: &str, displayname: &str, owner: &str) {
@@ -915,5 +916,250 @@ async fn test_share_tile_invite_scoped_to_its_collection(
     assert!(
         body.contains(&group_url),
         "the other tile's invite survives"
+    );
+}
+
+/// ──────────────────────────────────────────────────────────────────────────
+/// Guest-shares tests (Omnical §17.10 portal flow)
+/// ──────────────────────────────────────────────────────────────────────────
+
+fn extract_between<'a>(body: &'a str, open: &str, close: &str) -> &'a str {
+    let start = body.find(open).expect("open marker") + open.len();
+    let rest = &body[start..];
+    let end = rest.find(close).expect("close marker");
+    &rest[..end]
+}
+
+fn extract_guest_username(body: &str) -> String {
+    extract_between(body, "Username: <code>", "</code>").to_owned()
+}
+
+fn extract_guest_credential(body: &str) -> String {
+    extract_between(body, "App token: <code>", "</code>").to_owned()
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_guest_invite_mints_share_and_shows_credential_banner(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let principal_store = SqlitePrincipalStore::new(context.db.clone());
+    let share_store = SqliteCollectionShareStore::new(context.cal_store.clone());
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/guest-invite",
+        "user",
+        "pass",
+        form("principal=user&collection_id=personal&privilege=edit&email=Guest%40example.com"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+
+    // One-time credential banner.
+    assert!(
+        body.contains("Guest access sent to guest@example.com!")
+            || body.contains("Guest access created!"),
+        "credential banner shown: {body}"
+    );
+    assert!(body.contains("https://public.example/caldav"));
+    let username = extract_guest_username(&body);
+    assert!(username.starts_with("guest-"), "username: {username}");
+    let credential = extract_guest_credential(&body);
+    let (prefix, secret) = credential.split_once('_').expect("id_token format");
+    assert_eq!(prefix.len(), 4, "4-char prefix: {prefix}");
+    assert_eq!(secret.len(), 64, "64-char secret: {secret}");
+
+    // The banner shows the target email.
+    assert!(body.contains("guest@example.com"));
+
+    // Guest principal was created.
+    let guest = principal_store
+        .get_principal(&username)
+        .await
+        .unwrap()
+        .expect("guest principal exists");
+    assert!(guest.password.is_none(), "no portal password");
+    assert_eq!(
+        guest.principal_type,
+        rustical_store::auth::PrincipalType::Individual
+    );
+
+    // Share row persisted.
+    let shares = share_store
+        .get_shares_for_collection("user", "personal")
+        .await
+        .unwrap();
+    assert_eq!(shares.len(), 1);
+    let share = &shares[0];
+    assert_eq!(share.guest_principal, username);
+    assert_eq!(share.privilege.as_str(), "edit");
+    assert_eq!(share.target_email.as_deref(), Some("guest@example.com"));
+    assert_eq!(share.created_by, "user");
+
+    // DAV auth path: validate_app_token authenticates the guest and
+    // stamps the share privilege.
+    let authed = principal_store
+        .validate_app_token(&username, &credential)
+        .await
+        .unwrap()
+        .expect("valid credential");
+    assert_eq!(
+        authed.privilege_for(&username),
+        rustical_store::auth::Privilege::Edit
+    );
+    assert!(authed.can_write(&username));
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_guest_invite_rejects_non_admin_and_foreign(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let app = get_app(context);
+
+    // Foreign group (owned by bob) → 403.
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/guest-invite",
+        "user",
+        "pass",
+        form("principal=foreigngroup&collection_id=foreigncal&privilege=view"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Other user's principal → 403.
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/guest-invite",
+        "user",
+        "pass",
+        form("principal=bob&collection_id=personal&privilege=view"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_guest_invite_rejects_invalid_privilege(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let share_store = SqliteCollectionShareStore::new(context.cal_store.clone());
+    let app = get_app(context);
+
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/guest-invite",
+        "user",
+        "pass",
+        form("principal=user&collection_id=personal&privilege=bogus"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    assert!(body.contains("Invalid privilege"), "error shown: {body}");
+    assert!(
+        share_store
+            .get_shares_for_collection("user", "personal")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_guest_invite_revoke_removes_access_from_tile(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let share_store = SqliteCollectionShareStore::new(context.cal_store.clone());
+    let app = get_app(context);
+
+    // Mint a guest share.
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/guest-invite",
+        "user",
+        "pass",
+        form("principal=user&collection_id=personal&privilege=view"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Tile shows the guest row with a revoke form.
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/share",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let body = resp.extract_string().await;
+    assert!(body.contains("Guest guest-"), "guest row shown");
+    assert!(body.contains("· view access"), "privilege badge");
+    // The revoke form points to the share id.
+    let share_id = share_store
+        .get_shares_for_collection("user", "personal")
+        .await
+        .unwrap()
+        .remove(0)
+        .id;
+    let revoke_path = format!("/frontend/user/user/share/guest-invite/{share_id}/revoke");
+    assert!(
+        body.contains(&revoke_path),
+        "revoke form present: {revoke_path}"
+    );
+
+    // Revoke the share.
+    let req = request(
+        Method::POST,
+        &revoke_path,
+        "user",
+        "pass",
+        form("principal=user"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // The tile no longer shows the guest row.
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/share",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    let body = resp.extract_string().await;
+    assert!(!body.contains("Guest guest-"), "guest row gone");
+
+    // Access resolved through get_share_by_guest is gone.
+    assert!(
+        share_store
+            .get_shares_for_collection("user", "personal")
+            .await
+            .unwrap()
+            .is_empty()
     );
 }

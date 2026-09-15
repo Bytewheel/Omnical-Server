@@ -68,7 +68,7 @@ pub struct SubscriptionsArgs {
 
 #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 pub async fn cmd_subscriptions(args: SubscriptionsArgs, config: Config) -> anyhow::Result<()> {
-    let (addr_store, cal_store, _, _, _, _, sub_store, _, _) =
+    let (addr_store, cal_store, _, _, _, _, sub_store, _, _, _) =
         get_data_stores(true, &config.data_store).await?;
 
     let base_url = public_base_url(

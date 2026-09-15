@@ -10,6 +10,8 @@ mod calendar_store;
 pub use calendar_store::SqliteCalendarStore;
 mod calendar_source_store;
 pub use calendar_source_store::SqliteCalendarSourceStore;
+mod collection_share_store;
+pub use collection_share_store::SqliteCollectionShareStore;
 mod dav_push_store;
 pub use dav_push_store::SqliteDavPushStore;
 pub mod error;

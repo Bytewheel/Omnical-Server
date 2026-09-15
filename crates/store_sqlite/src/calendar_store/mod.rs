@@ -14,7 +14,7 @@ use rustical_store::{
 };
 use rustical_store::{CollectionOperation, CollectionOperationInfo};
 use sqlx::types::chrono::NaiveDateTime;
-use sqlx::{Acquire, Executor, Sqlite, SqlitePool, Transaction};
+use sqlx::{Acquire, Executor, Row, Sqlite, SqlitePool, Transaction};
 use tokio::sync::mpsc::Sender;
 use tracing::{error, error_span, instrument, warn};
 
@@ -122,6 +122,70 @@ impl SqliteCalendarStore {
     #[must_use]
     pub(crate) fn db_pool(&self) -> &SqlitePool {
         &self.db
+    }
+
+    // Omnical §17.10: resolve the physical owner of `(principal, cal_id)`.
+    // Returns the requesting principal when they own the calendar directly,
+    // otherwise the share's owner when an active `calendar` share maps the
+    // request to a collection, otherwise `None` (no access at all).
+    #[instrument]
+    async fn _resolve_owner(&self, principal: &str, cal_id: &str) -> Result<Option<String>, Error> {
+        let direct = sqlx::query("SELECT 1 FROM calendars WHERE principal = ?1 AND id = ?2")
+            .bind(principal)
+            .bind(cal_id)
+            .fetch_optional(&self.db)
+            .await
+            .map_err(crate::Error::from)?;
+        if direct.is_some() {
+            return Ok(Some(principal.to_owned()));
+        }
+        let row = sqlx::query(
+            "SELECT owner_principal FROM collection_shares \
+             WHERE guest_principal = ?1 AND collection_id = ?2 \
+               AND kind = 'calendar' AND revoked_at IS NULL",
+        )
+        .bind(principal)
+        .bind(cal_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(crate::Error::from)?;
+        Ok(row.map(|row| row.get("owner_principal")))
+    }
+
+    /// Resolve the physical owner, or `NotFound` when neither direct
+    /// ownership nor an active share grants access.
+    #[instrument]
+    async fn _effective_owner(&self, principal: &str, cal_id: &str) -> Result<String, Error> {
+        self._resolve_owner(principal, cal_id)
+            .await?
+            .ok_or_else(|| Error::NotFound)
+    }
+
+    // Omnical §17.10: collect the calendars a guest is invited to, each
+    // rewritten to `cal.principal = guest_id` (the acting principal) so the
+    // existing DAV `is_principal`/`can_write` checks pass unchanged.
+    #[instrument]
+    async fn _resolve_shared_calendars(&self, principal: &str) -> Result<Vec<Calendar>, Error> {
+        let rows = sqlx::query(
+            "SELECT owner_principal, collection_id FROM collection_shares \
+             WHERE guest_principal = ? AND kind = 'calendar' AND revoked_at IS NULL",
+        )
+        .bind(principal)
+        .fetch_all(&self.db)
+        .await
+        .map_err(crate::Error::from)?;
+        let mut calendars = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (owner, collection_id): (String, String) =
+                (row.get("owner_principal"), row.get("collection_id"));
+            // Skip shares whose collection was deleted/removed meanwhile.
+            if let Ok(mut cal) = Self::_get_calendar(&self.db, &owner, &collection_id, false).await
+            {
+                cal.principal = principal.to_owned();
+                calendars.push(cal);
+            }
+        }
+        Ok(calendars)
     }
 
     // Logs an operation to the events
@@ -788,12 +852,35 @@ impl CalendarReadStore for SqliteCalendarStore {
         id: &str,
         show_deleted: bool,
     ) -> Result<Calendar, Error> {
-        Self::_get_calendar(&self.db, principal, id, show_deleted).await
+        // Omnical §17.10: on a direct miss, resolve via a guest share and
+        // rewrite the returned calendar to the acting principal.
+        match Self::_get_calendar(&self.db, principal, id, show_deleted).await {
+            Ok(cal) => Ok(cal),
+            Err(Error::NotFound) => {
+                let Some(owner) = self._resolve_owner(principal, id).await? else {
+                    return Err(Error::NotFound);
+                };
+                let mut cal = Self::_get_calendar(&self.db, &owner, id, show_deleted).await?;
+                cal.principal = principal.to_owned();
+                Ok(cal)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     #[instrument]
     async fn get_calendars(&self, principal: &str) -> Result<Vec<Calendar>, Error> {
-        Self::_get_calendars(&self.db, principal).await
+        let mut calendars = Self::_get_calendars(&self.db, principal).await?;
+        // Omnical §17.10: append shared calendars (rewritten to the acting
+        // principal); ids are unique per principal namespace, so a shared id
+        // already owned directly is skipped.
+        for shared in self._resolve_shared_calendars(principal).await? {
+            if calendars.iter().any(|cal| cal.id == shared.id) {
+                continue;
+            }
+            calendars.push(shared);
+        }
+        Ok(calendars)
     }
 
     #[instrument]
@@ -808,7 +895,8 @@ impl CalendarReadStore for SqliteCalendarStore {
         cal_id: &str,
         query: CalendarQuery,
     ) -> Result<Vec<(String, CalendarObject)>, Error> {
-        let objects = Self::_calendar_query(&self.db, principal, cal_id, query).await?;
+        let owner = self._effective_owner(principal, cal_id).await?;
+        let objects = Self::_calendar_query(&self.db, &owner, cal_id, query).await?;
         if self.skip_broken {
             Ok(objects
                 .filter_map(|(id, res)| Some((id, res.ok()?)))
@@ -825,9 +913,10 @@ impl CalendarReadStore for SqliteCalendarStore {
         principal: &str,
         cal_id: &str,
     ) -> Result<CollectionMetadata, Error> {
+        let owner = self._effective_owner(principal, cal_id).await?;
         let mut sizes = vec![];
         let mut deleted_sizes = vec![];
-        for (size, deleted) in Self::_list_objects(&self.db, principal, cal_id).await? {
+        for (size, deleted) in Self::_list_objects(&self.db, &owner, cal_id).await? {
             if deleted {
                 deleted_sizes.push(size);
             } else {
@@ -848,7 +937,8 @@ impl CalendarReadStore for SqliteCalendarStore {
         principal: &str,
         cal_id: &str,
     ) -> Result<Vec<(String, CalendarObject)>, Error> {
-        let objects = Self::_get_objects(&self.db, principal, cal_id).await?;
+        let owner = self._effective_owner(principal, cal_id).await?;
+        let objects = Self::_get_objects(&self.db, &owner, cal_id).await?;
         if self.skip_broken {
             Ok(objects
                 .filter_map(|(id, res)| Some((id, res.ok()?)))
@@ -868,7 +958,17 @@ impl CalendarReadStore for SqliteCalendarStore {
         object_id: &str,
         show_deleted: bool,
     ) -> Result<CalendarObject, Error> {
-        Self::_get_object(&self.db, principal, cal_id, object_id, show_deleted).await
+        // Omnical §17.10: on a direct miss, resolve via a guest share.
+        match Self::_get_object(&self.db, principal, cal_id, object_id, show_deleted).await {
+            Ok(object) => Ok(object),
+            Err(Error::NotFound) => {
+                let Some(owner) = self._resolve_owner(principal, cal_id).await? else {
+                    return Err(Error::NotFound);
+                };
+                Self::_get_object(&self.db, &owner, cal_id, object_id, show_deleted).await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     #[instrument]
@@ -878,7 +978,17 @@ impl CalendarReadStore for SqliteCalendarStore {
         cal_id: &str,
         synctoken: i64,
     ) -> Result<(Vec<(String, CalendarObject)>, Vec<String>, i64), Error> {
-        Self::_sync_changes(&self.db, principal, cal_id, synctoken, self.skip_broken).await
+        // Omnical §17.10: on a direct miss, resolve via a guest share.
+        match Self::_sync_changes(&self.db, principal, cal_id, synctoken, self.skip_broken).await {
+            Ok(changes) => Ok(changes),
+            Err(Error::NotFound) => {
+                let Some(owner) = self._resolve_owner(principal, cal_id).await? else {
+                    return Err(Error::NotFound);
+                };
+                Self::_sync_changes(&self.db, &owner, cal_id, synctoken, self.skip_broken).await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn is_read_only(&self, _cal_id: &str) -> bool {
@@ -891,7 +1001,8 @@ impl CalendarWriteStore for SqliteCalendarStore {
     #[instrument]
     async fn insert_calendar(&self, calendar: Calendar) -> Result<(), Error> {
         if let Some(ref displayname) = calendar.meta.displayname {
-            self.check_displayname_unique(displayname, &calendar.principal).await?;
+            self.check_displayname_unique(displayname, &calendar.principal)
+                .await?;
         }
         Self::_insert_calendar(&self.db, calendar).await
     }
@@ -902,15 +1013,14 @@ impl CalendarWriteStore for SqliteCalendarStore {
         displayname: &str,
         principal: &str,
     ) -> Result<(), Error> {
-        let exists = sqlx::query(
-            "SELECT 1 FROM calendars WHERE displayname = ? AND principal != ? LIMIT 1",
-        )
-        .bind(displayname)
-        .bind(principal)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(crate::Error::from)?
-        .is_some();
+        let exists =
+            sqlx::query("SELECT 1 FROM calendars WHERE displayname = ? AND principal != ? LIMIT 1")
+                .bind(displayname)
+                .bind(principal)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(crate::Error::from)?
+                .is_some();
         if exists {
             return Err(Error::AlreadyExists);
         }
@@ -924,7 +1034,11 @@ impl CalendarWriteStore for SqliteCalendarStore {
         id: &str,
         calendar: Calendar,
     ) -> Result<(), Error> {
-        Self::_update_calendar(&self.db, principal, id, calendar).await
+        // Omnical §17.10: persist a shared calendar under its physical owner.
+        let owner = self._effective_owner(principal, id).await?;
+        let mut calendar = calendar;
+        calendar.principal = owner.clone();
+        Self::_update_calendar(&self.db, &owner, id, calendar).await
     }
 
     // Does not actually delete the calendar but just disables it
@@ -941,13 +1055,16 @@ impl CalendarWriteStore for SqliteCalendarStore {
             .await
             .map_err(crate::Error::from)?;
 
-        let cal = match Self::_get_calendar(&mut *tx, principal, id, true).await {
+        // Omnical §17.10: resolve a shared calendar to its physical owner.
+        let owner = self._effective_owner(principal, id).await?;
+
+        let cal = match Self::_get_calendar(&mut *tx, &owner, id, true).await {
             Ok(cal) => Some(cal),
             Err(Error::NotFound) => None,
             Err(err) => return Err(err),
         };
 
-        Self::_delete_calendar(&mut *tx, principal, id, use_trashbin).await?;
+        Self::_delete_calendar(&mut *tx, &owner, id, use_trashbin).await?;
         tx.commit().await.map_err(crate::Error::from)?;
 
         if let Some(cal) = cal {
@@ -1039,7 +1156,10 @@ impl CalendarWriteStore for SqliteCalendarStore {
             .await
             .map_err(crate::Error::from)?;
 
-        let calendar = Self::_get_calendar(&mut *tx, principal, cal_id, true).await?;
+        // Omnical §17.10: write a shared calendar's objects under the owner.
+        let owner = self._effective_owner(principal, cal_id).await?;
+
+        let calendar = Self::_get_calendar(&mut *tx, &owner, cal_id, true).await?;
         if calendar.subscription_url.is_some() {
             // We cannot commit an object to a subscription calendar
             return Err(Error::ReadOnly);
@@ -1050,14 +1170,14 @@ impl CalendarWriteStore for SqliteCalendarStore {
             sync_token = Some(
                 Self::log_object_operation(
                     &mut tx,
-                    principal,
+                    &owner,
                     cal_id,
                     &object_id,
                     ChangeOperation::Add,
                 )
                 .await?,
             );
-            Self::_put_object(&mut *tx, principal, cal_id, &object_id, &object, overwrite).await?;
+            Self::_put_object(&mut *tx, &owner, cal_id, &object_id, &object, overwrite).await?;
         }
 
         tx.commit().await.map_err(crate::Error::from)?;
@@ -1085,10 +1205,13 @@ impl CalendarWriteStore for SqliteCalendarStore {
             .await
             .map_err(crate::Error::from)?;
 
-        Self::_delete_object(&mut *tx, principal, cal_id, id, use_trashbin).await?;
+        // Omnical §17.10: resolve a shared calendar to its physical owner.
+        let owner = self._effective_owner(principal, cal_id).await?;
+
+        Self::_delete_object(&mut *tx, &owner, cal_id, id, use_trashbin).await?;
 
         let sync_token =
-            Self::log_object_operation(&mut tx, principal, cal_id, id, ChangeOperation::Delete)
+            Self::log_object_operation(&mut tx, &owner, cal_id, id, ChangeOperation::Delete)
                 .await?;
         tx.commit().await.map_err(crate::Error::from)?;
 
@@ -1113,10 +1236,13 @@ impl CalendarWriteStore for SqliteCalendarStore {
             .await
             .map_err(crate::Error::from)?;
 
-        Self::_restore_object(&mut *tx, principal, cal_id, object_id).await?;
+        // Omnical §17.10: resolve a shared calendar to its physical owner.
+        let owner = self._effective_owner(principal, cal_id).await?;
+
+        Self::_restore_object(&mut *tx, &owner, cal_id, object_id).await?;
 
         let sync_token =
-            Self::log_object_operation(&mut tx, principal, cal_id, object_id, ChangeOperation::Add)
+            Self::log_object_operation(&mut tx, &owner, cal_id, object_id, ChangeOperation::Add)
                 .await?;
         tx.commit().await.map_err(crate::Error::from)?;
 

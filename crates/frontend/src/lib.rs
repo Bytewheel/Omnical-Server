@@ -11,9 +11,11 @@ use headers::{ContentType, HeaderMapExt};
 use http::{Method, StatusCode};
 use routes::{addressbooks::route_addressbooks, calendars::route_calendars};
 use rustical_oidc::{OidcConfig, OidcServiceConfig, oidc_router};
+use rustical_scheduling::SmtpAccount;
 use rustical_store::SubscriptionStore;
 use rustical_store::{
-    AddressbookStore, CalendarSourceStore, CalendarStore, InviteStore, PrefixedCalendarStore,
+    AddressbookStore, CalendarSourceStore, CalendarStore, CollectionShareStore, InviteStore,
+    PrefixedCalendarStore,
     auth::{AuthenticationProvider, middleware::AuthenticationLayer},
 };
 use std::sync::Arc;
@@ -45,8 +47,8 @@ use crate::routes::{
     login::{route_get_login, route_post_login, route_post_logout},
     password::{password_change_gate, route_get_password_change, route_post_password_change},
     share::{
-        route_get_share, route_share_create, route_share_invite, route_share_invite_revoke,
-        route_share_revoke,
+        route_get_share, route_share_create, route_share_guest_invite, route_share_guest_revoke,
+        route_share_invite, route_share_invite_revoke, route_share_revoke,
     },
     timezones::route_timezones,
     user::{route_get_home, route_root, route_user_named},
@@ -71,6 +73,8 @@ pub fn frontend_router<
     source_store: Arc<dyn CalendarSourceStore>,
     subscriptions_public_url: String,
     invite_store: Arc<dyn InviteStore>,
+    share_store: Arc<dyn CollectionShareStore>,
+    smtp_accounts: Vec<SmtpAccount>,
 ) -> Router {
     let user_router = Router::new()
         .route("/", get(route_get_home))
@@ -131,6 +135,15 @@ pub fn frontend_router<
         .route(
             "/{user}/share/invite/{code}/revoke",
             post(route_share_invite_revoke::<AP>),
+        )
+        // Guest shares (Omnical §17.10)
+        .route(
+            "/{user}/share/guest-invite",
+            post(route_share_guest_invite::<AP, CS, AS>),
+        )
+        .route(
+            "/{user}/share/guest-invite/{id}/revoke",
+            post(route_share_guest_revoke::<AP>),
         )
         // Groups (Omnical §17.9)
         .route("/{user}/groups", get(route_groups::<AP, CS, AS>))
@@ -206,7 +219,9 @@ pub fn frontend_router<
         .layer(Extension(sub_store))
         .layer(Extension(source_store))
         .layer(Extension(subscriptions_public_url))
-        .layer(Extension(invite_store));
+        .layer(Extension(invite_store))
+        .layer(Extension(share_store))
+        .layer(Extension(smtp_accounts));
 
     Router::new()
         .nest(prefix, router)

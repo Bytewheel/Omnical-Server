@@ -198,4 +198,239 @@ END:VCALENDAR";
             .expect_err("calendar should be deleted");
         assert!(error.is_not_found());
     }
+
+    // --- Omnical §17.10: calendar-level guest shares -----------------------
+
+    use crate::SqliteCollectionShareStore;
+    use rustical_store::CollectionShareStore;
+    use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType, Privilege};
+
+    /// Create a calendar (with one object) owned by `owner`, plus the guest
+    /// principals needed for share resolution tests.
+    async fn setup_shared_calendar(
+        context: &TestStoreContext,
+        owner: &str,
+        cal_id: &str,
+    ) -> (Calendar, String) {
+        let cal = Calendar {
+            principal: owner.to_string(),
+            timezone_id: None,
+            deleted_at: None,
+            meta: CalendarMetadata::default(),
+            id: cal_id.to_string(),
+            synctoken: 0,
+            subscription_url: None,
+            push_topic: format!("{owner}-{cal_id}-topic"),
+            components: vec![],
+        };
+        context
+            .cal_store
+            .insert_calendar(cal.clone())
+            .await
+            .unwrap();
+        let object_id = "shared-object";
+        let object =
+            CalendarObject::from_ics(CALENDAR_OBJECT_ICS.to_owned()).expect("to parse ics");
+        context
+            .cal_store
+            .put_object(owner, cal_id, object_id, object, false)
+            .await
+            .unwrap();
+        (cal, object_id.to_string())
+    }
+
+    async fn insert_guest(context: &TestStoreContext, id: &str) {
+        context
+            .principal_store
+            .insert_principal(
+                Principal {
+                    id: id.to_owned(),
+                    displayname: None,
+                    memberships: vec![],
+                    password: None,
+                    principal_type: PrincipalType::Individual,
+                    needs_password_change: false,
+                    privileges: Default::default(),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn add_calendar_share(
+        context: &TestStoreContext,
+        owner: &str,
+        cal_id: &str,
+        guest: &str,
+        privilege: Privilege,
+    ) {
+        let store = SqliteCollectionShareStore::new(context.cal_store.clone());
+        insert_guest(context, guest).await;
+        store
+            .add_share(owner, cal_id, "calendar", privilege, guest, &None, owner)
+            .await
+            .unwrap();
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_guest_resolves_shared_calendar(
+        #[future]
+        #[from(test_store_context)]
+        context: TestStoreContext,
+    ) {
+        let context = context.await;
+        setup_shared_calendar(&context, "user", "work").await;
+        add_calendar_share(&context, "user", "work", "guest-1", Privilege::Edit).await;
+
+        // The guest resolves the shared calendar, with principal = guest id.
+        let cal = context
+            .cal_store
+            .get_calendar("guest-1", "work", false)
+            .await
+            .unwrap();
+        assert_eq!(cal.principal, "guest-1");
+        assert_eq!(cal.id, "work");
+
+        // Objects resolve through the share too.
+        let objects = context
+            .cal_store
+            .get_objects("guest-1", "work")
+            .await
+            .unwrap();
+        assert_eq!(objects.len(), 1);
+        let object = context
+            .cal_store
+            .get_object("guest-1", "work", "shared-object", false)
+            .await
+            .unwrap();
+        assert_eq!(object.get_uid(), "20260628T153000Z-123456@domain.com");
+
+        // A write lands in the owner's namespace (visible through the
+        // guest's share-aware sync).
+        let edited =
+            CalendarObject::from_ics(CALENDAR_OBJECT_ICS.to_owned()).expect("to parse ics");
+        context
+            .cal_store
+            .put_object("guest-1", "work", "shared-object", edited.clone(), true)
+            .await
+            .unwrap();
+        let (updated, deleted, _token) = context
+            .cal_store
+            .sync_changes("guest-1", "work", 0)
+            .await
+            .unwrap();
+        assert!(updated.iter().any(|(id, _o)| id == "shared-object"));
+        assert!(deleted.is_empty());
+
+        // Meanwhile the owner's own view is unchanged.
+        assert_eq!(
+            context
+                .cal_store
+                .get_calendar("user", "work", false)
+                .await
+                .unwrap()
+                .principal,
+            "user"
+        );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_guest_sees_only_shared_calendars(
+        #[future]
+        #[from(test_store_context)]
+        context: TestStoreContext,
+    ) {
+        let context = context.await;
+        setup_shared_calendar(&context, "user", "shared-cal").await;
+        setup_shared_calendar(&context, "user", "private-cal").await;
+        add_calendar_share(&context, "user", "shared-cal", "guest-1", Privilege::View).await;
+
+        let calendars = context.cal_store.get_calendars("guest-1").await.unwrap();
+        assert_eq!(calendars.len(), 1, "guest sees exactly the shared calendar");
+        assert_eq!(calendars[0].id, "shared-cal");
+        assert_eq!(calendars[0].principal, "guest-1");
+
+        // The unshared calendar stays invisible to the guest.
+        assert!(
+            context
+                .cal_store
+                .get_calendar("guest-1", "private-cal", false)
+                .await
+                .unwrap_err()
+                .is_not_found()
+        );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_non_share_principal_unaffected(
+        #[future]
+        #[from(test_store_context)]
+        context: TestStoreContext,
+    ) {
+        let context = context.await;
+        setup_shared_calendar(&context, "user", "work").await;
+        insert_guest(&context, "stranger").await;
+
+        // A principal with no share cannot see or touch the calendar, read or
+        // write.
+        assert!(
+            context
+                .cal_store
+                .get_calendar("stranger", "work", false)
+                .await
+                .unwrap_err()
+                .is_not_found()
+        );
+        assert!(
+            context
+                .cal_store
+                .get_calendars("stranger")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            context
+                .cal_store
+                .get_object("stranger", "work", "shared-object", false)
+                .await
+                .unwrap_err()
+                .is_not_found()
+        );
+        let object =
+            CalendarObject::from_ics(CALENDAR_OBJECT_ICS.to_owned()).expect("to parse ics");
+        assert!(
+            context
+                .cal_store
+                .put_object("stranger", "work", "shared-object", object, false)
+                .await
+                .unwrap_err()
+                .is_not_found()
+        );
+
+        // Revoking the share removes guest access while the owner is intact.
+        add_calendar_share(&context, "user", "work", "guest-r", Privilege::View).await;
+        let share = SqliteCollectionShareStore::new(context.cal_store.clone())
+            .get_share_by_guest("guest-r")
+            .await
+            .unwrap()
+            .unwrap();
+        SqliteCollectionShareStore::new(context.cal_store.clone())
+            .revoke_share(&share.id)
+            .await
+            .unwrap();
+        assert!(
+            context
+                .cal_store
+                .get_calendar("guest-r", "work", false)
+                .await
+                .unwrap_err()
+                .is_not_found(),
+            "revoked share must no longer resolve"
+        );
+    }
 }

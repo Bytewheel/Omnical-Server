@@ -63,6 +63,8 @@ pub fn make_app<
     source_store: Arc<dyn CalendarSourceStore>,
     subscriptions_public_url: String,
     invite_store: Arc<dyn rustical_store::InviteStore>,
+    share_store: Arc<dyn rustical_store::CollectionShareStore>,
+    smtp_accounts: Vec<rustical_scheduling::SmtpAccount>,
 ) -> Router<()> {
     let birthday_store = addr_store.clone();
     let combined_cal_store =
@@ -187,6 +189,8 @@ pub fn make_app<
             source_store,
             subscriptions_public_url,
             invite_store,
+            share_store,
+            smtp_accounts,
         ));
     }
 

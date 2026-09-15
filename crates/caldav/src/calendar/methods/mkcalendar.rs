@@ -153,7 +153,10 @@ pub async fn route_mkcalendar<C: CalendarStore, DP: DavPushStore>(
     };
 
     if let Some(ref displayname) = calendar.meta.displayname {
-        match cal_store.check_displayname_unique(displayname, &principal).await {
+        match cal_store
+            .check_displayname_unique(displayname, &principal)
+            .await
+        {
             Err(rustical_store::Error::AlreadyExists) => {
                 return Ok((
                     StatusCode::CONFLICT,

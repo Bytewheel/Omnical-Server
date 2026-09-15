@@ -16,6 +16,35 @@ pub struct SqlitePrincipalStore {
     db: SqlitePool,
 }
 
+impl SqlitePrincipalStore {
+    // Omnical §17.10: stamp a guest's share privilege into the principal's
+    // own-id privilege slot. `privilege_for(self)` would otherwise default to
+    // `Privilege::Admin`; the stamped value makes `can_write(self)` respect
+    // the share (`view` → read-only, `edit`/`admin` → write). Stamping here —
+    // rather than in the auth middleware — means every load path (DAV app-token
+    // auth via `validate_app_token` → `get_principal`, discovery, portal)
+    // carries the same privilege, requiring no plumbing through
+    // `AuthenticationLayer`/`caldav_router`/`carddav_router`.
+    #[instrument(skip(self))]
+    async fn stamp_guest_share(&self, principal: &mut Principal) -> Result<(), Error> {
+        let row = sqlx::query(
+            "SELECT privilege FROM collection_shares \
+             WHERE guest_principal = ? AND revoked_at IS NULL",
+        )
+        .bind(&principal.id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(crate::Error::from)?;
+        if let Some(row) = row {
+            let privilege: String = row.get("privilege");
+            if let Ok(privilege) = privilege.parse() {
+                principal.privileges.insert(principal.id.clone(), privilege);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Map a `principals` row (with its JSON-aggregated memberships) into a
 /// [`Principal`]. Runtime `Row::get` decodes the nullable memberships JSON
 /// the same way the old `query_as!` row did (`Json<Vec<Option<String>>>`).
@@ -63,10 +92,11 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         // Omnical §17.9.2: attach each principal's group privileges (one
         // bulk query; merging into the memberships JSON would need a second
         // aggregate join and can silently drop rows).
-        let privilege_rows = sqlx::query("SELECT group_id, member_id, privilege FROM group_members")
-            .fetch_all(&self.db)
-            .await
-            .map_err(crate::Error::from)?;
+        let privilege_rows =
+            sqlx::query("SELECT group_id, member_id, privilege FROM group_members")
+                .fetch_all(&self.db)
+                .await
+                .map_err(crate::Error::from)?;
         let mut privileges_by_member: BTreeMap<String, BTreeMap<String, Privilege>> =
             BTreeMap::new();
         for row in privilege_rows {
@@ -89,6 +119,28 @@ impl AuthenticationProvider for SqlitePrincipalStore {
             principal.privileges = privileges_by_member
                 .remove(&principal.id)
                 .unwrap_or_default();
+        }
+
+        // Omnical §17.10: stamp guest share privileges (bulk, like the group
+        // privileges above).
+        let share_rows = sqlx::query(
+            "SELECT guest_principal, privilege FROM collection_shares WHERE revoked_at IS NULL",
+        )
+        .fetch_all(&self.db)
+        .await
+        .map_err(crate::Error::from)?;
+        let mut shares_by_guest: BTreeMap<String, Privilege> = BTreeMap::new();
+        for row in share_rows {
+            let guest_id: String = row.get("guest_principal");
+            let privilege: String = row.get("privilege");
+            if let Ok(privilege) = privilege.parse() {
+                shares_by_guest.insert(guest_id, privilege);
+            }
+        }
+        for principal in &mut principals {
+            if let Some(privilege) = shares_by_guest.get(&principal.id).copied() {
+                principal.privileges.insert(principal.id.clone(), privilege);
+            }
         }
         Ok(principals)
     }
@@ -114,13 +166,12 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         };
         let mut principal = principal_from_row(&row)?;
 
-        let privilege_rows = sqlx::query(
-            "SELECT group_id, privilege FROM group_members WHERE member_id = ?",
-        )
-        .bind(id)
-        .fetch_all(&self.db)
-        .await
-        .map_err(crate::Error::from)?;
+        let privilege_rows =
+            sqlx::query("SELECT group_id, privilege FROM group_members WHERE member_id = ?")
+                .bind(id)
+                .fetch_all(&self.db)
+                .await
+                .map_err(crate::Error::from)?;
         for privilege_row in privilege_rows {
             let group_id: String = privilege_row.get("group_id");
             let privilege: String = privilege_row.get("privilege");
@@ -128,6 +179,7 @@ impl AuthenticationProvider for SqlitePrincipalStore {
                 principal.privileges.insert(group_id, privilege);
             }
         }
+        self.stamp_guest_share(&mut principal).await?;
         Ok(Some(principal))
     }
 
@@ -375,14 +427,14 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         .await
         .map_err(crate::Error::from)?;
 
-        sqlx::query!(
-            r#"DELETE FROM group_members WHERE (group_id, member_id) = (?, ?)"#,
-            member_of,
-            principal
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(crate::Error::from)?;
+        // Runtime query (not `query!`) so this recent statement does not need
+        // `.sqlx/` offline metadata regeneration.
+        sqlx::query("DELETE FROM group_members WHERE (group_id, member_id) = (?, ?)")
+            .bind(member_of)
+            .bind(principal)
+            .execute(&mut *tx)
+            .await
+            .map_err(crate::Error::from)?;
 
         tx.commit().await.map_err(crate::Error::from)?;
         Ok(())
@@ -390,18 +442,19 @@ impl AuthenticationProvider for SqlitePrincipalStore {
 
     #[instrument]
     async fn get_privilege(&self, member_id: &str, group_id: &str) -> Result<Privilege, Error> {
-        let row = sqlx::query(
-            "SELECT privilege FROM group_members WHERE group_id = ? AND member_id = ?",
-        )
-        .bind(group_id)
-        .bind(member_id)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(crate::Error::from)?;
+        let row =
+            sqlx::query("SELECT privilege FROM group_members WHERE group_id = ? AND member_id = ?")
+                .bind(group_id)
+                .bind(member_id)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(crate::Error::from)?;
         let privilege = row
             .map(|row| row.get::<String, _>("privilege"))
             .unwrap_or_else(|| Privilege::Edit.as_str().to_owned());
-        privilege.parse().map_err(Error::Other)
+        privilege
+            .parse()
+            .map_err(|e| Error::Other(anyhow::Error::msg(e)))
     }
 
     #[instrument]
@@ -415,12 +468,13 @@ impl AuthenticationProvider for SqlitePrincipalStore {
 
         // Omnical §17.9.2 invariants: the owner is an implicit admin that can
         // never be demoted; the last remaining admin cannot be demoted.
-        let owner: Option<String> = sqlx::query("SELECT owner_id FROM group_owners WHERE group_id = ?")
-            .bind(group_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(crate::Error::from)?
-            .map(|row| row.get("owner_id"));
+        let owner: Option<String> =
+            sqlx::query("SELECT owner_id FROM group_owners WHERE group_id = ?")
+                .bind(group_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(crate::Error::from)?
+                .map(|row| row.get("owner_id"));
         if privilege != Privilege::Admin && owner.as_deref() == Some(member_id) {
             return Err(Error::OwnerNotDemotable);
         }
@@ -498,7 +552,9 @@ impl AuthenticationProvider for SqlitePrincipalStore {
             let privilege = if is_owner {
                 Privilege::Admin
             } else {
-                privilege.parse().map_err(Error::Other)?
+                privilege
+                    .parse()
+                    .map_err(|e| Error::Other(anyhow::Error::msg(e)))?
             };
             members.push((member_id, privilege));
         }

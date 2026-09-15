@@ -21,6 +21,7 @@ criterion.workspace = true
 rustical_ical = { workspace = true, features = ["test"] }
 
 [dependencies]
+anyhow.workspace = true
 caldata.workspace = true
 argon2.workspace = true
 tokio.workspace = true

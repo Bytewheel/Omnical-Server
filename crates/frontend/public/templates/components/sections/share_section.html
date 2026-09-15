@@ -11,6 +11,13 @@
   shared collections. Use "Generate invite link" to get a shareable link
   without needing their email.
 </p>
+<p class="description">
+  You can also subscribe a <strong>guest</strong> — an external person without
+  a portal account — to one of your calendars. After creating the invite you
+  will see their account + app token once; send them the server URL, the
+  username and the token, and they add the calendar in any CalDAV client.
+  Revoke to stop their access immediately.
+</p>
 {% if let Some(error) = error %}
 <p class="error">{{ error }}</p>
 {% endif %}
@@ -25,6 +32,18 @@
   <p><code>{{ url }}</code></p>
   <p>On registration they are added to the group and get full access to its shared collections.</p>
   {% endif %}
+</div>
+{% endif %}
+{% if let Some(server_url) = guest_share_server_url.as_ref() %}
+<div class="success">
+  {% if let Some(email) = guest_share_email.as_ref() %}
+  <p><strong>Guest access sent to {{ email }}!</strong> This one-time credential was created for <code>{{ guest_share_calendar_id.as_ref().unwrap() }}</code>:</p>
+  {% else %}
+  <p><strong>Guest access created!</strong> This one-time credential was created for <code>{{ guest_share_calendar_id.as_ref().unwrap() }}</code> — send the setup below to your guest:</p>
+  {% endif %}
+  <p>Server URL: <code>{{ server_url }}</code></p>
+  <p>Username: <code>{{ guest_share_username.as_ref().unwrap() }}</code></p>
+  <p>App token: <code>{{ guest_share_credential.as_ref().unwrap() }}</code></p>
 </div>
 {% endif %}
 {% if !enabled %}
@@ -61,6 +80,22 @@
         </span>
       </div>
       {% endfor %}
+      {% for guest in entry.guest_shares %}
+      <div class="metadata">
+        Guest {{ guest.guest_principal }}
+        {%- if let Some(email) = guest.target_email %} ({{ email }}){% endif %}
+        · {{ guest.privilege }} access
+        {% if let Some(created_at) = guest.created_at %} · created {{ created_at }}{% endif %}
+        {% if guest.can_manage %}
+        <span class="invite-actions">
+          <form method="POST" action="/frontend/user/{{ user.id }}/share/guest-invite/{{ guest.share_id }}/revoke">
+            <input type="hidden" name="principal" value="{{ entry.principal }}">
+            <button type="submit" class="delete">Revoke</button>
+          </form>
+        </span>
+        {% endif %}
+      </div>
+      {% endfor %}
       <div class="actions">
         {% if let Some(sub_id) = entry.sub_id %}
         {% if enabled %}
@@ -92,6 +127,17 @@
           <input type="hidden" name="kind" value="{{ entry.kind }}">
           <input type="hidden" name="collection_id" value="{{ entry.collection_id }}">
           <button type="submit">Generate invite link</button>
+        </form>
+        <form method="POST" action="/frontend/user/{{ user.id }}/share/guest-invite" class="inline-form">
+          <input type="hidden" name="principal" value="{{ entry.principal }}">
+          <input type="hidden" name="collection_id" value="{{ entry.collection_id }}">
+          <select name="privilege">
+            <option value="view">View</option>
+            <option value="edit">Edit</option>
+            <option value="admin">Admin</option>
+          </select>
+          <input type="email" name="email" placeholder="email@example.com">
+          <button type="submit" title="Create a guest account with app-token access">Invite guest</button>
         </form>
         {% endif %}
       </div>

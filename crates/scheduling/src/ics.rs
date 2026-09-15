@@ -477,9 +477,7 @@ pub fn strip_apple_properties(ics_body: &str) -> String {
                 in_valarm = false;
                 out.push(line);
             }
-            _ if parsed.name.starts_with("X-APPLE-")
-                || parsed.name.starts_with("X-WR-") =>
-            {
+            _ if parsed.name.starts_with("X-APPLE-") || parsed.name.starts_with("X-WR-") => {
                 continue;
             }
             _ if in_valarm && parsed.name == "ACKNOWLEDGED" => continue,

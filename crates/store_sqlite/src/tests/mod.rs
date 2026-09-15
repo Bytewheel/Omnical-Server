@@ -9,6 +9,7 @@ use sqlx::SqlitePool;
 mod addressbook_store;
 mod calendar_source_store;
 mod calendar_store;
+mod collection_share_store;
 mod invite_store;
 mod principal_store;
 mod subscription_store;

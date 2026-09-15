@@ -159,7 +159,9 @@ impl CalendarWriteStore for CombinedCalendarStore {
         principal: &str,
     ) -> Result<(), crate::Error> {
         for store in self.stores.values() {
-            store.check_displayname_unique(displayname, principal).await?;
+            store
+                .check_displayname_unique(displayname, principal)
+                .await?;
         }
         Ok(())
     }

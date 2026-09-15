@@ -23,10 +23,7 @@ impl IntoResponse for ApiError {
             Self::Store(err) => {
                 // Omnical §17.9.2: privilege invariants are authorization
                 // failures, not server errors.
-                if matches!(
-                    err,
-                    StoreError::LastAdmin | StoreError::OwnerNotDemotable
-                ) {
+                if matches!(err, StoreError::LastAdmin | StoreError::OwnerNotDemotable) {
                     (StatusCode::FORBIDDEN, err.to_string())
                 } else {
                     tracing::error!(%err, "store error");

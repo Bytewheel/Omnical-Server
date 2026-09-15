@@ -92,7 +92,8 @@ pub struct InvitesArgs {
 
 #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 pub async fn cmd_invites(args: InvitesArgs, config: Config) -> anyhow::Result<()> {
-    let (_, _, _, _, _, _, _, invite_store, _) = get_data_stores(true, &config.data_store).await?;
+    let (_, _, _, _, _, _, _, invite_store, _, _) =
+        get_data_stores(true, &config.data_store).await?;
 
     match args.command {
         InvitesCommand::Create(CreateArgs {
