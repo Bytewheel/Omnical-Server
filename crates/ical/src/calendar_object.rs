@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 
 use crate::Error;
+use crate::normalize::normalize_rrule_until;
 use caldata::{
     IcalObjectParser,
     component::{CalendarInnerData, IcalCalendarObject},
@@ -77,6 +78,9 @@ impl CalendarObject {
     // This is meant for iCalendar data coming from outside that might need to be normalised.
     // For example if timezones are omitted this can be fixed by this function.
     pub fn import(ics: &str, options: Option<ParserOptions>) -> Result<Self, Error> {
+        // Normalise client quirks first (e.g. khal's floating RRULE UNTILs,
+        // which are RFC-5545-invalid next to a timezone-qualified DTSTART)
+        let ics = normalize_rrule_until(ics);
         let parser =
             IcalObjectParser::from_slice(ics.as_bytes()).with_options(options.unwrap_or_default());
         let inner = parser.expect_one()?;

@@ -71,7 +71,7 @@ pub async fn put_event<C: CalendarStore>(
     mut if_none_match: Option<TypedHeader<IfNoneMatch>>,
     mut if_match: Option<TypedHeader<IfMatch>>,
     header_map: HeaderMap,
-    body: String,
+    mut body: String,
 ) -> Result<Response, Error> {
     if !user.is_principal(&principal) {
         return Err(crate::Error::Unauthorized);
@@ -146,20 +146,30 @@ pub async fn put_event<C: CalendarStore>(
         }
     }
 
-    let object = match CalendarObject::import(
-        &body,
-        Some(ParserOptions {
-            rfc7809: config.rfc7809,
-        }),
-    ) {
-        Ok(object) => object,
-        Err(err) => {
-            warn!("invalid calendar data:\n{body}");
+    let import = |ics: &str| {
+        CalendarObject::import(
+            ics,
+            Some(ParserOptions {
+                rfc7809: config.rfc7809,
+            }),
+        )
+        .map_err(|err| {
+            warn!("invalid calendar data:\n{ics}");
             warn!("{err}");
-            return Err(Error::PreconditionFailed(Precondition::ValidCalendarData));
-        }
+            Error::PreconditionFailed(Precondition::ValidCalendarData)
+        })
     };
+    let mut object = import(&body)?;
+    let stamped = stamp_default_organizer(&body, &user.id, &principal);
+    if stamped != body {
+        body = stamped;
+        object = import(&body)?;
+    }
+
     let etag = object.get_etag();
+    // The scheduler must see the final (normalised + stamped) form — the
+    // stored copy is the regenerated `get_ics()` of the object below.
+    let stored_ics = object.get_ics().to_owned();
     cal_store
         .put_object(&principal, &calendar_id, &object_id, object, true)
         .await?;
@@ -172,7 +182,7 @@ pub async fn put_event<C: CalendarStore>(
                 &user.id,
                 (&principal, &calendar_id, &object_id),
                 existing.as_ref().map(|obj| obj.get_ics()),
-                &body,
+                &stored_ics,
                 user_agent,
             )
             .await;
@@ -184,4 +194,27 @@ pub async fn put_event<C: CalendarStore>(
         HeaderValue::from_str(&etag).expect("Contains no invalid characters"),
     );
     Ok((StatusCode::CREATED, headers).into_response())
+}
+
+/// Omnical: default the organizer to the event creator. khal-lineage
+/// clients write ATTENDEEs without an ORGANIZER; stamp the acting user —
+/// the same user implicit scheduling would act on (an attendee of the
+/// event or the owner of the calendar, mirroring `scheduler.rs`) — so the
+/// stored object, etag, GETs and iTIP REQUESTs carry a real ORGANIZER.
+/// Returns the body unchanged unless a stamp applies.
+fn stamp_default_organizer(body: &str, user_id: &str, principal: &str) -> String {
+    if let Some(info) = rustical_scheduling::ics::parse_event(body)
+        && info.method.is_none()
+        && info.organizer.is_none()
+        && !info.attendees.is_empty()
+    {
+        let is_attendee = info
+            .attendees
+            .iter()
+            .any(|a| a.email.eq_ignore_ascii_case(user_id));
+        if is_attendee || principal.eq_ignore_ascii_case(user_id) {
+            return rustical_scheduling::ics::default_organizer(body, user_id);
+        }
+    }
+    body.to_owned()
 }

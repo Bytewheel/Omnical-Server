@@ -4,6 +4,9 @@ mod timestamp;
 use caldata::parser::ParserError;
 pub use timestamp::*;
 
+mod normalize;
+pub use normalize::*;
+
 mod calendar_object;
 pub use calendar_object::*;
 

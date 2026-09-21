@@ -492,6 +492,63 @@ pub fn strip_apple_properties(ics_body: &str) -> String {
     joined
 }
 
+/// Insert `ORGANIZER:mailto:<organizer>` before the first ATTENDEE property
+/// (depth 1) of the first VEVENT.
+///
+/// Unfolded rejoin, CRLF, trailing-CRLF guard — mirror
+/// `add_method`/`normalize_caladdresses`. No-op when the first VEVENT
+/// already carries an ORGANIZER property or has no ATTENDEE (the caller is
+/// expected to gate on `parse_event`, this keeps the helper self-consistent
+/// for direct use).
+#[must_use]
+pub fn default_organizer(ics: &str, organizer: &str) -> String {
+    let lines = unfold(ics);
+    let mut out: Vec<String> = vec![];
+    let mut in_event = false;
+    let mut seen_event = false;
+    // Nesting depth inside the VEVENT (1 = directly in it) — mirrors
+    // parse_event: VALARM attendees are not event attendees.
+    let mut depth = 0_usize;
+    let mut has_organizer = false;
+    let mut inserted = false;
+
+    for line in &lines {
+        let parsed = Line::parse(line);
+        match parsed.name.as_str() {
+            "BEGIN" if parsed.value.eq_ignore_ascii_case("VEVENT") => {
+                // Only the first VEVENT is in scope (parse_event semantics)
+                in_event = !seen_event;
+                seen_event = true;
+                depth = 1;
+            }
+            "END" if in_event && parsed.value.eq_ignore_ascii_case("VEVENT") => {
+                in_event = false;
+            }
+            "BEGIN" if in_event => {
+                depth += 1;
+            }
+            "END" if in_event => {
+                depth = depth.saturating_sub(1);
+            }
+            "ORGANIZER" if in_event && depth == 1 => {
+                has_organizer = true;
+            }
+            "ATTENDEE" if in_event && depth == 1 && !inserted && !has_organizer => {
+                out.push(format!("ORGANIZER:mailto:{organizer}"));
+                inserted = true;
+            }
+            _ => {}
+        }
+        out.push(line.clone());
+    }
+
+    let mut joined = out.join("\r\n");
+    if ics.ends_with('\n') {
+        joined.push_str("\r\n");
+    }
+    joined
+}
+
 /// Rebuild a content line from its parsed parts with a new value, re-quoting
 /// parameter values that require it (RFC 5545 3.1).
 fn rebuild_line(line: &Line, new_value: &str) -> String {
@@ -825,6 +882,75 @@ mod tests {
         let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:x\r\nATTENDEE:mailto:bob@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         let updated = set_attendee_partstat(ics, "bob@example.org", "DECLINED");
         assert!(updated.contains("ATTENDEE;PARTSTAT=DECLINED:mailto:bob@example.org"));
+    }
+
+    #[test]
+    fn default_organizer_inserts_before_first_attendee() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:x\r\n\
+                    DTSTAMP:20260905T120000Z\r\nDTSTART:20260906T100000Z\r\n\
+                    SUMMARY:Stand Up\r\n\
+                    ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION:mailto:bob@example.org\r\n\
+                    ATTENDEE:mailto:alice@example.net\r\n\
+                    END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let stamped = default_organizer(ics, "user@example.com");
+        assert!(
+            stamped.contains(
+                "ORGANIZER:mailto:user@example.com\r\nATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION:mailto:bob@example.org"
+            ),
+            "got: {stamped}"
+        );
+        // only one ORGANIZER, both attendees kept, structure intact
+        assert_eq!(stamped.matches("ORGANIZER:").count(), 1);
+        assert!(stamped.contains("ATTENDEE:mailto:alice@example.net"));
+        assert!(stamped.ends_with("END:VCALENDAR\r\n"));
+    }
+
+    #[test]
+    fn default_organizer_preserves_existing_organizer() {
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:x\r\n\
+                    ORGANIZER;CN=Nick:mailto:nick@example.com\r\n\
+                    ATTENDEE:mailto:bob@example.org\r\n\
+                    END:VEVENT\r\nEND:VCALENDAR\r\n";
+        assert_eq!(default_organizer(ics, "other@example.com"), ics);
+    }
+
+    #[test]
+    fn default_organizer_skips_attendee_less_events() {
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:x\r\n\
+                    DTSTART:20260906T100000Z\r\n\
+                    END:VEVENT\r\nEND:VCALENDAR\r\n";
+        assert_eq!(default_organizer(ics, "user@example.com"), ics);
+    }
+
+    #[test]
+    fn default_organizer_skips_valarm_attendee_and_second_vevent() {
+        // EMAIL alarms carry ATTENDEEs (mail recipients) that are not event
+        // attendees; and only the first VEVENT is in scope.
+        let ics = "BEGIN:VCALENDAR\r\n\
+BEGIN:VEVENT\r\nUID:x\r\n\
+BEGIN:VALARM\r\n\
+ACTION:EMAIL\r\n\
+ATTENDEE:mailto:alarmtarget@example.net\r\n\
+TRIGGER:-PT30M\r\n\
+END:VALARM\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:y\r\n\
+ATTENDEE:mailto:bob@example.org\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        assert_eq!(default_organizer(ics, "user@example.com"), ics);
+    }
+
+    #[test]
+    fn default_organizer_handles_folded_attendee() {
+        // khal folds long ATTENDEE lines: the ORGANIZER must land before
+        // the whole (folded) line
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:x\r\nATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;ROLE=REQ-PARTICIPANT;RSVP\r\n =TRUE:MAILTO:bob@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let stamped = default_organizer(ics, "user@example.com");
+        assert!(
+            stamped.contains("ORGANIZER:mailto:user@example.com\r\nATTENDEE;CUTYPE=INDIVIDUAL"),
+            "got: {stamped}"
+        );
     }
 
     #[test]

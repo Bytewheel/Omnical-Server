@@ -161,6 +161,93 @@ fn event_ics(uid: &str, summary: &str) -> String {
     )
 }
 
+/// The real-world khal event that used to 403 on PUT (production pair
+/// `omnical_calendar_hawksnest`, object
+/// `25Z10RT2PWIEJR2ZRHH3MTF7FJYQB8NS428S.ics`): RFC-5545-invalid floating
+/// `RRULE;UNTIL` next to a `TZID`'d `DTSTART`, and an ATTENDEE without an
+/// ORGANIZER — verbatim including khal's folded ATTENDEE line.
+const KHAL_EVENT: &str = concat!(
+    "BEGIN:VCALENDAR\r\n",
+    "VERSION:2.0\r\n",
+    "PRODID:-//PIMUTILS.ORG//NONSGML khal / icalendar //EN\r\n",
+    "BEGIN:VTIMEZONE\r\n",
+    "TZID:America/New_York\r\n",
+    "BEGIN:DAYLIGHT\r\n",
+    "DTSTART:20260308T030000\r\n",
+    "TZNAME:EDT\r\n",
+    "TZOFFSETFROM:-0500\r\n",
+    "TZOFFSETTO:-0400\r\n",
+    "END:DAYLIGHT\r\n",
+    "BEGIN:STANDARD\r\n",
+    "DTSTART:20261101T010000\r\n",
+    "TZNAME:EST\r\n",
+    "TZOFFSETFROM:-0400\r\n",
+    "TZOFFSETTO:-0500\r\n",
+    "END:STANDARD\r\n",
+    "END:VTIMEZONE\r\n",
+    "BEGIN:VEVENT\r\n",
+    "SUMMARY:Stand Up\r\n",
+    "DTSTART;TZID=America/New_York:20260918T110000\r\n",
+    "DTEND;TZID=America/New_York:20260918T113000\r\n",
+    "DTSTAMP:20260918T092542Z\r\n",
+    "UID:25Z10RT2PWIEJR2ZRHH3MTF7FJYQB8NS428S\r\n",
+    "SEQUENCE:0\r\n",
+    "RRULE:FREQ=WEEKLY;UNTIL=20261204T090000;INTERVAL=2\r\n",
+    "ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;ROLE=REQ-PARTICIPANT;RSVP\r\n =TRUE:MAILTO:denis@hawksnestsoftware.com\r\n",
+    "LOCATION:Phone\r\n",
+    "BEGIN:VALARM\r\n",
+    "ACTION:DISPLAY\r\n",
+    "DESCRIPTION:\r\n",
+    "TRIGGER:-PT10M\r\n",
+    "END:VALARM\r\n",
+    "END:VEVENT\r\n",
+    "END:VCALENDAR\r\n"
+);
+
+/// The same real-world event after an ikhal edit (time moved 11:00 →
+/// 09:00, `SEQUENCE` bumped): khal re-serialised the RRULE end as a bare
+/// DATE `UNTIL=20261204` next to the `TZID`'d `DTSTART` — a value-type
+/// mismatch that also failed caldata's `DtStartUntilMismatchTimezone`
+/// validation (the DATE parses as floating midnight). The second
+/// production 403, verbatim including khal's folded ATTENDEE line.
+const KHAL_EVENT_EDITED: &str = concat!(
+    "BEGIN:VCALENDAR\r\n",
+    "VERSION:2.0\r\n",
+    "PRODID:-//PIMUTILS.ORG//NONSGML khal / icalendar //EN\r\n",
+    "BEGIN:VTIMEZONE\r\n",
+    "TZID:America/New_York\r\n",
+    "BEGIN:DAYLIGHT\r\n",
+    "DTSTART:20260308T030000\r\n",
+    "TZNAME:EDT\r\n",
+    "TZOFFSETFROM:-0500\r\n",
+    "TZOFFSETTO:-0400\r\n",
+    "END:DAYLIGHT\r\n",
+    "BEGIN:STANDARD\r\n",
+    "DTSTART:20261101T010000\r\n",
+    "TZNAME:EST\r\n",
+    "TZOFFSETFROM:-0400\r\n",
+    "TZOFFSETTO:-0500\r\n",
+    "END:STANDARD\r\n",
+    "END:VTIMEZONE\r\n",
+    "BEGIN:VEVENT\r\n",
+    "SUMMARY:Stand Up\r\n",
+    "DTSTART;TZID=America/New_York:20260918T090000\r\n",
+    "DTEND;TZID=America/New_York:20260918T093000\r\n",
+    "DTSTAMP:20260918T092542Z\r\n",
+    "UID:25Z10RT2PWIEJR2ZRHH3MTF7FJYQB8NS428S\r\n",
+    "SEQUENCE:1\r\n",
+    "RRULE:FREQ=WEEKLY;UNTIL=20261204;INTERVAL=2\r\n",
+    "ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;ROLE=REQ-PARTICIPANT;RSVP\r\n =TRUE:MAILTO:denis@hawksnestsoftware.com\r\n",
+    "LOCATION:Phone\r\n",
+    "BEGIN:VALARM\r\n",
+    "ACTION:DISPLAY\r\n",
+    "DESCRIPTION:\r\n",
+    "TRIGGER:-PT10M\r\n",
+    "END:VALARM\r\n",
+    "END:VEVENT\r\n",
+    "END:VCALENDAR\r\n"
+);
+
 /// Events without an ORGANIZER line (e.g. khal-created) still
 /// trigger scheduling when the acting user is an attendee —
 /// they act as the organizer. Puts into the attendee's own
@@ -245,6 +332,210 @@ async fn test_put_no_organizer_delivers_request_when_attendee() {
     // the REQUEST lands in user's inbox.
     let body = propfind_inbox(&app, "user").await;
     assert!(body.contains("req-sched-no-org-1.ics"), "{body}");
+}
+
+/// The production 403 regression: the khal event (floating `UNTIL`,
+/// organizer-less, verbatim) PUT by the calendar owner used to fail
+/// caldata's `DtStartUntilMismatchTimezone` validation with 403. Now it
+/// stores 201, the `UNTIL` is normalised to UTC and the acting user is
+/// stamped as ORGANIZER (the implicit-organizer rule materialised).
+#[tokio::test]
+async fn test_put_khal_event_normalised_and_organizer_stamped() {
+    let app = scheduling_app().await;
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            "/caldav/principal/user/personal/khal-standup.ics",
+            "user",
+            Body::from(KHAL_EVENT.to_owned()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/caldav/principal/user/personal/khal-standup.ics",
+            "user",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = extract_string(response).await;
+    // Dec 4 09:00 America/New_York (EST, UTC-5) = 14:00 UTC
+    assert!(body.contains("UNTIL=20261204T140000Z"), "{body}");
+    assert!(body.contains("ORGANIZER:mailto:user"), "{body}");
+    assert!(body.contains("ATTENDEE"), "{body}");
+}
+
+/// The second production 403 regression: the ikhal-edited khal event
+/// (bare-DATE `UNTIL` next to the `TZID`'d `DTSTART`) PUT by the calendar
+/// owner used to fail caldata's `DtStartUntilMismatchTimezone` validation
+/// with 403. Now the DATE-valued `UNTIL` is expanded at the `DTSTART`'s
+/// time-of-day in the event zone (inclusive last-occurrence day) and
+/// stored as UTC, with the acting user stamped as ORGANIZER.
+#[tokio::test]
+async fn test_put_edited_khal_event_date_until_normalised() {
+    let app = scheduling_app().await;
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            "/caldav/principal/user/personal/khal-standup-edited.ics",
+            "user",
+            Body::from(KHAL_EVENT_EDITED.to_owned()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/caldav/principal/user/personal/khal-standup-edited.ics",
+            "user",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = extract_string(response).await;
+    // Dec 4 09:00 America/New_York (EST, UTC-5) = 14:00 UTC
+    assert!(body.contains("UNTIL=20261204T140000Z"), "{body}");
+    assert!(body.contains("ORGANIZER:mailto:user"), "{body}");
+    assert!(body.contains("ATTENDEE"), "{body}");
+}
+
+/// An event that already carries an ORGANIZER is stored verbatim — not
+/// rewritten, not duplicated.
+#[tokio::test]
+async fn test_put_preserves_existing_organizer() {
+    let app = scheduling_app().await;
+
+    let ics = event_ics("sched-org-keep", "Keep organizer").replace(
+        "ORGANIZER:mailto:user",
+        "ORGANIZER;CN=Nick:mailto:nick@example.com",
+    );
+    let response = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            "/caldav/principal/user/personal/sched-org-keep.ics",
+            "user",
+            Body::from(ics),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/caldav/principal/user/personal/sched-org-keep.ics",
+            "user",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = extract_string(response).await;
+    assert!(
+        body.contains("ORGANIZER;CN=Nick:mailto:nick@example.com"),
+        "{body}"
+    );
+    assert!(!body.contains("ORGANIZER:mailto:user"), "{body}");
+    assert_eq!(body.matches("ORGANIZER").count(), 1, "{body}");
+}
+
+/// Attendee-less events (organizers only matter for iTIP where there are
+/// attendees) get no ORGANIZER stamped.
+#[tokio::test]
+async fn test_put_attendee_less_event_gets_no_organizer() {
+    let app = scheduling_app().await;
+
+    let ics = event_ics("sched-no-att", "No attendees")
+        .replace("ORGANIZER:mailto:user\r\n", "")
+        .replace(&format!("ATTENDEE:mailto:{ATTENDEE}\r\n"), "");
+    let response = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            "/caldav/principal/user/personal/sched-no-att.ics",
+            "user",
+            Body::from(ics),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/caldav/principal/user/personal/sched-no-att.ics",
+            "user",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = extract_string(response).await;
+    assert!(!body.contains("ORGANIZER"), "{body}");
+}
+
+/// The default-organizer stamp is part of the PUT path itself, not of the
+/// scheduling extension: it must also happen on a router without a
+/// scheduler.
+#[tokio::test]
+async fn test_put_stamps_organizer_without_scheduler() {
+    let context = test_store_context().await;
+    setup_fixtures(&context).await;
+
+    let app = caldav_router(
+        "/caldav",
+        Arc::new(context.principal_store),
+        Arc::new(context.cal_store),
+        Arc::new(context.dav_push_store),
+        false,
+        Arc::new(CalDavConfig::default()),
+        None,
+    );
+
+    let ics =
+        event_ics("sched-no-scheduler", "No scheduler").replace("ORGANIZER:mailto:user\r\n", "");
+    let response = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            "/caldav/principal/user/personal/sched-no-scheduler.ics",
+            "user",
+            Body::from(ics),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/caldav/principal/user/personal/sched-no-scheduler.ics",
+            "user",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = extract_string(response).await;
+    assert!(body.contains("ORGANIZER:mailto:user"), "{body}");
 }
 
 async fn propfind_inbox(app: &axum::Router, user: &str) -> String {
