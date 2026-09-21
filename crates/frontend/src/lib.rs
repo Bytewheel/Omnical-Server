@@ -9,7 +9,8 @@ use axum::{
 };
 use headers::{ContentType, HeaderMapExt};
 use http::{Method, StatusCode};
-use routes::{addressbooks::route_addressbooks, calendars::route_calendars};
+use routes::addressbooks::route_addressbooks;
+use routes::calendar::route_calendars;
 use rustical_oidc::{OidcConfig, OidcServiceConfig, oidc_router};
 use rustical_scheduling::SmtpAccount;
 use rustical_store::SubscriptionStore;
@@ -35,7 +36,10 @@ use oidc_user_store::OidcUserStore;
 use crate::routes::{
     addressbook::{route_addressbook, route_addressbook_restore},
     app_token::{route_delete_app_token, route_post_app_token},
-    calendar::{route_calendar, route_calendar_restore},
+    calendar::{
+        route_calendar, route_calendar_credentials, route_calendar_credentials_revoke,
+        route_calendar_restore,
+    },
     groups::{
         route_group_detail, route_group_member_privilege, route_group_member_remove,
         route_group_new, route_groups,
@@ -88,6 +92,14 @@ pub fn frontend_router<
         )
         // Calendar
         .route("/{user}/calendar", get(route_calendars::<CS>))
+        .route(
+            "/{user}/calendar/credentials",
+            post(route_calendar_credentials::<AP, CS>),
+        )
+        .route(
+            "/{user}/calendar/credentials/{id}/revoke",
+            post(route_calendar_credentials_revoke),
+        )
         .route("/{user}/calendar/{calendar}", get(route_calendar::<CS>))
         .route(
             "/{user}/calendar/{calendar}/restore",

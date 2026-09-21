@@ -1,6 +1,19 @@
 <h2>{{ user.id }}'s calendars</h2>
+{% if let Some(error) = error.as_ref() %}
+<p class="error">{{ error }}</p>
+{% endif %}
+{% if let Some(server_url) = credential_server_url.as_ref() %}
+<div class="success">
+  <p><strong>Calendar credentials generated!</strong> This one-time credential was created for <code>{{ credential_calendar_id.as_ref().unwrap() }}</code>{% if let Some(email) = credential_email.as_ref() %} and sent to {{ email }}{% endif %} — full read, write, and admin access to that calendar:</p>
+  <p>Server URL: <code>{{ server_url }}</code></p>
+  <p>Username: <code>{{ credential_username.as_ref().unwrap() }}</code></p>
+  <p>App token: <code>{{ credential_token.as_ref().unwrap() }}</code></p>
+  <p class="description">The app token is only shown here once; send the setup to your collaborator and have them add this calendar in any CalDAV client.</p>
+</div>
+{% endif %}
 <ul class="collection-list">
-  {% for (meta, calendar) in calendars %}
+  {% for tile in calendars %}
+  {% let calendar = tile.calendar %}
   {% let color = calendar.meta.color.to_owned().unwrap_or("transparent".to_owned()) %}
   <li class="collection-list-item" style="--color: {{ color }}">
     <a href="/frontend/user/{{ calendar.principal }}/calendar/{{ calendar.id }}"></a>
@@ -31,11 +44,35 @@
           color="{{ calendar.meta.color.as_deref().unwrap_or_default() }}"
           components="{{ calendar.components | json }}"
         ></edit-calendar-form>
+        {% if tile.can_generate %}
+        <form method="POST" action="/frontend/user/{{ user.id }}/calendar/credentials" class="inline-form">
+          <input type="hidden" name="principal" value="{{ calendar.principal }}">
+          <input type="hidden" name="calendar_id" value="{{ calendar.id }}">
+          <input class="invite-email" type="email" name="email" placeholder="email@example.com" title="Optional: email the credentials to this address">
+          <button type="submit" title="Generate full read/write/admin CalDAV credentials for this calendar">Generate credentials</button>
+        </form>
+        {% endif %}
         <delete-button trash href="/caldav/principal/{{ calendar.principal }}/{{ calendar.id }}"></delete-button>
       </div>
       <div class="metadata">
-        {{ meta.len }} ({{ meta.size | filesizeformat }}) objects, {{ meta.deleted_len }} ({{ meta.deleted_size | filesizeformat }}) deleted objects
+        {{ tile.meta.len }} ({{ tile.meta.size | filesizeformat }}) objects, {{ tile.meta.deleted_len }} ({{ tile.meta.deleted_size | filesizeformat }}) deleted objects
       </div>
+      {% for guest in tile.guest_shares %}
+      <div class="metadata">
+        Credential {{ guest.guest_principal }}
+        {%- if let Some(email) = guest.target_email %} ({{ email }}){% endif %}
+        · {{ guest.privilege }} access
+        {% if let Some(created_at) = guest.created_at %} · created {{ created_at }}{% endif %}
+        {% if guest.can_manage %}
+        <span class="invite-actions">
+          <form method="POST" action="/frontend/user/{{ user.id }}/calendar/credentials/{{ guest.share_id }}/revoke">
+            <input type="hidden" name="principal" value="{{ calendar.principal }}">
+            <button type="submit" class="delete">Revoke</button>
+          </form>
+        </span>
+        {% endif %}
+      </div>
+      {% endfor %}
       <div class="color-chip"></div>
     </div>
   </li>

@@ -89,6 +89,7 @@ async fn test_ping(
 mod api;
 mod caldav;
 mod carddav;
+mod frontend_calendars;
 mod frontend_groups;
 mod frontend_linked_platforms;
 mod frontend_password;
