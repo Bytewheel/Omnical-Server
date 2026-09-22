@@ -968,6 +968,14 @@ async fn test_guest_invite_mints_share_and_shows_credential_banner(
             || body.contains("Guest access created!"),
         "credential banner shown: {body}"
     );
+    // The banner renders exactly once — on the tile of the minted calendar,
+    // not on every collection of the Share page.
+    assert_eq!(
+        body.matches("This one-time credential was created for")
+            .count(),
+        1,
+        "banner rendered exactly once: {body}"
+    );
     assert!(body.contains("https://public.example/caldav"));
     let username = extract_guest_username(&body);
     assert!(username.starts_with("guest-"), "username: {username}");

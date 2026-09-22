@@ -8,11 +8,15 @@
 //! client needs.
 use clap::{Parser, Subcommand};
 use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType, Privilege};
-use rustical_store::{CalendarReadStore, CollectionShareStore};
+use rustical_store::{CalendarReadStore, CollectionShareStore, SubscriptionKind};
 use uuid::Uuid;
 
 use super::app_token::generate_app_token;
-use crate::{config::Config, get_data_stores};
+use crate::{
+    config::Config,
+    get_data_stores,
+    url_builder::{export_url, public_base_url},
+};
 use rustical_store::CollectionShare;
 
 /// CLI value enum for `--privilege`: mirrors the `Privilege` type used by the
@@ -104,7 +108,7 @@ async fn find_share(
 
 #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 pub async fn cmd_guest_shares(args: GuestSharesArgs, config: Config) -> anyhow::Result<()> {
-    let (addr_store, cal_store, _, principal_store, _, _, _, _, _, share_store) =
+    let (addr_store, cal_store, _, principal_store, _, _, subscription_store, _, _, share_store) =
         get_data_stores(true, &config.data_store).await?;
 
     match args.command {
@@ -160,6 +164,43 @@ pub async fn cmd_guest_shares(args: GuestSharesArgs, config: Config) -> anyhow::
                 )
                 .await?;
 
+            // Also mint (or reuse) the calendar's credential-less subscribe
+            // link so the guest can add the calendar in URL-only clients
+            // (Google "From URL", webcal) — §17.8.
+            let existing = subscription_store
+                .get_subscriptions(&owner)
+                .await?
+                .into_iter()
+                .find(|s| s.kind == SubscriptionKind::Calendar && s.collection_id == collection_id);
+            let subscribe_token = match existing {
+                Some(sub) => sub.token,
+                None => {
+                    let token = generate_app_token();
+                    subscription_store
+                        .add_subscription(
+                            &owner,
+                            SubscriptionKind::Calendar,
+                            &collection_id,
+                            &token,
+                        )
+                        .await?;
+                    token
+                }
+            };
+            let base_url = public_base_url(
+                config.subscriptions.public_url.as_deref(),
+                config
+                    .http
+                    .bind_config()
+                    .ok()
+                    .as_ref()
+                    .and_then(|c| match c {
+                        crate::config::HttpBindConfig::Tcp(addr) => Some(addr.as_str()),
+                        _ => None,
+                    }),
+            );
+            let subscribe_url = export_url(&base_url, &subscribe_token, SubscriptionKind::Calendar);
+
             println!("Guest share created (id: {share_id})");
             println!("  Username: {guest_id}");
             println!("  App token: {credential}");
@@ -170,6 +211,11 @@ pub async fn cmd_guest_shares(args: GuestSharesArgs, config: Config) -> anyhow::
                 "Send the username and app token to your guest; they enter them into \
                  any CalDAV client with your server's /caldav URL."
             );
+            println!(
+                "Need a subscribe link instead (no account or token, e.g. Google \
+                 \"From URL\")? Use:"
+            );
+            println!("{subscribe_url}");
         }
         GuestShareCommand::List(ListArgs { owner }) => {
             for share in share_store.list_guest_shares(&owner).await? {

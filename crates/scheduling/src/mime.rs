@@ -226,8 +226,11 @@ pub fn itip_subject(method: &str, event: &ics::EventInfo) -> String {
 /// guest username and the app token a CalDAV client needs.
 ///
 /// The credential is shown once in the portal banner and mailed here so the
-/// owner does not have to copy it manually. CRLF line endings, single `-`-free
-/// body so `send_mail` dot-stuffing never kicks in.
+/// owner does not have to copy it manually. `subscribe_url`, when present, is
+/// the credential-less `/export/{token}.ics` share link of the same calendar —
+/// for clients that take a URL only (Google Calendar "From URL", webcal),
+/// where CalDAV credentials cannot be entered. CRLF line endings, single
+/// `-`-free body so `send_mail` dot-stuffing never kicks in.
 #[must_use]
 pub fn build_guest_invite(
     account: &SmtpAccount,
@@ -237,6 +240,7 @@ pub fn build_guest_invite(
     credential: &str,
     calendar_id: &str,
     owner: &str,
+    subscribe_url: Option<&str>,
 ) -> String {
     let from_domain = account
         .identity
@@ -248,6 +252,18 @@ pub fn build_guest_invite(
     let from_header = match &account.displayname {
         Some(name) => format!("{} <{}>", rfc2047_encode(name), account.identity),
         None => account.identity.clone(),
+    };
+
+    let subscribe = match subscribe_url {
+        Some(url) if !url.is_empty() => format!(
+            "\r\n\
+             Need it in an app that only accepts a URL (e.g. Google Calendar \
+             \"From URL\" or a webcal client)? No account or app token is \
+             needed — subscribe with:\r\n\
+             \r\n\
+             {url}\r\n"
+        ),
+        _ => String::new(),
     };
 
     let mut out = String::new();
@@ -275,7 +291,69 @@ pub fn build_guest_invite(
          App token: {credential}\r\n\
          \r\n\
          The app token is only shown here and in the Share page right after \
-         creating it. Keep it secret.\r\n"
+         creating it. Keep it secret.{subscribe}\r\n"
+    ));
+    out
+}
+
+/// Build a plaintext one-time registration-link email (Omnical §17.8). The
+/// single-use invite code is embedded in the `{base}/register?code=…` link,
+/// matching what the portal Share section mints. `register_url` is the full
+/// clickable link; `expires_at` (optional, ISO 8601 UTC) becomes a plain-line
+/// footnote. CRLF line endings; no body line starts with a dot so `send_mail`
+/// dot-stuffing never kicks in.
+#[must_use]
+pub fn build_registration_invite(
+    account: &SmtpAccount,
+    to: &str,
+    register_url: &str,
+    created_by: &str,
+    expires_at: Option<&str>,
+) -> String {
+    let from_domain = account
+        .identity
+        .rsplit('@')
+        .next()
+        .unwrap_or("omnical.local");
+    let message_id = uuid::Uuid::new_v4();
+    let date = chrono::Utc::now().to_rfc2822();
+    let from_header = match &account.displayname {
+        Some(name) => format!("{} <{}>", rfc2047_encode(name), account.identity),
+        None => account.identity.clone(),
+    };
+
+    let expiry = match expires_at {
+        Some(date) if !date.is_empty() => format!("\r\nThis invite expires on {date}."),
+        _ => String::new(),
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!("From: {from_header}\r\n"));
+    out.push_str(&format!("To: <{to}>\r\n"));
+    out.push_str(&format!(
+        "Subject: {}\r\n",
+        rfc2047_encode("Invitation to Omnical calendar server")
+    ));
+    out.push_str(&format!("Date: {date}\r\n"));
+    out.push_str(&format!("Message-ID: <{message_id}@{from_domain}>\r\n"));
+    out.push_str("X-Mailer: Omnical (RustiCal registration invite)\r\n");
+    out.push_str("MIME-Version: 1.0\r\n");
+    out.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+    out.push_str("Content-Transfer-Encoding: 8bit\r\n");
+    out.push_str("\r\n");
+    out.push_str(&format!(
+        "You have been invited to create an account on Omnical by {created_by}.\r\n\
+         \r\n\
+         Open this one-time link to set a password and finish signing up:\r\n\
+         \r\n\
+         {register_url}\r\n\
+         \r\n\
+         The link (and the code behind it) can only be used once, for the \r\n\
+         address it was sent to.{expiry}\r\n\
+         \r\n\
+         If you did not expect this email, you can ignore it.\r\n\
+         \r\n\
+         This message was generated automatically by the Omnical calendar server.\r\n"
     ));
     out
 }
@@ -307,6 +385,7 @@ mod tests {
             "defg_zQ9W...",
             "Personal",
             "nick",
+            None,
         );
         assert!(mail.starts_with("From: Nick Example <nick@example.com>\r\n"));
         assert!(mail.contains("To: <guest@example.org>\r\n"));
@@ -314,6 +393,66 @@ mod tests {
         assert!(mail.contains("Username: guest-abc\r\n"));
         assert!(mail.contains("App token: defg_zQ9W...\r\n"));
         assert!(mail.contains("only shown here and in the Share page right after"));
+        assert!(!mail.contains("From URL"));
+    }
+
+    #[test]
+    fn guest_invite_carries_credential_less_subscribe_link() {
+        let account = account();
+        let mail = build_guest_invite(
+            &account,
+            "guest@example.org",
+            "https://cal.example.com/caldav",
+            "guest-abc",
+            "defg_zQ9W...",
+            "Personal",
+            "nick",
+            Some("https://cal.example.com:8443/export/abc123.ics"),
+        );
+        assert!(mail.contains("only accepts a URL (e.g. Google Calendar"));
+        assert!(mail.contains("https://cal.example.com:8443/export/abc123.ics\r\n"));
+        assert!(mail.contains("No account or app token is"));
+        assert!(!mail.contains("None"));
+    }
+
+    #[test]
+    fn registration_invite_carries_register_url() {
+        let account = account();
+        let mail = build_registration_invite(
+            &account,
+            "newcomer@example.org",
+            "https://cal.example.com:8443/register?code=abc123",
+            "admin",
+            Some("2026-12-31T23:59:59Z"),
+        );
+        assert!(mail.starts_with("From: Nick Example <nick@example.com>\r\n"));
+        assert!(mail.contains("To: <newcomer@example.org>\r\n"));
+        assert!(mail.contains("Subject: Invitation to Omnical calendar server\r\n"));
+        assert!(mail.contains("https://cal.example.com:8443/register?code=abc123\r\n"));
+        assert!(mail.contains("by admin.\r\n"));
+        assert!(mail.contains("This invite expires on 2026-12-31T23:59:59Z."));
+        assert!(mail.contains("for the \r\naddress it was sent to."));
+    }
+
+    #[test]
+    fn registration_invite_without_expiry_omits_the_line() {
+        let account = account();
+        let mail = build_registration_invite(
+            &account,
+            "newcomer@example.org",
+            "https://cal.example.com:8443/register?code=abc123",
+            "admin",
+            None,
+        );
+        assert!(mail.contains("used once, for the \r\naddress it was sent to.\r\n"));
+        assert!(!mail.contains("expires on"));
+        // No line may start with a dot (SMTP dot-stuffing safety)
+        for line in mail.lines() {
+            assert!(
+                !line.starts_with('.'),
+                "unexpected dot-stuffed line: {line:?}"
+            );
+        }
     }
 
     #[test]

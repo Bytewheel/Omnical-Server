@@ -103,6 +103,9 @@ pub struct ShareSection {
     /// The `target_email` the just-minted credential is bound to (for the
     /// banner copy), if one was provided.
     pub guest_share_email: Option<String>,
+    /// Credential-less `/export/{token}.ics` subscribe link of the same
+    /// calendar (Google "From URL"), minted alongside the guest share.
+    pub guest_share_subscribe_url: Option<String>,
     /// When set, show the just-minted invite link inside the matching tile.
     pub invite_collection_id: Option<String>,
     /// The principal the invite was created for (to locate the correct tile).
@@ -312,6 +315,7 @@ async fn share_page<AP: AuthenticationProvider, CS: CalendarStore, AS: Addressbo
             guest_share_calendar_id: None,
             guest_share_principal: None,
             guest_share_email: None,
+            guest_share_subscribe_url: None,
             invite_collection_id: None,
             invite_principal: None,
         },
@@ -724,6 +728,7 @@ async fn share_page_with_invite<
             guest_share_calendar_id: None,
             guest_share_principal: None,
             guest_share_email: None,
+            guest_share_subscribe_url: None,
             invite_collection_id: Some(collection_id.to_owned()),
             invite_principal: Some(principal.to_owned()),
         },
@@ -996,11 +1001,24 @@ pub async fn route_share_guest_invite<
     let base_url = resolve_base_url(&public_url, &host);
     let server_url = format!("{base_url}/caldav");
 
+    // 3b. A credential-less subscribe link for the same calendar (Google
+    //     "From URL", webcal — §17.8): reuse the calendar's share link when
+    //     one already exists, otherwise mint one. When subscriptions are
+    //     disabled the guest email simply omits this section.
+    let subscribe_url = ensure_subscribe_url(
+        sub_store.as_ref(),
+        &form.principal,
+        &form.collection_id,
+        &base_url,
+    )
+    .await;
+
     // 4. Optionally deliver the credential by email (Omnical §17.10.7):
     //    when an SMTP account is configured and an email was provided,
-    //    `send_mail` sends the plaintext setup. Without SMTP the invite
-    //    still succeeds — the share row keeps `target_email` for audit and
-    //    the credential stays on the Share page (one-time banner).
+    //    `send_mail` sends the plaintext setup (with the credential-less
+    //    subscribe link when available). Without SMTP the invite still
+    //    succeeds — the share row keeps `target_email` for audit and the
+    //    credential stays on the Share page (one-time banner).
     if let (Some(to), Some(account)) = (email.as_deref(), smtp_accounts.first()) {
         let message = mime::build_guest_invite(
             account,
@@ -1010,6 +1028,7 @@ pub async fn route_share_guest_invite<
             &credential,
             &form.collection_id,
             &user.id,
+            subscribe_url.as_deref(),
         );
         let account = account.clone();
         let to = to.to_owned();
@@ -1039,8 +1058,47 @@ pub async fn route_share_guest_invite<
         &form.principal,
         &form.collection_id,
         email.as_deref(),
+        subscribe_url.as_deref(),
     )
     .await
+}
+
+/// Return the `/export/{token}.ics` URL of a calendar's share link, reusing
+/// the existing subscription when one exists and minting a new token
+/// otherwise (same discipline as the Share page "Create share link").
+/// `None` when subscriptions are disabled or minting fails — the caller
+/// falls back to credentials-only.
+pub(super) async fn ensure_subscribe_url(
+    sub_store: Option<&Arc<dyn SubscriptionStore>>,
+    principal: &str,
+    collection_id: &str,
+    base_url: &str,
+) -> Option<String> {
+    let store = match sub_store {
+        Some(store) => store,
+        None => return None,
+    };
+    let existing = store
+        .get_subscriptions(principal)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|s| s.kind == SubscriptionKind::Calendar && s.collection_id == collection_id);
+    let token = match existing {
+        Some(sub) => sub.token,
+        None => {
+            let token = generate_app_token();
+            if store
+                .add_subscription(principal, SubscriptionKind::Calendar, collection_id, &token)
+                .await
+                .is_err()
+            {
+                return None;
+            }
+            token
+        }
+    };
+    Some(export_url(base_url, &token, SubscriptionKind::Calendar))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1093,6 +1151,7 @@ async fn share_page_with_guest_credential<
     principal: &str,
     calendar_id: &str,
     email: Option<&str>,
+    subscribe_url: Option<&str>,
 ) -> Response {
     let base_url = resolve_base_url(public_url, host);
     let entries = build_share_entries(
@@ -1120,6 +1179,7 @@ async fn share_page_with_guest_credential<
             guest_share_calendar_id: Some(calendar_id.to_owned()),
             guest_share_principal: Some(principal.to_owned()),
             guest_share_email: email.map(ToOwned::to_owned),
+            guest_share_subscribe_url: subscribe_url.map(ToOwned::to_owned),
             invite_collection_id: None,
             invite_principal: None,
         },
