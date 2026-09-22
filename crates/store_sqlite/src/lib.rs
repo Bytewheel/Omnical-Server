@@ -17,6 +17,8 @@ pub use dav_push_store::SqliteDavPushStore;
 pub mod error;
 mod invite_store;
 pub use invite_store::SqliteInviteStore;
+mod password_reset_store;
+pub use password_reset_store::SqlitePasswordResetStore;
 mod principal_store;
 pub use principal_store::SqlitePrincipalStore;
 mod scheduling_store;

@@ -49,6 +49,8 @@ rustical_dav.workspace = true
 caldata.workspace = true
 reqwest.workspace = true
 argon2.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 rustical_store_sqlite = { workspace = true, features = ["test"] }
+sqlx.workspace = true

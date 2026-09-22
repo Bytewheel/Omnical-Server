@@ -358,6 +358,62 @@ pub fn build_registration_invite(
     out
 }
 
+/// Build a plaintext one-time password-reset email (Omnical). The
+/// single-use 64-char token is embedded in the
+/// `{base}/frontend/reset-password/{token}` link; `expires_at` (ISO 8601
+/// UTC) becomes a plain-line footnote. CRLF line endings; no body line
+/// starts with a dot so `send_mail` dot-stuffing never kicks in.
+#[must_use]
+pub fn build_password_reset(
+    account: &SmtpAccount,
+    to: &str,
+    reset_url: &str,
+    expires_at: &str,
+) -> String {
+    let from_domain = account
+        .identity
+        .rsplit('@')
+        .next()
+        .unwrap_or("omnical.local");
+    let message_id = uuid::Uuid::new_v4();
+    let date = chrono::Utc::now().to_rfc2822();
+    let from_header = match &account.displayname {
+        Some(name) => format!("{} <{}>", rfc2047_encode(name), account.identity),
+        None => account.identity.clone(),
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!("From: {from_header}\r\n"));
+    out.push_str(&format!("To: <{to}>\r\n"));
+    out.push_str(&format!(
+        "Subject: {}\r\n",
+        rfc2047_encode("Reset your Omnical password")
+    ));
+    out.push_str(&format!("Date: {date}\r\n"));
+    out.push_str(&format!("Message-ID: <{message_id}@{from_domain}>\r\n"));
+    out.push_str("X-Mailer: Omnical (RustiCal password reset)\r\n");
+    out.push_str("MIME-Version: 1.0\r\n");
+    out.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+    out.push_str("Content-Transfer-Encoding: 8bit\r\n");
+    out.push_str("\r\n");
+    out.push_str(&format!(
+        "A password reset was requested for the account {to} on the Omnical \r\n\
+         calendar server.\r\n\
+         \r\n\
+         Open this one-time link to choose a new password:\r\n\
+         \r\n\
+         {reset_url}\r\n\
+         \r\n\
+         The link can only be used once and expires on {expires_at}.\r\n\
+         \r\n\
+         If you did not request this email, you can ignore it — your password \r\n\
+         stays unchanged.\r\n\
+         \r\n\
+         This message was generated automatically by the Omnical calendar server.\r\n"
+    ));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +503,44 @@ mod tests {
         assert!(mail.contains("used once, for the \r\naddress it was sent to.\r\n"));
         assert!(!mail.contains("expires on"));
         // No line may start with a dot (SMTP dot-stuffing safety)
+        for line in mail.lines() {
+            assert!(
+                !line.starts_with('.'),
+                "unexpected dot-stuffed line: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn password_reset_carries_reset_url() {
+        let account = account();
+        let mail = build_password_reset(
+            &account,
+            "someone@example.org",
+            "https://cal.example.com:8443/frontend/reset-password/aBcDeF123",
+            "2026-09-22T16:00:00Z",
+        );
+        assert!(mail.starts_with("From: Nick Example <nick@example.com>\r\n"));
+        assert!(mail.contains("To: <someone@example.org>\r\n"));
+        assert!(mail.contains("Subject: Reset your Omnical password\r\n"));
+        assert!(mail.contains("X-Mailer: Omnical (RustiCal password reset)\r\n"));
+        assert!(
+            mail.contains("https://cal.example.com:8443/frontend/reset-password/aBcDeF123\r\n")
+        );
+        assert!(mail.contains("expires on 2026-09-22T16:00:00Z."));
+        assert!(mail.contains("If you did not request this email"));
+        assert!(mail.contains("for the account someone@example.org"));
+    }
+
+    #[test]
+    fn password_reset_has_no_dot_lines() {
+        let account = account();
+        let mail = build_password_reset(
+            &account,
+            "someone@example.org",
+            "https://cal.example.com:8443/frontend/reset-password/aBcDeF123",
+            "2026-09-22T16:00:00Z",
+        );
         for line in mail.lines() {
             assert!(
                 !line.starts_with('.'),

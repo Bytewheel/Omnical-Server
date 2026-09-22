@@ -27,6 +27,9 @@
     {% endif %}
     <button type="submit" class="margin-top-m">Login</button>
   </form>
+  {% if forgot_password_available %}
+  <p><a href="/frontend/forgot-password">Forgot your password?</a></p>
+  {% endif %}
   {% endif %}
 
   {% if let Some(OidcProviderData {name, redirect_url}) = oidc_data %}

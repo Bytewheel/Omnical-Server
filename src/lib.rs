@@ -13,7 +13,8 @@ use rustical_scheduling::Scheduler;
 use rustical_store::auth::AuthenticationProvider;
 use rustical_store::{AddressbookStore, CalendarStore, CollectionOperation, PrefixedCalendarStore};
 use rustical_store::{
-    CalendarSourceStore, CollectionShareStore, InviteStore, SchedulingStore, SubscriptionStore,
+    CalendarSourceStore, CollectionShareStore, InviteStore, PasswordResetStore, SchedulingStore,
+    SubscriptionStore,
 };
 use rustical_store_sqlite::SqliteAddressbookStore;
 use rustical_store_sqlite::SqliteCalendarStore;
@@ -22,7 +23,7 @@ use rustical_store_sqlite::SqliteSchedulingStore;
 use rustical_store_sqlite::SqliteSubscriptionStore;
 use rustical_store_sqlite::{
     SqliteCalendarSourceStore, SqliteCollectionShareStore, SqliteDavPushStore, SqliteInviteStore,
-    create_db_pool,
+    SqlitePasswordResetStore, create_db_pool,
 };
 use setup_tracing::setup_tracing;
 use std::fs;
@@ -90,6 +91,7 @@ pub async fn get_data_stores(
     Arc<dyn InviteStore>,
     Arc<dyn CalendarSourceStore>,
     Arc<dyn CollectionShareStore>,
+    Arc<dyn PasswordResetStore>,
 )> {
     Ok(match &config {
         DataStoreConfig::Sqlite(SqliteDataStoreConfig {
@@ -123,6 +125,9 @@ pub async fn get_data_stores(
             // channel too.
             let share_store: Arc<dyn CollectionShareStore> =
                 Arc::new(SqliteCollectionShareStore::new(cal_store.clone()));
+            // Public forgot-/reset-password tokens share them as well.
+            let password_reset_store: Arc<dyn PasswordResetStore> =
+                Arc::new(SqlitePasswordResetStore::new(cal_store.clone()));
             let cal_store = Arc::new(cal_store);
             if *run_repairs {
                 info!("Running repair tasks");
@@ -152,6 +157,7 @@ pub async fn get_data_stores(
                 invite_store,
                 calendar_source_store,
                 share_store,
+                password_reset_store,
             )
         }
     })
@@ -182,6 +188,7 @@ pub async fn cmd_serve(
         invite_store,
         _calendar_source_store,
         share_store,
+        password_reset_store,
     ) = get_data_stores(!args.no_migrations, &config.data_store).await?;
 
     if config.dav_push.enabled {
@@ -251,6 +258,7 @@ pub async fn cmd_serve(
         subscriptions_public_url,
         invite_store.clone(),
         share_store,
+        password_reset_store,
         config.scheduling.smtp.clone(),
     );
     let app = ServiceExt::<Request>::into_make_service(

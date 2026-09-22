@@ -64,6 +64,7 @@ pub fn make_app<
     subscriptions_public_url: String,
     invite_store: Arc<dyn rustical_store::InviteStore>,
     share_store: Arc<dyn rustical_store::CollectionShareStore>,
+    password_reset_store: Arc<dyn rustical_store::PasswordResetStore>,
     smtp_accounts: Vec<rustical_scheduling::SmtpAccount>,
 ) -> Router<()> {
     let birthday_store = addr_store.clone();
@@ -190,6 +191,7 @@ pub fn make_app<
             subscriptions_public_url,
             invite_store,
             share_store,
+            password_reset_store,
             smtp_accounts,
         ));
     }

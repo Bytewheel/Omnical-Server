@@ -108,7 +108,7 @@ async fn find_share(
 
 #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 pub async fn cmd_guest_shares(args: GuestSharesArgs, config: Config) -> anyhow::Result<()> {
-    let (addr_store, cal_store, _, principal_store, _, _, subscription_store, _, _, share_store) =
+    let (addr_store, cal_store, _, principal_store, _, _, subscription_store, _, _, share_store, _) =
         get_data_stores(true, &config.data_store).await?;
 
     match args.command {

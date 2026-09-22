@@ -1,4 +1,6 @@
-use crate::{FrontendConfig, OidcConfig, pages::DefaultLayoutData};
+use crate::{
+    FrontendConfig, OidcConfig, pages::DefaultLayoutData, routes::password_reset::reset_available,
+};
 use askama::Template;
 use askama_web::WebTemplate;
 use axum::{
@@ -9,6 +11,7 @@ use axum::{
 use axum_extra::TypedHeader;
 use headers::Host;
 use http::StatusCode;
+use rustical_scheduling::SmtpAccount;
 use rustical_store::auth::AuthenticationProvider;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -22,6 +25,7 @@ struct LoginPage<'a> {
     redirect_uri: Option<String>,
     oidc_data: Option<OidcProviderData<'a>>,
     allow_password_login: bool,
+    forgot_password_available: bool,
 }
 
 impl DefaultLayoutData for LoginPage<'_> {
@@ -45,6 +49,8 @@ pub async fn route_get_login(
     Query(GetLoginQuery { redirect_uri }): Query<GetLoginQuery>,
     Extension(config): Extension<FrontendConfig>,
     Extension(oidc_config): Extension<Option<OidcConfig>>,
+    Extension(smtp_accounts): Extension<Vec<SmtpAccount>>,
+    Extension(public_url): Extension<String>,
 ) -> Response {
     let oidc_data = oidc_config
         .as_ref()
@@ -56,6 +62,7 @@ pub async fn route_get_login(
     LoginPage {
         redirect_uri,
         allow_password_login: config.allow_password_login,
+        forgot_password_available: reset_available(&config, &smtp_accounts, &public_url),
         oidc_data,
     }
     .into_response()

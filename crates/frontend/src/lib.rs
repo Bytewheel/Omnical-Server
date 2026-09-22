@@ -16,7 +16,7 @@ use rustical_scheduling::SmtpAccount;
 use rustical_store::SubscriptionStore;
 use rustical_store::{
     AddressbookStore, CalendarSourceStore, CalendarStore, CollectionShareStore, InviteStore,
-    PrefixedCalendarStore,
+    PasswordResetStore, PrefixedCalendarStore,
     auth::{AuthenticationProvider, middleware::AuthenticationLayer},
 };
 use std::sync::Arc;
@@ -50,6 +50,10 @@ use crate::routes::{
     },
     login::{route_get_login, route_post_login, route_post_logout},
     password::{password_change_gate, route_get_password_change, route_post_password_change},
+    password_reset::{
+        ResetRateLimiter, route_get_forgot_password, route_get_reset_password,
+        route_post_forgot_password, route_post_reset_password,
+    },
     share::{
         route_get_share, route_share_create, route_share_guest_invite, route_share_guest_revoke,
         route_share_invite, route_share_invite_revoke, route_share_revoke,
@@ -78,8 +82,13 @@ pub fn frontend_router<
     subscriptions_public_url: String,
     invite_store: Arc<dyn InviteStore>,
     share_store: Arc<dyn CollectionShareStore>,
+    password_reset_store: Arc<dyn PasswordResetStore>,
     smtp_accounts: Vec<SmtpAccount>,
 ) -> Router {
+    // Shared sliding-window limiter for the public password-reset POSTs
+    // (per client IP plus a global bucket, like the registration flow).
+    let reset_limiter = Arc::new(ResetRateLimiter::new());
+
     let user_router = Router::new()
         .route("/", get(route_get_home))
         .route("/{user}", get(route_user_named::<AP>))
@@ -197,6 +206,17 @@ pub fn frontend_router<
         )
         .route("/login", get(route_get_login).post(route_post_login::<AP>))
         .route("/logout", post(route_post_logout))
+        // Public forgot-/reset-password flow (Omnical extension): mounted
+        // next to /login; the emailed token is the only credential, the
+        // handlers never read the session `user`.
+        .route(
+            "/forgot-password",
+            get(route_get_forgot_password).post(route_post_forgot_password::<AP>),
+        )
+        .route(
+            "/reset-password/{token}",
+            get(route_get_reset_password).post(route_post_reset_password::<AP>),
+        )
         .route(
             "/_timezones.json",
             get(route_timezones).head(route_timezones),
@@ -237,6 +257,8 @@ pub fn frontend_router<
         .layer(Extension(subscriptions_public_url))
         .layer(Extension(invite_store))
         .layer(Extension(share_store))
+        .layer(Extension(password_reset_store))
+        .layer(Extension(reset_limiter))
         .layer(Extension(smtp_accounts));
 
     Router::new()
