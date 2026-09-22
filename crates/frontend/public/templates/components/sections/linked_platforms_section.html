@@ -19,10 +19,10 @@
         {% if source.last_fetch_success %}(last fetch ok){% else %}(last fetch failed){% endif %}
       </div>
       <div class="metadata">
-        <form method="POST" action="/frontend/user/{{ user.id }}/linked-platforms/{{ source.id }}/refresh" style="display: inline">
+        <form method="POST" action="/frontend/user/{{ user.id }}/linked-platforms/{{ source.id }}/refresh" class="inline-form">
           <button type="submit">Refresh</button>
         </form>
-        <form method="POST" action="/frontend/user/{{ user.id }}/linked-platforms/{{ source.id }}/remove" style="display: inline">
+        <form method="POST" action="/frontend/user/{{ user.id }}/linked-platforms/{{ source.id }}/remove" class="inline-form">
           <button type="submit">Remove</button>
         </form>
       </div>

@@ -173,6 +173,7 @@ button, .button {
 }
 
 input[type="text"],
+input[type="email"],
 input[type="url"],
 input[type="password"],
 input[type="file"],
@@ -419,6 +420,133 @@ span.chip {
   }
 }
 
+/* Share blocks on the calendar/addressbook tiles (Omnical §17.15). They
+   flow like the other tile rows: column 1 of the tile grid, auto rows. */
+.block-label {
+  font-size: .72em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-muted);
+}
+
+.subscribe-block,
+.access-block,
+.client-help {
+  grid-area: metadata;
+  grid-row: inherit;
+}
+
+.subscribe-block,
+.access-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: .6em;
+  padding: .8em 1em;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--background-color-04);
+  margin-right: 2em;
+
+  .metadata {
+    width: 100%;
+  }
+}
+
+.share-url-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .4em;
+  width: 100%;
+}
+
+.share-url {
+  font-size: .85em;
+  word-break: break-all;
+  color: var(--text);
+}
+
+.muted {
+  color: var(--text-muted);
+  font-size: .85em;
+}
+
+/* Inline forms — replaces the layout inline styles that used to sit on the
+   share/group/linked-platforms forms. */
+form.inline-form {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .4em;
+
+  select,
+  input[type="email"] {
+    height: 2.35em;
+    padding: .2em .6em;
+    width: auto;
+  }
+}
+
+/* Per-client setup instructions (Omnical §17.15 §6) */
+.client-help {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--background-color-04);
+  padding: .6em 1em;
+  margin-right: 2em;
+
+  summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  &[open] summary {
+    margin-bottom: .8em;
+  }
+
+  h4 {
+    margin: .8em 0 .2em;
+    font-size: 1em;
+  }
+
+  ul {
+    margin: .4em 0;
+    padding-left: 1.4em;
+  }
+
+  li {
+    margin: .35em 0;
+  }
+
+  code {
+    word-break: break-all;
+  }
+}
+
+/* One-time banners and page-level messages */
+.error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger), transparent 92%);
+  border: 1px solid color-mix(in srgb, var(--danger), transparent 70%);
+  border-radius: var(--radius);
+  padding: .8em 1em;
+}
+
+.success {
+  width: 100%;
+  background: color-mix(in srgb, #16A34A, transparent 92%);
+  border: 1px solid color-mix(in srgb, #16A34A, transparent 70%);
+  border-radius: var(--radius);
+  padding: .8em 1em;
+
+  p {
+    margin: .4em 0;
+  }
+}
+
 .tab-radio {
   display: grid;
   grid-auto-flow: column;
@@ -509,6 +637,7 @@ form {
   }
 
   input[type="text"],
+  input[type="email"],
   input[type="url"],
   input[type="password"],
   input[type="file"],

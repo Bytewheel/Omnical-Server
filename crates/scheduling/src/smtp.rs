@@ -4,6 +4,7 @@
 //! (aws-lc provider) and webpki-roots, so this adds no new dependencies or
 //! build-time C code compared to pulling in a mail framework.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use base64::Engine;
@@ -16,7 +17,37 @@ use crate::config::SmtpAccount;
 use crate::error::SchedulingError;
 use crate::tls::tls_connector;
 
-const EHLO_NAME: &str = "omnical.local";
+/// EHLO hostname, set once at startup from the public base URL. Strict
+/// receivers (Postfix `reject_unknown_helo_hostname`, e.g.
+/// smtp.novo-ordo.com) reject HELO names that do not resolve in DNS, so a
+/// placeholder like `omnical.local` bounces every mail (found live
+/// 2026-09-22). "localhost" is the RFC 5321 fallback and always resolves.
+static EHLO_NAME: OnceLock<String> = OnceLock::new();
+
+/// Set the EHLO hostname from an absolute base URL (scheme and optional
+/// port are stripped). No-op for empty/unparseable input.
+pub fn set_ehlo_name_from_url(url: &str) {
+    if let Some(host) = url_host(url) {
+        let _ = EHLO_NAME.set(host.to_owned());
+    }
+}
+
+/// Host part of an absolute URL (no scheme, userinfo, port or path).
+fn url_host(url: &str) -> Option<&str> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if let Some(inner) = host.strip_prefix('[') {
+        // IPv6 literal: the bracketed address, without brackets/port
+        return inner.split(']').next();
+    }
+    let host = host.split(':').next()?;
+    (!host.is_empty()).then_some(host)
+}
+
+fn ehlo_name() -> &'static str {
+    EHLO_NAME.get().map_or("localhost", String::as_str)
+}
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One SMTP reply (code + all response lines).
@@ -163,7 +194,7 @@ async fn send_mail_inner(
         )));
     }
 
-    let ehlo = command(&mut reader, &mut writer, &format!("EHLO {EHLO_NAME}")).await?;
+    let ehlo = command(&mut reader, &mut writer, &format!("EHLO {}", ehlo_name())).await?;
     let capabilities: Vec<String> = ehlo
         .lines
         .iter()
@@ -192,7 +223,7 @@ async fn send_mail_inner(
     let mut writer = tls_writer;
 
     // EHLO again (capabilities inside TLS)
-    command(&mut reader, &mut writer, &format!("EHLO {EHLO_NAME}")).await?;
+    command(&mut reader, &mut writer, &format!("EHLO {}", ehlo_name())).await?;
 
     // AUTH PLAIN
     let plain = format!("\x00{}\x00{}", account.username, account.password);
@@ -240,5 +271,39 @@ mod tests {
         assert!(as_string.contains("\r\n..dot line\r\n"));
         assert!(as_string.contains("\r\n...two dots\r\n"));
         assert!(as_string.ends_with(".\r\n"));
+    }
+
+    #[test]
+    fn url_host_extraction() {
+        assert_eq!(
+            url_host("https://0115d8cf.duckdns.org:8443"),
+            Some("0115d8cf.duckdns.org")
+        );
+        assert_eq!(url_host("https://example.com/"), Some("example.com"));
+        assert_eq!(
+            url_host("https://user:pass@example.com:8443/x?y#z"),
+            Some("example.com")
+        );
+        assert_eq!(url_host("https://[2001:db8::1]:8443/"), Some("2001:db8::1"));
+        assert_eq!(url_host("example.com"), None, "no scheme");
+        assert_eq!(url_host(""), None);
+    }
+
+    #[test]
+    fn ehlo_name_defaults_to_localhost() {
+        // A fresh process default; the OnceLock may already be set by an
+        // earlier test in the same process, so only assert the fallback
+        // when it is unset.
+        if EHLO_NAME.get().is_none() {
+            assert_eq!(ehlo_name(), "localhost");
+        }
+    }
+
+    #[test]
+    fn set_ehlo_name_from_url_ignores_garbage() {
+        // Must not panic and must not overwrite a previously set name.
+        let before = EHLO_NAME.get().cloned();
+        set_ehlo_name_from_url("not a url");
+        assert_eq!(EHLO_NAME.get().cloned(), before);
     }
 }

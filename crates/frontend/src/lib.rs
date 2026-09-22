@@ -55,8 +55,8 @@ use crate::routes::{
         route_post_forgot_password, route_post_reset_password,
     },
     share::{
-        route_get_share, route_share_create, route_share_guest_invite, route_share_guest_revoke,
-        route_share_invite, route_share_invite_revoke, route_share_revoke,
+        route_share_create, route_share_guest_invite, route_share_guest_revoke, route_share_invite,
+        route_share_invite_revoke, route_share_revoke,
     },
     timezones::route_timezones,
     user::{route_get_home, route_root, route_user_named},
@@ -145,30 +145,25 @@ pub fn frontend_router<
             "/{user}/linked-platforms/{id}/remove",
             post(route_post_linked_platforms_remove),
         )
-        // Share links (Omnical §17.7)
-        .route("/{user}/share", get(route_get_share::<AP, CS, AS>))
-        .route(
-            "/{user}/share/create",
-            post(route_share_create::<AP, CS, AS>),
-        )
-        .route("/{user}/share/{id}/revoke", post(route_share_revoke::<AP>))
+        // Share links (Omnical §17.7) — the Share tab is gone (§17.15); these
+        // internal form actions render on / redirect to the Calendars and
+        // Addressbooks tabs.
+        .route("/{user}/share/create", post(route_share_create::<CS, AS>))
+        .route("/{user}/share/{id}/revoke", post(route_share_revoke))
         // Send invite (Omnical registration extension)
-        .route(
-            "/{user}/share/invite",
-            post(route_share_invite::<AP, CS, AS>),
-        )
+        .route("/{user}/share/invite", post(route_share_invite::<CS>))
         .route(
             "/{user}/share/invite/{code}/revoke",
-            post(route_share_invite_revoke::<AP>),
+            post(route_share_invite_revoke),
         )
         // Guest shares (Omnical §17.10)
         .route(
             "/{user}/share/guest-invite",
-            post(route_share_guest_invite::<AP, CS, AS>),
+            post(route_share_guest_invite::<AP, CS>),
         )
         .route(
             "/{user}/share/guest-invite/{id}/revoke",
-            post(route_share_guest_revoke::<AP>),
+            post(route_share_guest_revoke),
         )
         // Groups (Omnical §17.9)
         .route("/{user}/groups", get(route_groups::<AP, CS, AS>))

@@ -27,7 +27,7 @@
     {% if admin && member.principal.id != user.id %}
     <form method="POST"
       action="/frontend/user/{{ user.id }}/groups/{{ group_id }}/members/{{ member.principal.id }}/privilege"
-      style="display:inline">
+      class="inline-form">
       <select name="privilege" onchange="this.form.submit()">
         <option value="view" {% if member.privilege.as_str() == "view" %}selected{% endif %}>View</option>
         <option value="edit" {% if member.privilege.as_str() == "edit" %}selected{% endif %}>Edit</option>
@@ -36,7 +36,7 @@
     </form>
     <form method="POST"
       action="/frontend/user/{{ user.id }}/groups/{{ group_id }}/members/{{ member.principal.id }}/remove"
-      style="display:inline">
+      class="inline-form">
       <button type="submit" class="delete">Remove</button>
     </form>
     {% else %}

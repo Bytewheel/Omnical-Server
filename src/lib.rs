@@ -239,6 +239,15 @@ pub async fn cmd_serve(
             }),
     );
 
+    // Strict SMTP receivers (Postfix `reject_unknown_helo_hostname`, e.g.
+    // smtp.novo-ordo.com) require a DNS-resolvable EHLO name — identify
+    // ourselves with the public hostname, never an internal placeholder.
+    // Only set it when a real public URL is configured (not the bind
+    // fallback, whose host would be an IP literal).
+    if let Some(public_url) = config.subscriptions.public_url.as_deref() {
+        rustical_scheduling::smtp::set_ehlo_name_from_url(public_url);
+    }
+
     let app = make_app(
         addr_store.clone(),
         cal_store.clone(),

@@ -96,7 +96,7 @@ async fn test_password_gate_redirects_every_portal_page(
 
     let req = request(
         Method::GET,
-        "/frontend/user/pwduser/share",
+        "/frontend/user/pwduser/calendar",
         "pwduser",
         "pwduser",
         None,
@@ -128,7 +128,7 @@ async fn test_password_gate_skips_users_without_a_password(
 
     let req = request(
         Method::GET,
-        "/frontend/user/user/share",
+        "/frontend/user/user/calendar",
         "user",
         "pass",
         None,
@@ -224,10 +224,10 @@ async fn test_change_password_success_clears_flag_and_lifts_gate(
             .is_none()
     );
 
-    // The gate is lifted: the Share page now renders instead of redirecting.
+    // The gate is lifted: the Calendars page now renders instead of redirecting.
     let req = request(
         Method::GET,
-        "/frontend/user/pwduser/share",
+        "/frontend/user/pwduser/calendar",
         "pwduser",
         "pwduser",
         None,

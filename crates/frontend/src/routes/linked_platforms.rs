@@ -93,8 +93,14 @@ fn ssrf_guard(source_url: &str) -> Result<(), &'static str> {
         Some(url::Host::Ipv4(v4)) => IpAddr::V4(v4),
         Some(url::Host::Ipv6(v6)) => IpAddr::V6(v6),
         Some(url::Host::Domain(host)) => {
-            let addrs = host
+            // Tuple form, not bare-host `to_socket_addrs()`: current std's
+            // `TryFrom<&str> for LookupHost` requires a `host:port` string and
+            // fails with InvalidInput ("invalid socket address") before ever
+            // calling getaddrinfo. Port 0 is ignored downstream (only the IPs
+            // are used; reqwest takes ports from the URL).
+            let addrs = (host, 0u16)
                 .to_socket_addrs()
+                .inspect_err(|e| warn!(%host, error = ?e, "ssrf_guard resolve failed"))
                 .map_err(|_| "DNS resolution failed")?;
             addrs
                 .map(|sa| sa.ip())
@@ -118,8 +124,9 @@ async fn fetch_and_parse(source_url: &str) -> Result<Vec<CalendarObject>, &'stat
         .ok()
         .and_then(|u| u.host_str().map(ToOwned::to_owned))
         .ok_or("Invalid URL")?;
-    let addrs: Vec<SocketAddr> = host
+    let addrs: Vec<SocketAddr> = (host.as_str(), 0u16)
         .to_socket_addrs()
+        .inspect_err(|e| warn!(%host, error = ?e, "fetch_and_parse resolve failed"))
         .map_err(|_| "DNS resolution failed")?
         .collect();
 

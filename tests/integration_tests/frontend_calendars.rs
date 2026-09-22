@@ -503,7 +503,7 @@ async fn test_calendar_credentials_revoke_removes_access_and_hides_row(
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.extract_string().await;
     assert!(
-        body.contains(&format!("Credential {username}")),
+        body.contains(&format!("CalDAV access: <code>{username}</code>")),
         "credential row shown: {body}"
     );
     assert!(body.contains("admin access"), "full-access label present");
@@ -568,7 +568,7 @@ async fn test_calendar_credentials_revoke_removes_access_and_hides_row(
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.extract_string().await;
     assert!(
-        !body.contains(&format!("Credential {username}")),
+        !body.contains(&format!("CalDAV access: <code>{username}</code>")),
         "credential row gone: {body}"
     );
     assert!(!body.contains(&personal_revoke), "personal revoke gone");

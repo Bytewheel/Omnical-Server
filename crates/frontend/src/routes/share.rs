@@ -1,9 +1,7 @@
 use std::{str::FromStr, sync::Arc};
 
-use crate::pages::user::{Section, UserPage};
-use crate::url_builder::export_url;
-use askama::Template;
-use askama_web::WebTemplate;
+use crate::routes::addressbooks::render_addressbooks_page;
+use crate::routes::calendar::{CalendarsExtras, render_calendars_page};
 use axum::extract::Path;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::{Extension, Form};
@@ -12,258 +10,14 @@ use headers::Host;
 use http::StatusCode;
 use rustical_scheduling::{SmtpAccount, mime, smtp};
 use rustical_store::{
-    AddressbookStore, CalendarStore, CollectionShareStore, Invite, InviteStore, SubscriptionKind,
-    SubscriptionStore,
+    AddressbookStore, CalendarStore, CollectionShareStore, InviteStore, PrefixedCalendarStore,
+    SubscriptionKind, SubscriptionStore,
     auth::{AuthenticationProvider, Principal, Privilege},
 };
 use serde::Deserialize;
 use uuid::Uuid;
 
 use super::app_token::generate_app_token;
-
-impl Section for ShareSection {
-    fn name() -> &'static str {
-        "share"
-    }
-}
-
-/// One unredeemed registration invite link shown on the collection tile it
-/// was minted for (PLAN.md §17.9.1).
-pub struct InviteLink {
-    pub code: String,
-    /// Full `{base}/register?code=…` URL.
-    pub url: String,
-    /// The email the invite is bound to, if any.
-    pub invited_email: Option<String>,
-    pub created_at: Option<String>,
-}
-
-/// One active guest share on a calendar tile (Omnical §17.10): the guest
-/// username and their privilege level, with revoke for admins.
-pub struct GuestShareEntry {
-    pub share_id: String,
-    pub guest_principal: String,
-    /// `view`/`edit`/`admin` (see [`Privilege::can_write`]).
-    pub privilege: &'static str,
-    /// The email the credential was delivered to, if any.
-    pub target_email: Option<String>,
-    pub created_at: Option<String>,
-    /// Whether the acting user may revoke (or mint) guest shares here:
-    /// `admin` privilege in the owning principal (same rule as invites).
-    pub can_manage: bool,
-}
-
-/// One shareable collection row of the Share page: the existing share link
-/// with its full export URL (plus Revoke), or a "Create share link" button
-/// when none exists yet (PLAN.md §17.8.4).
-pub struct ShareEntry {
-    /// Display name of the collection.
-    pub displayname: String,
-    /// Owner label: the user's own id, or the group's display name.
-    pub owner_label: String,
-    /// The principal the collection (and its subscription) belongs to.
-    pub principal: String,
-    /// `calendar` or `addressbook`.
-    pub kind: &'static str,
-    pub collection_id: String,
-    /// Full export URL — `None` when no share link exists yet.
-    pub url: Option<String>,
-    /// Subscription id (needed by Revoke) — `None` when no share link exists.
-    pub sub_id: Option<String>,
-    pub created_at: Option<String>,
-    /// Unredeemed registration invite links minted for this collection.
-    pub invites: Vec<InviteLink>,
-    /// Active guest shares on this collection (calendar tiles only).
-    pub guest_shares: Vec<GuestShareEntry>,
-    /// Whether the acting user may mint invites for this tile: always true
-    /// for their own collections, otherwise `admin` privilege in the group
-    /// (Omnical §17.9.2).
-    pub can_invite: bool,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "components/sections/share_section.html")]
-pub struct ShareSection {
-    pub user: Principal,
-    pub entries: Vec<ShareEntry>,
-    /// Whether the subscriptions extension is enabled (share links servable).
-    pub enabled: bool,
-    pub error: Option<String>,
-    /// When set, show the newly created invite link.
-    pub invite_url: Option<String>,
-    pub invited_email: Option<String>,
-    /// When set, show a just-minted guest credential (one-time banner).
-    pub guest_share_server_url: Option<String>,
-    pub guest_share_username: Option<String>,
-    pub guest_share_credential: Option<String>,
-    pub guest_share_calendar_id: Option<String>,
-    /// The principal the just-minted credential is bound to (to locate the
-    /// correct tile on the Share page).
-    pub guest_share_principal: Option<String>,
-    /// The `target_email` the just-minted credential is bound to (for the
-    /// banner copy), if one was provided.
-    pub guest_share_email: Option<String>,
-    /// Credential-less `/export/{token}.ics` subscribe link of the same
-    /// calendar (Google "From URL"), minted alongside the guest share.
-    pub guest_share_subscribe_url: Option<String>,
-    /// When set, show the just-minted invite link inside the matching tile.
-    pub invite_collection_id: Option<String>,
-    /// The principal the invite was created for (to locate the correct tile).
-    pub invite_principal: Option<String>,
-}
-
-/// The principals whose collections this user may share: their own, plus
-/// every group where they hold `edit`/`admin` privilege (Omnical §17.9.2 —
-/// `view` members can read the collections but neither create share links
-/// nor invites).
-async fn shareable_principals<AP: AuthenticationProvider>(
-    auth_provider: &Arc<AP>,
-    user: &Principal,
-) -> Vec<(String, String)> {
-    let mut principals = vec![(user.id.clone(), user.id.clone())];
-    for (group_id, displayname) in auth_provider
-        .list_groups_for_user(&user.id)
-        .await
-        .unwrap_or_default()
-    {
-        if user.can_write(&group_id) {
-            principals.push((group_id, displayname));
-        }
-    }
-    principals
-}
-
-/// The unredeemed invite links of a collection tile, if the invite store is
-/// present: invites are attributed per tile via `collection_id` (+ `kind`);
-/// group-collection invites carry the group as `target_group`, own-collection
-/// invites carry none (PLAN.md §17.9.1).
-fn tile_invite_links(
-    invites: &[Invite],
-    principal: &str,
-    user: &Principal,
-    collection_id: &str,
-    base_url: &str,
-) -> Vec<InviteLink> {
-    invites
-        .iter()
-        .filter(|invite| {
-            invite.kind.as_deref() == Some("calendar")
-                && invite.collection_id.as_deref() == Some(collection_id)
-                && if principal == user.id {
-                    invite.target_group.is_none()
-                } else {
-                    invite.target_group.as_deref() == Some(principal)
-                }
-        })
-        .map(|invite| InviteLink {
-            code: invite.code.clone(),
-            url: format!("{base_url}/register?code={}", invite.code),
-            invited_email: invite.target_email.clone(),
-            created_at: invite.created_at.clone(),
-        })
-        .collect()
-}
-
-async fn build_share_entries<
-    AP: AuthenticationProvider,
-    CS: CalendarStore,
-    AS: AddressbookStore,
->(
-    auth_provider: &Arc<AP>,
-    cal_store: &Arc<CS>,
-    addr_store: &Arc<AS>,
-    sub_store: Option<&Arc<dyn SubscriptionStore>>,
-    invite_store: Option<&Arc<dyn InviteStore>>,
-    share_store: Option<&Arc<dyn CollectionShareStore>>,
-    user: &Principal,
-    base_url: &str,
-) -> Vec<ShareEntry> {
-    let mut entries = Vec::new();
-    let invites = match invite_store {
-        Some(store) => store.list_invites(false).await.unwrap_or_default(),
-        None => vec![],
-    };
-    for (principal, owner_label) in shareable_principals(auth_provider, user).await {
-        let subscriptions = match sub_store {
-            Some(store) => store
-                .get_subscriptions(&principal)
-                .await
-                .unwrap_or_default(),
-            None => vec![],
-        };
-        let can_invite = principal == user.id || user.is_admin(&principal);
-
-        for cal in cal_store
-            .get_calendars(&principal)
-            .await
-            .unwrap_or_default()
-        {
-            let sub = subscriptions
-                .iter()
-                .find(|s| s.kind == SubscriptionKind::Calendar && s.collection_id == cal.id);
-            let guest_shares = match share_store {
-                Some(store) => store
-                    .get_shares_for_collection(&principal, &cal.id)
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|share| GuestShareEntry {
-                        share_id: share.id,
-                        guest_principal: share.guest_principal,
-                        privilege: share.privilege.as_str(),
-                        target_email: share.target_email,
-                        created_at: share.created_at,
-                        can_manage: can_invite,
-                    })
-                    .collect(),
-                None => Vec::new(),
-            };
-            entries.push(ShareEntry {
-                displayname: cal
-                    .meta
-                    .displayname
-                    .clone()
-                    .unwrap_or_else(|| cal.id.clone()),
-                owner_label: owner_label.clone(),
-                principal: principal.clone(),
-                kind: "calendar",
-                collection_id: cal.id.clone(),
-                url: sub.map(|s| export_url(base_url, &s.token, s.kind)),
-                sub_id: sub.map(|s| s.id.clone()),
-                created_at: sub.and_then(|s| s.created_at.clone()),
-                invites: tile_invite_links(&invites, &principal, user, &cal.id, base_url),
-                guest_shares,
-                can_invite,
-            });
-        }
-
-        for ab in addr_store
-            .get_addressbooks(&principal)
-            .await
-            .unwrap_or_default()
-        {
-            let sub = subscriptions
-                .iter()
-                .find(|s| s.kind == SubscriptionKind::Addressbook && s.collection_id == ab.id);
-            entries.push(ShareEntry {
-                displayname: ab.displayname.clone().unwrap_or_else(|| ab.id.clone()),
-                owner_label: owner_label.clone(),
-                principal: principal.clone(),
-                kind: "addressbook",
-                collection_id: ab.id.clone(),
-                url: sub.map(|s| export_url(base_url, &s.token, s.kind)),
-                sub_id: sub.map(|s| s.id.clone()),
-                created_at: sub.and_then(|s| s.created_at.clone()),
-                // Invites are calendar-only today (§17.9.1).
-                invites: Vec::new(),
-                // Guest shares are calendar-only too (§17.10).
-                guest_shares: Vec::new(),
-                can_invite,
-            });
-        }
-    }
-    entries
-}
 
 /// Resolve the base URL share links are printed with: the configured
 /// `[subscriptions] public_url` (passed in by `make_app`, computed with the
@@ -276,89 +30,6 @@ fn resolve_base_url(public_url: &str, host: &Host) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn share_page<AP: AuthenticationProvider, CS: CalendarStore, AS: AddressbookStore>(
-    auth_provider: &Arc<AP>,
-    cal_store: &Arc<CS>,
-    addr_store: &Arc<AS>,
-    sub_store: Option<&Arc<dyn SubscriptionStore>>,
-    invite_store: Option<&Arc<dyn InviteStore>>,
-    share_store: Option<&Arc<dyn CollectionShareStore>>,
-    public_url: &str,
-    host: &Host,
-    user: &Principal,
-    error: Option<String>,
-) -> Response {
-    let base_url = resolve_base_url(public_url, host);
-    let entries = build_share_entries(
-        auth_provider,
-        cal_store,
-        addr_store,
-        sub_store,
-        invite_store,
-        share_store,
-        user,
-        &base_url,
-    )
-    .await;
-    UserPage {
-        section: ShareSection {
-            user: user.clone(),
-            entries,
-            enabled: sub_store.is_some(),
-            error,
-            invite_url: None,
-            invited_email: None,
-            guest_share_server_url: None,
-            guest_share_username: None,
-            guest_share_credential: None,
-            guest_share_calendar_id: None,
-            guest_share_principal: None,
-            guest_share_email: None,
-            guest_share_subscribe_url: None,
-            invite_collection_id: None,
-            invite_principal: None,
-        },
-        user: user.clone(),
-    }
-    .into_response()
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn route_get_share<
-    AP: AuthenticationProvider,
-    CS: CalendarStore,
-    AS: AddressbookStore,
->(
-    Path(user_id): Path<String>,
-    Extension(auth_provider): Extension<Arc<AP>>,
-    Extension(cal_store): Extension<Arc<CS>>,
-    Extension(addr_store): Extension<Arc<AS>>,
-    Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
-    Extension(invite_store): Extension<Arc<dyn InviteStore>>,
-    Extension(share_store): Extension<Arc<dyn CollectionShareStore>>,
-    Extension(public_url): Extension<String>,
-    TypedHeader(host): TypedHeader<Host>,
-    user: Principal,
-) -> Response {
-    if user_id != user.id {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    share_page(
-        &auth_provider,
-        &cal_store,
-        &addr_store,
-        sub_store.as_ref(),
-        Some(&invite_store),
-        Some(&share_store),
-        &public_url,
-        &host,
-        &user,
-        None,
-    )
-    .await
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateShareForm {
     pub principal: String,
@@ -369,15 +40,12 @@ pub struct CreateShareForm {
 /// POST /{user}/share/create — mint a share link for one of the user's own
 /// or owned-group collections. The token is the app-token shape (64-char
 /// alphanumeric); the URL is byte-identical to the `subscriptions add` CLI
-/// (same token shape, same shared `export_url` builder).
-#[allow(clippy::too_many_arguments)]
-pub async fn route_share_create<
-    AP: AuthenticationProvider,
-    CS: CalendarStore,
-    AS: AddressbookStore,
->(
+/// (same token shape, same shared `export_url` builder). Redirects back to
+/// the Calendars (calendar) or Addressbooks (addressbook) tab the form was
+/// posted from (PLAN.md §17.15 — the Share tab is gone).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub async fn route_share_create<CS: CalendarStore, AS: AddressbookStore + PrefixedCalendarStore>(
     Path(user_id): Path<String>,
-    Extension(auth_provider): Extension<Arc<AP>>,
     Extension(cal_store): Extension<Arc<CS>>,
     Extension(addr_store): Extension<Arc<AS>>,
     Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
@@ -449,21 +117,51 @@ pub async fn route_share_create<
         .add_subscription(&form.principal, kind, &form.collection_id, &token)
         .await
     {
-        Ok(_) => Redirect::to(&format!("/frontend/user/{}/share", user.id)).into_response(),
+        Ok(_) => {
+            let location = match kind {
+                SubscriptionKind::Calendar => {
+                    format!(
+                        "/frontend/user/{}/calendar#cal-{}",
+                        user.id, form.collection_id
+                    )
+                }
+                SubscriptionKind::Addressbook => format!(
+                    "/frontend/user/{}/addressbook#ab-{}",
+                    user.id, form.collection_id
+                ),
+            };
+            Redirect::to(&location).into_response()
+        }
         Err(err) => {
-            share_page(
-                &auth_provider,
-                &cal_store,
-                &addr_store,
-                Some(&sub_store),
-                Some(&invite_store),
-                Some(&share_store),
-                &public_url,
-                &host,
-                &user,
-                Some(format!("Could not create the share link: {err}")),
-            )
-            .await
+            let base_url = resolve_base_url(&public_url, &host);
+            let error = format!("Could not create the share link: {err}");
+            match kind {
+                SubscriptionKind::Calendar => {
+                    render_calendars_page(
+                        &cal_store,
+                        &share_store,
+                        Some(&sub_store),
+                        &invite_store,
+                        &base_url,
+                        &user,
+                        CalendarsExtras {
+                            error: Some(error),
+                            ..CalendarsExtras::default()
+                        },
+                    )
+                    .await
+                }
+                SubscriptionKind::Addressbook => {
+                    render_addressbooks_page(
+                        &addr_store,
+                        Some(&sub_store),
+                        &base_url,
+                        &user,
+                        Some(error),
+                    )
+                    .await
+                }
+            }
         }
     }
 }
@@ -474,10 +172,11 @@ pub struct RevokeShareForm {
 }
 
 /// POST /{user}/share/{id}/revoke — remove a share link of the user's own or
-/// an owned-group principal (the URL stops working immediately).
-pub async fn route_share_revoke<AP: AuthenticationProvider>(
+/// an owned-group principal (the URL stops working immediately). Redirects
+/// back to the tab the collection lives on (kind learned from the
+/// subscription itself).
+pub async fn route_share_revoke(
     Path((user_id, id)): Path<(String, String)>,
-    Extension(auth_provider): Extension<Arc<AP>>,
     Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
     user: Principal,
     Form(form): Form<RevokeShareForm>,
@@ -493,10 +192,34 @@ pub async fn route_share_revoke<AP: AuthenticationProvider>(
         )
             .into_response();
     }
-    if let Some(store) = sub_store {
+    // Learn the subscription's kind + collection before deleting it, so the
+    // redirect lands on the right tab at the right tile.
+    let target = match &sub_store {
+        Some(store) => store
+            .get_subscriptions(&form.principal)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|s| s.id == id)
+            .map(|s| (s.kind, s.collection_id)),
+        None => None,
+    };
+    if let Some(store) = &sub_store {
         let _ = store.delete_subscription(&form.principal, &id).await;
     }
-    Redirect::to(&format!("/frontend/user/{}/share", user.id)).into_response()
+    let location = match target {
+        Some((SubscriptionKind::Calendar, collection_id)) => {
+            format!("/frontend/user/{}/calendar#cal-{}", user.id, collection_id)
+        }
+        Some((SubscriptionKind::Addressbook, collection_id)) => {
+            format!(
+                "/frontend/user/{}/addressbook#ab-{}",
+                user.id, collection_id
+            )
+        }
+        None => format!("/frontend/user/{}/calendar", user.id),
+    };
+    Redirect::to(&location).into_response()
 }
 
 /// Invite code alphabet (unambiguous: no 0/O/1/l/I) and length.
@@ -526,17 +249,12 @@ pub struct SendInviteForm {
 
 /// POST /{user}/share/invite — create a one-time invite code tied to a group
 /// and return the registration link. The caller copies the link and sends it
-/// to the invitee.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn route_share_invite<
-    AP: AuthenticationProvider,
-    CS: CalendarStore,
-    AS: AddressbookStore,
->(
+/// to the invitee. The Calendars screen re-renders with the link in the
+/// minted calendar's tile (one-time banner, §17.15).
+#[allow(clippy::too_many_arguments)]
+pub async fn route_share_invite<CS: CalendarStore>(
     Path(user_id): Path<String>,
-    Extension(auth_provider): Extension<Arc<AP>>,
     Extension(cal_store): Extension<Arc<CS>>,
-    Extension(addr_store): Extension<Arc<AS>>,
     Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
     Extension(public_url): Extension<String>,
     Extension(invite_store): Extension<Arc<dyn InviteStore>>,
@@ -548,6 +266,31 @@ pub async fn route_share_invite<
     if user_id != user.id {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+
+    let base_url = resolve_base_url(&public_url, &host);
+    let page_error = |msg: String| {
+        let cal_store = cal_store.clone();
+        let sub_store = sub_store.clone();
+        let invite_store = invite_store.clone();
+        let share_store = share_store.clone();
+        let base_url = base_url.clone();
+        let user = user.clone();
+        async move {
+            render_calendars_page(
+                &cal_store,
+                &share_store,
+                sub_store.as_ref(),
+                &invite_store,
+                &base_url,
+                &user,
+                CalendarsExtras {
+                    error: Some(msg),
+                    ..CalendarsExtras::default()
+                },
+            )
+            .await
+        }
+    };
 
     // Ownership check: the user's own principal or a group where they hold
     // `admin` privilege (Omnical §17.9.2 — minting invites is member
@@ -573,36 +316,12 @@ pub async fn route_share_invite<
     if let Some(email) = email.as_deref()
         && !email.contains('@')
     {
-        return share_page(
-            &auth_provider,
-            &cal_store,
-            &addr_store,
-            sub_store.as_ref(),
-            Some(&invite_store),
-            Some(&share_store),
-            &public_url,
-            &host,
-            &user,
-            Some("Please enter a valid email address.".to_owned()),
-        )
-        .await;
+        return page_error("Please enter a valid email address.".to_owned()).await;
     }
 
     // Invites are calendar-only today (§17.9.1 keeps the surface as-is).
     if form.kind != "calendar" {
-        return share_page(
-            &auth_provider,
-            &cal_store,
-            &addr_store,
-            sub_store.as_ref(),
-            Some(&invite_store),
-            Some(&share_store),
-            &public_url,
-            &host,
-            &user,
-            Some("Invites are only supported for calendars.".to_owned()),
-        )
-        .await;
+        return page_error("Invites are only supported for calendars.".to_owned()).await;
     }
     // Fail fast on a wrong collection id (same discipline as share create).
     if cal_store
@@ -610,21 +329,10 @@ pub async fn route_share_invite<
         .await
         .is_err()
     {
-        return share_page(
-            &auth_provider,
-            &cal_store,
-            &addr_store,
-            sub_store.as_ref(),
-            Some(&invite_store),
-            Some(&share_store),
-            &public_url,
-            &host,
-            &user,
-            Some(format!(
-                "No such calendar '{}' for '{}'.",
-                form.collection_id, form.principal
-            )),
-        )
+        return page_error(format!(
+            "No such calendar '{}' for '{}'.",
+            form.collection_id, form.principal
+        ))
         .await;
     }
 
@@ -647,94 +355,26 @@ pub async fn route_share_invite<
         )
         .await
     {
-        return share_page(
-            &auth_provider,
-            &cal_store,
-            &addr_store,
-            sub_store.as_ref(),
-            Some(&invite_store),
-            Some(&share_store),
-            &public_url,
-            &host,
-            &user,
-            Some(format!("Could not create invite: {err}")),
-        )
-        .await;
+        return page_error(format!("Could not create invite: {err}")).await;
     }
 
-    let base_url = resolve_base_url(&public_url, &host);
     let invite_url = format!("{base_url}/register?code={code}");
-    share_page_with_invite(
-        &auth_provider,
+    render_calendars_page(
         &cal_store,
-        &addr_store,
+        &share_store,
         sub_store.as_ref(),
-        Some(&invite_store),
-        Some(&share_store),
-        &public_url,
-        &host,
+        &invite_store,
+        &base_url,
         &user,
-        &invite_url,
-        email.as_deref(),
-        &form.collection_id,
-        &form.principal,
+        CalendarsExtras {
+            invite_url: Some(invite_url),
+            invited_email: email,
+            invite_collection_id: Some(form.collection_id.clone()),
+            invite_principal: Some(form.principal.clone()),
+            ..CalendarsExtras::default()
+        },
     )
     .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn share_page_with_invite<
-    AP: AuthenticationProvider,
-    CS: CalendarStore,
-    AS: AddressbookStore,
->(
-    auth_provider: &Arc<AP>,
-    cal_store: &Arc<CS>,
-    addr_store: &Arc<AS>,
-    sub_store: Option<&Arc<dyn SubscriptionStore>>,
-    invite_store: Option<&Arc<dyn InviteStore>>,
-    share_store: Option<&Arc<dyn CollectionShareStore>>,
-    public_url: &str,
-    host: &Host,
-    user: &Principal,
-    invite_url: &str,
-    invited_email: Option<&str>,
-    collection_id: &str,
-    principal: &str,
-) -> Response {
-    let base_url = resolve_base_url(public_url, host);
-    let entries = build_share_entries(
-        auth_provider,
-        cal_store,
-        addr_store,
-        sub_store,
-        invite_store,
-        share_store,
-        user,
-        &base_url,
-    )
-    .await;
-    UserPage {
-        section: ShareSection {
-            user: user.clone(),
-            entries,
-            enabled: sub_store.is_some(),
-            error: None,
-            invite_url: Some(invite_url.to_owned()),
-            invited_email: invited_email.map(ToOwned::to_owned),
-            guest_share_server_url: None,
-            guest_share_username: None,
-            guest_share_credential: None,
-            guest_share_calendar_id: None,
-            guest_share_principal: None,
-            guest_share_email: None,
-            guest_share_subscribe_url: None,
-            invite_collection_id: Some(collection_id.to_owned()),
-            invite_principal: Some(principal.to_owned()),
-        },
-        user: user.clone(),
-    }
-    .into_response()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -743,10 +383,9 @@ pub struct RevokeInviteForm {
 }
 
 /// POST /{user}/share/invite/{code}/revoke — revoke an unredeemed invite
-/// shown on a collection tile (the registration link stops working).
-pub async fn route_share_invite_revoke<AP: AuthenticationProvider>(
+/// shown on a calendar tile (the registration link stops working).
+pub async fn route_share_invite_revoke(
     Path((user_id, code)): Path<(String, String)>,
-    Extension(auth_provider): Extension<Arc<AP>>,
     Extension(invite_store): Extension<Arc<dyn InviteStore>>,
     user: Principal,
     Form(form): Form<RevokeInviteForm>,
@@ -762,8 +401,19 @@ pub async fn route_share_invite_revoke<AP: AuthenticationProvider>(
         )
             .into_response();
     }
+    // Remember the tile the invite belongs to so the redirect can anchor it.
+    let collection_id = invite_store
+        .get_invite(&code)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|invite| invite.collection_id);
     let _ = invite_store.delete_invite(&code).await;
-    Redirect::to(&format!("/frontend/user/{}/share", user.id)).into_response()
+    let location = match collection_id {
+        Some(collection_id) => format!("/frontend/user/{}/calendar#cal-{}", user.id, collection_id),
+        None => format!("/frontend/user/{}/calendar", user.id),
+    };
+    Redirect::to(&location).into_response()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -786,17 +436,13 @@ pub struct GuestInviteForm {
 ///   3. Mint an app token and build the DAV credential (`{id4}_{secret}`).
 ///   4. Persist a `collection_shares` row.
 ///   5. Optionally send the credential to `target_email`.
-///   6. Re-render the Share page with a one-time credential banner.
-#[allow(clippy::too_many_arguments)]
-pub async fn route_share_guest_invite<
-    AP: AuthenticationProvider,
-    CS: CalendarStore,
-    AS: AddressbookStore,
->(
+///   6. Re-render the Calendars screen with a one-time credential banner on
+///      the minted calendar's tile (§17.15).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub async fn route_share_guest_invite<AP: AuthenticationProvider, CS: CalendarStore>(
     Path(user_id): Path<String>,
     Extension(auth_provider): Extension<Arc<AP>>,
     Extension(cal_store): Extension<Arc<CS>>,
-    Extension(addr_store): Extension<Arc<AS>>,
     Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
     Extension(invite_store): Extension<Arc<dyn InviteStore>>,
     Extension(share_store): Extension<Arc<dyn CollectionShareStore>>,
@@ -809,6 +455,31 @@ pub async fn route_share_guest_invite<
     if user_id != user.id {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+
+    let base_url = resolve_base_url(&public_url, &host);
+    let page_error = |msg: String| {
+        let cal_store = cal_store.clone();
+        let sub_store = sub_store.clone();
+        let invite_store = invite_store.clone();
+        let share_store = share_store.clone();
+        let base_url = base_url.clone();
+        let user = user.clone();
+        async move {
+            render_calendars_page(
+                &cal_store,
+                &share_store,
+                sub_store.as_ref(),
+                &invite_store,
+                &base_url,
+                &user,
+                CalendarsExtras {
+                    error: Some(msg),
+                    ..CalendarsExtras::default()
+                },
+            )
+            .await
+        }
+    };
 
     // Ownership: the user's own principal, or a group where they hold
     // `admin` privilege (§17.10.6 — minting guests is member management).
@@ -823,39 +494,13 @@ pub async fn route_share_guest_invite<
 
     let privilege = match Privilege::from_str(&form.privilege) {
         Ok(p) => p,
-        Err(msg) => {
-            return share_page(
-                &auth_provider,
-                &cal_store,
-                &addr_store,
-                sub_store.as_ref(),
-                Some(&invite_store),
-                Some(&share_store),
-                &public_url,
-                &host,
-                &user,
-                Some(msg),
-            )
-            .await;
-        }
+        Err(msg) => return page_error(msg).await,
     };
 
     // V1 is calendar-only (§17.10.1 table shape — `kind` is a field, but
     // the portal form does not expose it today).
     if form.collection_id.is_empty() {
-        return share_page(
-            &auth_provider,
-            &cal_store,
-            &addr_store,
-            sub_store.as_ref(),
-            Some(&invite_store),
-            Some(&share_store),
-            &public_url,
-            &host,
-            &user,
-            Some("No collection specified.".to_owned()),
-        )
-        .await;
+        return page_error("No collection specified.".to_owned()).await;
     }
 
     // Fail fast on wrong collection id (same discipline as share create).
@@ -864,21 +509,10 @@ pub async fn route_share_guest_invite<
         .await
         .is_err()
     {
-        return share_page(
-            &auth_provider,
-            &cal_store,
-            &addr_store,
-            sub_store.as_ref(),
-            Some(&invite_store),
-            Some(&share_store),
-            &public_url,
-            &host,
-            &user,
-            Some(format!(
-                "No such calendar '{}' for '{}'.",
-                form.collection_id, form.principal
-            )),
-        )
+        return page_error(format!(
+            "No such calendar '{}' for '{}'.",
+            form.collection_id, form.principal
+        ))
         .await;
     }
 
@@ -890,19 +524,7 @@ pub async fn route_share_guest_invite<
         .filter(|e| !e.is_empty())
     {
         Some(e) if !e.contains('@') => {
-            return share_page(
-                &auth_provider,
-                &cal_store,
-                &addr_store,
-                sub_store.as_ref(),
-                Some(&invite_store),
-                Some(&share_store),
-                &public_url,
-                &host,
-                &user,
-                Some("Please enter a valid email address.".to_owned()),
-            )
-            .await;
+            return page_error("Please enter a valid email address.".to_owned()).await;
         }
         Some(e) => Some(e.to_lowercase()),
         None => None,
@@ -919,25 +541,13 @@ pub async fn route_share_guest_invite<
                 password: None,
                 principal_type: rustical_store::auth::PrincipalType::Individual,
                 needs_password_change: false,
-                privileges: Default::default(),
+                privileges: std::collections::BTreeMap::new(),
             },
             false,
         )
         .await
     {
-        return share_page(
-            &auth_provider,
-            &cal_store,
-            &addr_store,
-            sub_store.as_ref(),
-            Some(&invite_store),
-            Some(&share_store),
-            &public_url,
-            &host,
-            &user,
-            Some(format!("Could not create guest principal: {err}")),
-        )
-        .await;
+        return page_error(format!("Could not create guest principal: {err}")).await;
     }
 
     // 2. Mint app token → DAV credential.
@@ -952,19 +562,7 @@ pub async fn route_share_guest_invite<
     {
         Ok(id) => id,
         Err(err) => {
-            return share_page(
-                &auth_provider,
-                &cal_store,
-                &addr_store,
-                sub_store.as_ref(),
-                Some(&invite_store),
-                Some(&share_store),
-                &public_url,
-                &host,
-                &user,
-                Some(format!("Could not mint app token: {err}")),
-            )
-            .await;
+            return page_error(format!("Could not mint app token: {err}")).await;
         }
     };
     token_id.truncate(4);
@@ -983,22 +581,9 @@ pub async fn route_share_guest_invite<
         )
         .await
     {
-        return share_page(
-            &auth_provider,
-            &cal_store,
-            &addr_store,
-            sub_store.as_ref(),
-            Some(&invite_store),
-            Some(&share_store),
-            &public_url,
-            &host,
-            &user,
-            Some(format!("Could not create guest share: {err}")),
-        )
-        .await;
+        return page_error(format!("Could not create guest share: {err}")).await;
     }
 
-    let base_url = resolve_base_url(&public_url, &host);
     let server_url = format!("{base_url}/caldav");
 
     // 3b. A credential-less subscribe link for the same calendar (Google
@@ -1018,7 +603,7 @@ pub async fn route_share_guest_invite<
     //    `send_mail` sends the plaintext setup (with the credential-less
     //    subscribe link when available). Without SMTP the invite still
     //    succeeds — the share row keeps `target_email` for audit and the
-    //    credential stays on the Share page (one-time banner).
+    //    credential stays on the Calendars screen (one-time banner).
     if let (Some(to), Some(account)) = (email.as_deref(), smtp_accounts.first()) {
         let message = mime::build_guest_invite(
             account,
@@ -1042,63 +627,63 @@ pub async fn route_share_guest_invite<
         });
     }
 
-    share_page_with_guest_credential(
-        &auth_provider,
+    render_calendars_page(
         &cal_store,
-        &addr_store,
+        &share_store,
         sub_store.as_ref(),
-        Some(&invite_store),
-        Some(&share_store),
-        &public_url,
-        &host,
+        &invite_store,
+        &base_url,
         &user,
-        &guest_id,
-        &credential,
-        &server_url,
-        &form.principal,
-        &form.collection_id,
-        email.as_deref(),
-        subscribe_url.as_deref(),
+        CalendarsExtras {
+            guest_share_server_url: Some(server_url),
+            guest_share_username: Some(guest_id),
+            guest_share_credential: Some(credential),
+            guest_share_calendar_id: Some(form.collection_id.clone()),
+            guest_share_principal: Some(form.principal.clone()),
+            guest_share_email: email,
+            guest_share_subscribe_url: subscribe_url,
+            ..CalendarsExtras::default()
+        },
     )
     .await
 }
 
 /// Return the `/export/{token}.ics` URL of a calendar's share link, reusing
 /// the existing subscription when one exists and minting a new token
-/// otherwise (same discipline as the Share page "Create share link").
-/// `None` when subscriptions are disabled or minting fails — the caller
-/// falls back to credentials-only.
+/// otherwise (same discipline as the Calendars screen's "Create subscribe
+/// link"). `None` when subscriptions are disabled or minting fails — the
+/// caller falls back to credentials-only.
 pub(super) async fn ensure_subscribe_url(
     sub_store: Option<&Arc<dyn SubscriptionStore>>,
     principal: &str,
     collection_id: &str,
     base_url: &str,
 ) -> Option<String> {
-    let store = match sub_store {
-        Some(store) => store,
-        None => return None,
-    };
+    let store = sub_store?;
     let existing = store
         .get_subscriptions(principal)
         .await
         .unwrap_or_default()
         .into_iter()
         .find(|s| s.kind == SubscriptionKind::Calendar && s.collection_id == collection_id);
-    let token = match existing {
-        Some(sub) => sub.token,
-        None => {
-            let token = generate_app_token();
-            if store
-                .add_subscription(principal, SubscriptionKind::Calendar, collection_id, &token)
-                .await
-                .is_err()
-            {
-                return None;
-            }
-            token
+    let token = if let Some(sub) = existing {
+        sub.token
+    } else {
+        let token = generate_app_token();
+        if store
+            .add_subscription(principal, SubscriptionKind::Calendar, collection_id, &token)
+            .await
+            .is_err()
+        {
+            return None;
         }
+        token
     };
-    Some(export_url(base_url, &token, SubscriptionKind::Calendar))
+    Some(crate::url_builder::export_url(
+        base_url,
+        &token,
+        SubscriptionKind::Calendar,
+    ))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1108,9 +693,8 @@ pub struct RevokeGuestShareForm {
 
 /// POST /{user}/share/guest-invite/{id}/revoke — revoke an active guest
 /// share (sets `revoked_at`; the row stays for audit).
-pub async fn route_share_guest_revoke<AP: AuthenticationProvider>(
+pub async fn route_share_guest_revoke(
     Path((user_id, id)): Path<(String, String)>,
-    Extension(_auth_provider): Extension<Arc<AP>>,
     Extension(share_store): Extension<Arc<dyn CollectionShareStore>>,
     user: Principal,
     Form(form): Form<RevokeGuestShareForm>,
@@ -1127,63 +711,5 @@ pub async fn route_share_guest_revoke<AP: AuthenticationProvider>(
             .into_response();
     }
     let _ = share_store.revoke_share(&id).await;
-    Redirect::to(&format!("/frontend/user/{}/share", user.id)).into_response()
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn share_page_with_guest_credential<
-    AP: AuthenticationProvider,
-    CS: CalendarStore,
-    AS: AddressbookStore,
->(
-    auth_provider: &Arc<AP>,
-    cal_store: &Arc<CS>,
-    addr_store: &Arc<AS>,
-    sub_store: Option<&Arc<dyn SubscriptionStore>>,
-    invite_store: Option<&Arc<dyn InviteStore>>,
-    share_store: Option<&Arc<dyn CollectionShareStore>>,
-    public_url: &str,
-    host: &Host,
-    user: &Principal,
-    guest_username: &str,
-    credential: &str,
-    server_url: &str,
-    principal: &str,
-    calendar_id: &str,
-    email: Option<&str>,
-    subscribe_url: Option<&str>,
-) -> Response {
-    let base_url = resolve_base_url(public_url, host);
-    let entries = build_share_entries(
-        auth_provider,
-        cal_store,
-        addr_store,
-        sub_store,
-        invite_store,
-        share_store,
-        user,
-        &base_url,
-    )
-    .await;
-    UserPage {
-        section: ShareSection {
-            user: user.clone(),
-            entries,
-            enabled: sub_store.is_some(),
-            error: None,
-            invite_url: None,
-            invited_email: None,
-            guest_share_server_url: Some(server_url.to_owned()),
-            guest_share_username: Some(guest_username.to_owned()),
-            guest_share_credential: Some(credential.to_owned()),
-            guest_share_calendar_id: Some(calendar_id.to_owned()),
-            guest_share_principal: Some(principal.to_owned()),
-            guest_share_email: email.map(ToOwned::to_owned),
-            guest_share_subscribe_url: subscribe_url.map(ToOwned::to_owned),
-            invite_collection_id: None,
-            invite_principal: None,
-        },
-        user: user.clone(),
-    }
-    .into_response()
+    Redirect::to(&format!("/frontend/user/{}/calendar", user.id)).into_response()
 }

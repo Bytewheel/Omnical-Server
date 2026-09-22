@@ -1,7 +1,7 @@
-//! Portal Share-section tests (PLAN.md §17.8.4): the per-user surface for
-//! the §17.7 share-link subscriptions — list with full export URLs, create
-//! (own + owned-group collections), ownership enforcement, revoke, and the
-//! public `/export` round-trip through the same app.
+//! Portal share-route tests (PLAN.md §17.8.4 + §17.15): the per-user surface
+//! for the §17.7 share-link subscriptions. The Share tab is gone — share
+//! links, invites and guest shares render on the Calendars/Addressbooks
+//! tabs and the POST routes redirect back there.
 use super::{ResponseExtractString, get_app};
 use axum::body::Body;
 use axum::extract::Request;
@@ -10,13 +10,16 @@ use http::header::CONTENT_TYPE;
 use http::{Method, StatusCode};
 use rstest::rstest;
 use rustical_ical::CalendarObjectType;
-use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType};
+use rustical_store::SubscriptionKind;
+use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType, Privilege};
 use rustical_store::{
     Addressbook, AddressbookWriteStore, Calendar, CalendarMetadata, CalendarWriteStore,
-    CollectionShareStore, InviteStore,
+    CollectionShareStore, InviteStore, SubscriptionStore,
 };
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
-use rustical_store_sqlite::{SqliteCollectionShareStore, SqliteInviteStore, SqlitePrincipalStore};
+use rustical_store_sqlite::{
+    SqliteCollectionShareStore, SqliteInviteStore, SqlitePrincipalStore, SqliteSubscriptionStore,
+};
 use tower::ServiceExt;
 
 async fn insert_group(context: &TestStoreContext, group_id: &str, displayname: &str, owner: &str) {
@@ -72,16 +75,51 @@ async fn insert_user(context: &TestStoreContext, id: &str) {
         .unwrap();
 }
 
-/// Own calendar + addressbook, an owned group with a calendar, and a foreign
-/// group (owned by `bob`) with a calendar.
-async fn setup_share_fixtures(context: &TestStoreContext) {
+async fn insert_guest(
+    context: &TestStoreContext,
+    id: &str,
+    owner: &str,
+    collection: &str,
+    privilege: Privilege,
+) {
+    context
+        .principal_store
+        .insert_principal(
+            Principal {
+                id: id.to_owned(),
+                displayname: Some(format!("Guest of {collection}")),
+                memberships: vec![],
+                password: None,
+                principal_type: PrincipalType::Individual,
+                needs_password_change: false,
+                privileges: Default::default(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    SqliteCollectionShareStore::new(context.cal_store.clone())
+        .add_share(
+            owner,
+            collection,
+            "calendar",
+            privilege,
+            id,
+            &Some(format!("{id}@example.com")),
+            owner,
+        )
+        .await
+        .unwrap();
+}
+
+async fn insert_calendar(context: &TestStoreContext, principal: &str, id: &str, displayname: &str) {
     context
         .cal_store
         .insert_calendar(Calendar {
-            id: "personal".to_owned(),
-            principal: "user".to_owned(),
+            id: id.to_owned(),
+            principal: principal.to_owned(),
             meta: CalendarMetadata {
-                displayname: Some("Personal".to_owned()),
+                displayname: Some(displayname.to_owned()),
                 order: 0,
                 description: None,
                 color: None,
@@ -90,11 +128,17 @@ async fn setup_share_fixtures(context: &TestStoreContext) {
             deleted_at: None,
             synctoken: 0,
             subscription_url: None,
-            push_topic: "share-test-personal".to_owned(),
+            push_topic: format!("share-test-{principal}-{id}"),
             components: vec![CalendarObjectType::Event],
         })
         .await
         .unwrap();
+}
+
+/// Own calendar + addressbook, an owned group with a calendar, and a foreign
+/// group (owned by `bob`) with a calendar.
+async fn setup_share_fixtures(context: &TestStoreContext) {
+    insert_calendar(context, "user", "personal", "Personal").await;
     context
         .addr_store
         .insert_addressbook(Addressbook {
@@ -110,49 +154,11 @@ async fn setup_share_fixtures(context: &TestStoreContext) {
         .unwrap();
 
     insert_group(context, "testgroup", "Test Group", "user").await;
-    context
-        .cal_store
-        .insert_calendar(Calendar {
-            id: "groupcal".to_owned(),
-            principal: "testgroup".to_owned(),
-            meta: CalendarMetadata {
-                displayname: Some("Group Calendar".to_owned()),
-                order: 0,
-                description: None,
-                color: None,
-            },
-            timezone_id: None,
-            deleted_at: None,
-            synctoken: 0,
-            subscription_url: None,
-            push_topic: "share-test-groupcal".to_owned(),
-            components: vec![CalendarObjectType::Event],
-        })
-        .await
-        .unwrap();
+    insert_calendar(context, "testgroup", "groupcal", "Group Calendar").await;
 
     insert_user(context, "bob").await;
     insert_group(context, "foreigngroup", "Foreign Group", "bob").await;
-    context
-        .cal_store
-        .insert_calendar(Calendar {
-            id: "foreigncal".to_owned(),
-            principal: "foreigngroup".to_owned(),
-            meta: CalendarMetadata {
-                displayname: Some("Foreign Calendar".to_owned()),
-                order: 0,
-                description: None,
-                color: None,
-            },
-            timezone_id: None,
-            deleted_at: None,
-            synctoken: 0,
-            subscription_url: None,
-            push_topic: "share-test-foreigncal".to_owned(),
-            components: vec![CalendarObjectType::Event],
-        })
-        .await
-        .unwrap();
+    insert_calendar(context, "foreigngroup", "foreigncal", "Foreign Calendar").await;
 }
 
 fn request(
@@ -199,9 +205,16 @@ fn extract_revoke_action(body: &str) -> String {
     body[start..end + "/revoke".len()].to_owned()
 }
 
+async fn get_page(app: &axum::Router, uri: &str) -> String {
+    let req = request(Method::GET, uri, "user", "pass", None);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "page {uri} renders");
+    resp.extract_string().await
+}
+
 #[rstest]
 #[tokio::test]
-async fn test_share_page_lists_collections_with_create_buttons(
+async fn test_share_tab_removed_and_tile_blocks_live_on_calendars_tab(
     #[from(test_store_context)]
     #[future]
     context: TestStoreContext,
@@ -210,6 +223,9 @@ async fn test_share_page_lists_collections_with_create_buttons(
     setup_share_fixtures(&context).await;
     let app = get_app(context);
 
+    // The Share tab is gone: no nav entry, the page 404s.
+    let body = get_page(&app, "/frontend/user/user/calendar").await;
+    assert!(!body.contains("/share\""), "no Share nav entry: {body}");
     let req = request(
         Method::GET,
         "/frontend/user/user/share",
@@ -217,23 +233,38 @@ async fn test_share_page_lists_collections_with_create_buttons(
         "pass",
         None,
     );
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = resp.extract_string().await;
-    assert!(body.contains("Create share link"));
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Calendars tab: own + owned-group collections are listed …
     assert!(body.contains("Personal"));
-    assert!(body.contains("Contacts"));
-    // Own + owned-group collections are listed …
     assert!(body.contains("Group Calendar"));
     // … but not collections of groups the user does not own.
     assert!(!body.contains("Foreign Calendar"));
-    // No share link exists yet, so no URL is shown.
+    // No share link exists yet, so no URL is shown anywhere on the page.
+    assert!(!body.contains("/export/"));
+    // The subscribe-block label and per-tile create button are present.
+    assert!(body.contains("Subscribe link (read-only)"));
+    assert!(body.contains("Create subscribe link"));
+    // The full-access block with its label renders on every tile.
+    assert!(body.contains("Full access (CalDAV)"));
+    // Per-client instructions render with the client matrix (§17.15 §6).
+    assert!(body.contains("Set up on your device"));
+    assert!(body.contains("Google Calendar"));
+    assert!(body.contains("DAVx5"));
+    assert!(body.contains("not possible"));
+
+    // Addressbooks tab: the share-link block lives there now.
+    let body = get_page(&app, "/frontend/user/user/addressbook").await;
+    assert!(body.contains("Contacts"));
+    assert!(body.contains("Share link (read-only)"));
+    assert!(body.contains("Create share link"));
     assert!(!body.contains("/export/"));
 }
 
 #[rstest]
 #[tokio::test]
-async fn test_share_create_shows_url_and_serves_export(
+async fn test_share_create_shows_url_on_calendar_tile_and_serves_export(
     #[from(test_store_context)]
     #[future]
     context: TestStoreContext,
@@ -253,25 +284,28 @@ async fn test_share_create_shows_url_and_serves_export(
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         resp.headers().get("location").unwrap(),
-        "/frontend/user/user/share"
+        "/frontend/user/user/calendar#cal-personal"
     );
 
-    let req = request(
-        Method::GET,
-        "/frontend/user/user/share",
-        "user",
-        "pass",
-        None,
-    );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = resp.extract_string().await;
+    let body = get_page(&app, "/frontend/user/user/calendar").await;
     let url = extract_share_url(&body, ".ics");
     let token = url
         .trim_start_matches("https://public.example/export/")
         .trim_end_matches(".ics");
     assert_eq!(token.len(), 64, "app-token shape: {url}");
     assert!(token.chars().all(|c| c.is_ascii_alphanumeric()));
+
+    // The tile carries the create button again for that calendar? No — the
+    // minted tile shows the URL instead; the create button remains only on
+    // the group tile.
+    assert_eq!(body.matches("Create subscribe link").count(), 1);
+
+    // The instructions block offers both URL variants (§17.15 §6).
+    let webcal_url = url.replacen("https://", "webcal://", 1);
+    assert!(
+        body.contains(&webcal_url),
+        "webcal variant shown: {webcal_url}"
+    );
 
     // The public export URL serves without any authentication.
     let req = Request::builder()
@@ -293,7 +327,7 @@ async fn test_share_create_shows_url_and_serves_export(
 
 #[rstest]
 #[tokio::test]
-async fn test_share_create_addressbook_serves_vcf(
+async fn test_share_create_addressbook_shows_url_on_tile_and_serves_vcf(
     #[from(test_store_context)]
     #[future]
     context: TestStoreContext,
@@ -311,17 +345,15 @@ async fn test_share_create_addressbook_serves_vcf(
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-
-    let req = request(
-        Method::GET,
-        "/frontend/user/user/share",
-        "user",
-        "pass",
-        None,
+    assert_eq!(
+        resp.headers().get("location").unwrap(),
+        "/frontend/user/user/addressbook#ab-contacts"
     );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let body = resp.extract_string().await;
+
+    let body = get_page(&app, "/frontend/user/user/addressbook").await;
     let url = extract_share_url(&body, ".vcf");
+    // The tile shows the URL with Copy + Revoke instead of the create button.
+    assert_eq!(body.matches("Create share link").count(), 0);
 
     let req = Request::builder()
         .method(Method::GET)
@@ -360,17 +392,13 @@ async fn test_share_create_group_collection(
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-
-    // The group's share link shows on the user's Share page …
-    let req = request(
-        Method::GET,
-        "/frontend/user/user/share",
-        "user",
-        "pass",
-        None,
+    assert_eq!(
+        resp.headers().get("location").unwrap(),
+        "/frontend/user/user/calendar#cal-groupcal"
     );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let body = resp.extract_string().await;
+
+    // The group calendar's share link shows on the user's Calendars tab …
+    let body = get_page(&app, "/frontend/user/user/calendar").await;
     let url = extract_share_url(&body, ".ics");
 
     // … and serves through the public export route.
@@ -492,15 +520,7 @@ async fn test_share_revoke_makes_url_404(
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    let req = request(
-        Method::GET,
-        "/frontend/user/user/share",
-        "user",
-        "pass",
-        None,
-    );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let body = resp.extract_string().await;
+    let body = get_page(&app, "/frontend/user/user/calendar").await;
     let url = extract_share_url(&body, ".ics");
     let revoke_action = extract_revoke_action(&body);
 
@@ -513,18 +533,15 @@ async fn test_share_revoke_makes_url_404(
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-
-    // The Share page shows the create button again …
-    let req = request(
-        Method::GET,
-        "/frontend/user/user/share",
-        "user",
-        "pass",
-        None,
+    // The redirect anchors the tile the link belonged to.
+    assert_eq!(
+        resp.headers().get("location").unwrap(),
+        "/frontend/user/user/calendar#cal-personal"
     );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let body = resp.extract_string().await;
-    assert!(body.contains("Create share link"));
+
+    // The Calendars tab shows the create button again …
+    let body = get_page(&app, "/frontend/user/user/calendar").await;
+    assert!(body.contains("Create subscribe link"));
     assert!(!body.contains("/export/"));
 
     // … and the export URL is gone immediately.
@@ -539,7 +556,7 @@ async fn test_share_revoke_makes_url_404(
 
 #[rstest]
 #[tokio::test]
-async fn test_share_page_wrong_user(
+async fn test_addressbook_share_revoke_from_tile(
     #[from(test_store_context)]
     #[future]
     context: TestStoreContext,
@@ -548,19 +565,81 @@ async fn test_share_page_wrong_user(
     setup_share_fixtures(&context).await;
     let app = get_app(context);
 
-    let req = request(Method::GET, "/frontend/user/user/share", "bob", "bob", None);
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/create",
+        "user",
+        "pass",
+        form("principal=user&kind=addressbook&collection_id=contacts"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let body = get_page(&app, "/frontend/user/user/addressbook").await;
+    let url = extract_share_url(&body, ".vcf");
+    let revoke_action = extract_revoke_action(&body);
+
+    let req = request(
+        Method::POST,
+        &revoke_action,
+        "user",
+        "pass",
+        form("principal=user"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    // Addressbook revokes land back on the Addressbooks tab, anchored.
+    assert_eq!(
+        resp.headers().get("location").unwrap(),
+        "/frontend/user/user/addressbook#ab-contacts"
+    );
+
+    let body = get_page(&app, "/frontend/user/user/addressbook").await;
+    assert!(body.contains("Create share link"));
+    assert!(!body.contains("/export/"));
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(&url["https://public.example".len()..])
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_share_wrong_user_on_calendars_page(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    let app = get_app(context);
+
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/calendar",
+        "bob",
+        "bob",
+        None,
+    );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 /// The `https://public.example/register?code=…` URL printed in the invite
-/// banner (terminated by the closing `</code>` element).
+/// banner (terminated by the closing `</code>` element). The banner wraps
+/// the URL in `<code>…</code>`, unlike the persistent tile rows which use
+/// `<a href="…">` — anchoring on the `<code>` keeps this stable when the
+/// page also lists earlier invite rows.
 fn extract_register_url(body: &str) -> String {
-    const MARKER: &str = "https://public.example/register?code=";
-    let start = body.find(MARKER).expect("register URL in body");
-    let rest = &body[start..];
+    const MARKER: &str = "<code>https://public.example/register?code=";
+    let start = body.find(MARKER).expect("register URL in banner");
+    let rest = &body[start + MARKER.len()..];
     let end = rest.find('<').expect("end of register URL");
-    rest[..end].to_owned()
+    format!("https://public.example/register?code={}", &rest[..end])
 }
 
 #[rstest]
@@ -768,7 +847,7 @@ async fn mint_invite(app: &axum::Router, invite_store: &SqliteInviteStore, form:
 
 #[rstest]
 #[tokio::test]
-async fn test_share_tile_shows_invite_link_and_revoke_removes_it(
+async fn test_calendar_tile_shows_invite_link_and_revoke_removes_it(
     #[from(test_store_context)]
     #[future]
     context: TestStoreContext,
@@ -788,18 +867,13 @@ async fn test_share_tile_shows_invite_link_and_revoke_removes_it(
 
     // On the next page load the link persists under the group-calendar tile
     // (no one-time banner anymore).
-    let req = request(
-        Method::GET,
-        "/frontend/user/user/share",
-        "user",
-        "pass",
-        None,
-    );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = resp.extract_string().await;
+    let body = get_page(&app, "/frontend/user/user/calendar").await;
     assert!(body.contains("Invite link"));
     assert!(body.contains(&url), "tile shows the link");
+    assert!(
+        !body.contains("Invite link generated"),
+        "banner is one-time"
+    );
     assert_eq!(
         body.matches(&format!("/frontend/user/user/share/invite/{code}/revoke"))
             .count(),
@@ -817,23 +891,19 @@ async fn test_share_tile_shows_invite_link_and_revoke_removes_it(
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-
-    let req = request(
-        Method::GET,
-        "/frontend/user/user/share",
-        "user",
-        "pass",
-        None,
+    assert_eq!(
+        resp.headers().get("location").unwrap(),
+        "/frontend/user/user/calendar#cal-groupcal"
     );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let body = resp.extract_string().await;
+
+    let body = get_page(&app, "/frontend/user/user/calendar").await;
     assert!(!body.contains(&url), "revoked link is gone from the tile");
     assert!(invite_store.get_invite(&code).await.unwrap().is_none());
 }
 
 #[rstest]
 #[tokio::test]
-async fn test_share_tile_invite_scoped_to_its_collection(
+async fn test_calendar_tile_invite_scoped_to_its_collection(
     #[from(test_store_context)]
     #[future]
     context: TestStoreContext,
@@ -842,26 +912,7 @@ async fn test_share_tile_invite_scoped_to_its_collection(
     setup_share_fixtures(&context).await;
     // A group calendar with the SAME id as the user's own calendar: an invite
     // for one must not leak onto the other's tile.
-    context
-        .cal_store
-        .insert_calendar(Calendar {
-            id: "personal".to_owned(),
-            principal: "testgroup".to_owned(),
-            meta: CalendarMetadata {
-                displayname: Some("Group Personal".to_owned()),
-                order: 0,
-                description: None,
-                color: None,
-            },
-            timezone_id: None,
-            deleted_at: None,
-            synctoken: 0,
-            subscription_url: None,
-            push_topic: "share-test-group-personal".to_owned(),
-            components: vec![CalendarObjectType::Event],
-        })
-        .await
-        .unwrap();
+    insert_calendar(&context, "testgroup", "personal", "Group Personal").await;
     let invite_store = SqliteInviteStore::new(context.cal_store.clone());
     let app = get_app(context);
 
@@ -880,15 +931,7 @@ async fn test_share_tile_invite_scoped_to_its_collection(
     let own_url = format!("https://public.example/register?code={own_code}");
     let group_url = format!("https://public.example/register?code={group_code}");
 
-    let req = request(
-        Method::GET,
-        "/frontend/user/user/share",
-        "user",
-        "pass",
-        None,
-    );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let body = resp.extract_string().await;
+    let body = get_page(&app, "/frontend/user/user/calendar").await;
     assert!(body.contains(&own_url));
     assert!(body.contains(&group_url));
 
@@ -903,15 +946,7 @@ async fn test_share_tile_invite_scoped_to_its_collection(
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    let req = request(
-        Method::GET,
-        "/frontend/user/user/share",
-        "user",
-        "pass",
-        None,
-    );
-    let resp = app.oneshot(req).await.unwrap();
-    let body = resp.extract_string().await;
+    let body = get_page(&app, "/frontend/user/user/calendar").await;
     assert!(!body.contains(&own_url));
     assert!(
         body.contains(&group_url),
@@ -919,9 +954,9 @@ async fn test_share_tile_invite_scoped_to_its_collection(
     );
 }
 
-/// ──────────────────────────────────────────────────────────────────────────
-/// Guest-shares tests (Omnical §17.10 portal flow)
-/// ──────────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────
+// Guest-shares tests (Omnical §17.10 portal flow)
+// ──────────────────────────────────────────────────────────────────────────
 
 fn extract_between<'a>(body: &'a str, open: &str, close: &str) -> &'a str {
     let start = body.find(open).expect("open marker") + open.len();
@@ -969,7 +1004,7 @@ async fn test_guest_invite_mints_share_and_shows_credential_banner(
         "credential banner shown: {body}"
     );
     // The banner renders exactly once — on the tile of the minted calendar,
-    // not on every collection of the Share page.
+    // not on every calendar of the Calendars tab.
     assert_eq!(
         body.matches("This one-time credential was created for")
             .count(),
@@ -1055,7 +1090,7 @@ async fn test_guest_invite_rejects_non_admin_and_foreign(
         "pass",
         form("principal=bob&collection_id=personal&privilege=view"),
     );
-    let resp = app.clone().oneshot(req).await.unwrap();
+    let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
@@ -1114,17 +1149,12 @@ async fn test_guest_invite_revoke_removes_access_from_tile(
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Tile shows the guest row with a revoke form.
-    let req = request(
-        Method::GET,
-        "/frontend/user/user/share",
-        "user",
-        "pass",
-        None,
+    // The tile shows the guest row with a revoke form.
+    let body = get_page(&app, "/frontend/user/user/calendar").await;
+    assert!(
+        body.contains("CalDAV access: <code>guest-"),
+        "guest row shown"
     );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let body = resp.extract_string().await;
-    assert!(body.contains("Guest guest-"), "guest row shown");
     assert!(body.contains("· view access"), "privilege badge");
     // The revoke form points to the share id.
     let share_id = share_store
@@ -1133,7 +1163,7 @@ async fn test_guest_invite_revoke_removes_access_from_tile(
         .unwrap()
         .remove(0)
         .id;
-    let revoke_path = format!("/frontend/user/user/share/guest-invite/{share_id}/revoke");
+    let revoke_path = format!("/frontend/user/user/calendar/credentials/{share_id}/revoke");
     assert!(
         body.contains(&revoke_path),
         "revoke form present: {revoke_path}"
@@ -1151,16 +1181,11 @@ async fn test_guest_invite_revoke_removes_access_from_tile(
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
     // The tile no longer shows the guest row.
-    let req = request(
-        Method::GET,
-        "/frontend/user/user/share",
-        "user",
-        "pass",
-        None,
+    let body = get_page(&app, "/frontend/user/user/calendar").await;
+    assert!(
+        !body.contains("CalDAV access: <code>guest-"),
+        "guest row gone"
     );
-    let resp = app.oneshot(req).await.unwrap();
-    let body = resp.extract_string().await;
-    assert!(!body.contains("Guest guest-"), "guest row gone");
 
     // Access resolved through get_share_by_guest is gone.
     assert!(
@@ -1170,4 +1195,82 @@ async fn test_guest_invite_revoke_removes_access_from_tile(
             .unwrap()
             .is_empty()
     );
+}
+
+/// Regression for the §17.15 root-cause report ("no controls on the CAS
+/// calendar"): a CAS-shaped fixture — one calendar with an existing
+/// subscription, three guest shares (view/edit/admin) and zero invites —
+/// must render every control on its Calendars tile.
+#[rstest]
+#[tokio::test]
+async fn test_calendar_tile_renders_full_share_state_cas_regression(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_share_fixtures(&context).await;
+    insert_calendar(&context, "user", "CAS", "CAS").await;
+    let sub_store = SqliteSubscriptionStore::new(context.cal_store.clone());
+    let invite_store = SqliteInviteStore::new(context.cal_store.clone());
+
+    // One existing subscription (minted long ago) …
+    let token = format!("CAS{}", "a".repeat(61));
+    sub_store
+        .add_subscription("user", SubscriptionKind::Calendar, "CAS", &token)
+        .await
+        .unwrap();
+
+    // … three active guest shares with different privileges …
+    insert_guest(&context, "guest-viewer", "user", "CAS", Privilege::View).await;
+    insert_guest(&context, "guest-editor", "user", "CAS", Privilege::Edit).await;
+    insert_guest(&context, "guest-admin", "user", "CAS", Privilege::Admin).await;
+
+    // … and zero registration invites.
+    assert!(invite_store.list_invites(false).await.unwrap().is_empty());
+
+    let app = get_app(context);
+    let body = get_page(&app, "/frontend/user/user/calendar").await;
+
+    // The subscribe block: URL + Copy + Revoke (never a create button).
+    let url = format!("https://public.example/export/{token}.ics");
+    assert!(body.contains(&url), "subscribe URL shown: {body}");
+    // The URL appears 5 times on the CAS tile: block anchor + text + Copy
+    // button, instructions code + Copy button.
+    assert_eq!(
+        body.matches(&url).count(),
+        5,
+        "URL on the subscribe block and in the instructions"
+    );
+    assert!(
+        body.matches("Create subscribe link").count() >= 1,
+        "other tiles keep their create button"
+    );
+    let cas_revoke = extract_revoke_action(&body);
+    assert!(
+        cas_revoke.starts_with("/frontend/user/user/share/"),
+        "subscribe revoke action: {cas_revoke}"
+    );
+
+    // All three guest rows render with their privilege and revoke forms.
+    for (guest, privilege) in [
+        ("guest-viewer", "view"),
+        ("guest-editor", "edit"),
+        ("guest-admin", "admin"),
+    ] {
+        assert!(
+            body.contains(&format!("CalDAV access: <code>{guest}</code>")),
+            "guest row for {guest}: {body}"
+        );
+        assert!(body.contains(&format!("· {privilege} access")));
+    }
+
+    // No invite rows (none minted) …
+    assert!(!body.contains("Invite link for"), "no invite rows");
+
+    // … but all three minting forms are present on the CAS tile.
+    assert!(body.contains("Send invite"));
+    assert!(body.contains("Generate invite link"));
+    assert!(body.contains("Invite guest"));
+    assert!(body.contains("Generate credentials"));
 }

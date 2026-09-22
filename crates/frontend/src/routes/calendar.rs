@@ -1,7 +1,7 @@
 use crate::pages::DefaultLayoutData;
 use crate::pages::user::{Section, UserPage};
 use crate::routes::app_token::generate_app_token;
-use crate::routes::share::{GuestShareEntry, ensure_subscribe_url};
+use crate::routes::share::ensure_subscribe_url;
 use crate::url_builder::export_url;
 use askama::Template;
 use askama_web::WebTemplate;
@@ -15,8 +15,8 @@ use headers::{Host, Referer};
 use http::StatusCode;
 use rustical_scheduling::{SmtpAccount, mime, smtp};
 use rustical_store::{
-    Calendar, CalendarStore, CollectionMetadata, CollectionShareStore, SubscriptionKind,
-    SubscriptionStore,
+    Calendar, CalendarStore, CollectionMetadata, CollectionShareStore, Invite, InviteStore,
+    SubscriptionKind, SubscriptionStore,
     auth::{AuthenticationProvider, Principal, PrincipalType, Privilege},
 };
 use serde::Deserialize;
@@ -29,28 +29,93 @@ impl Section for CalendarsSection {
     }
 }
 
+/// One unredeemed registration invite link shown on the calendar tile it
+/// was minted for (PLAN.md §17.9.1).
+pub struct InviteLink {
+    pub code: String,
+    /// Full `{base}/register?code=…` URL.
+    pub url: String,
+    /// The email the invite is bound to, if any.
+    pub invited_email: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// One active guest share on a calendar tile (Omnical §17.10): the guest
+/// username and their privilege level, with revoke for admins.
+pub struct GuestShareEntry {
+    pub share_id: String,
+    pub guest_principal: String,
+    /// `view`/`edit`/`admin` (see [`Privilege::can_write`]).
+    pub privilege: &'static str,
+    /// The email the credential was delivered to, if any.
+    pub target_email: Option<String>,
+    pub created_at: Option<String>,
+    /// Whether the acting user may revoke (or mint) guest shares here:
+    /// `admin` privilege in the owning principal (same rule as invites).
+    pub can_manage: bool,
+}
+
 /// One calendar tile of the Calendars screen: the rendered calendar plus the
-/// per-tile data the section needs (mint flag + active credentials).
+/// per-tile sharing data (subscribe link, credentials, invites — PLAN.md
+/// §17.15 folds the old Share tab into this tile).
 pub struct CalendarTile {
     pub meta: CollectionMetadata,
     pub calendar: Calendar,
     /// True when the acting user may mint/revoke full-access credentials for
     /// the tile (owner, or admin of the owning group).
     pub can_generate: bool,
-    /// The calendar's credential-less share-link URL (`/export/{token}.ics`),
-    /// when a subscription exists (PLAN.md §17.7 — shown right on the
-    /// Calendars screen so users never have to visit the Share page for it).
+    /// True when the acting user may mint registration invites and guest
+    /// shares for the tile (owner, or admin of the owning group — §17.9.2).
+    pub can_invite: bool,
+    /// The calendar's credential-less subscribe-link URL
+    /// (`/export/{token}.ics`), when a subscription exists (§17.7).
     pub subscribe_url: Option<String>,
-    /// Subscription id of the share link (for Revoke) — `None` when the
-    /// calendar has no share link yet.
+    /// The same URL with the `webcal://` scheme — display variant only, the
+    /// stored token keeps working over plain https (§17.15).
+    pub subscribe_url_webcal: Option<String>,
+    /// Subscription id of the subscribe link (for Revoke) — `None` when the
+    /// calendar has no link yet.
     pub sub_id: Option<String>,
-    /// True when the acting user may create the calendar's share link here
-    /// (owner, or `edit`/`admin` of the owning group — same rule as the Share
-    /// page's "Create share link").
+    /// When the subscribe link was minted.
+    pub sub_created_at: Option<String>,
+    /// True when the acting user may create the calendar's subscribe link
+    /// here (owner, or `edit`/`admin` of the owning group — §17.9.2).
     pub can_subscribe: bool,
     /// Active credentials minted for this calendar (Omnical §17.12), each with
     /// its own Revoke control.
     pub guest_shares: Vec<GuestShareEntry>,
+    /// Unredeemed registration invite links minted for this calendar
+    /// (§17.9.1) — empty unless the user may manage them.
+    pub invites: Vec<InviteLink>,
+}
+
+/// One-time banner payloads of the Calendars screen — all `None` on a plain
+/// page load; each minting POST sets exactly one of them.
+#[derive(Default)]
+pub struct CalendarsExtras {
+    pub error: Option<String>,
+    /// §17.12: just-minted calendar credential.
+    pub credential_server_url: Option<String>,
+    pub credential_username: Option<String>,
+    pub credential_token: Option<String>,
+    pub credential_calendar_id: Option<String>,
+    pub credential_email: Option<String>,
+    /// §17.10: just-minted guest-share credential (one-time banner, shown on
+    /// the minted calendar's tile only).
+    pub guest_share_server_url: Option<String>,
+    pub guest_share_username: Option<String>,
+    pub guest_share_credential: Option<String>,
+    pub guest_share_calendar_id: Option<String>,
+    pub guest_share_principal: Option<String>,
+    pub guest_share_email: Option<String>,
+    /// Subscribe link of the same calendar, minted alongside (§17.8).
+    pub guest_share_subscribe_url: Option<String>,
+    /// §17.9: just-minted registration invite (one-time banner, shown on
+    /// the minted calendar's tile only).
+    pub invite_url: Option<String>,
+    pub invited_email: Option<String>,
+    pub invite_collection_id: Option<String>,
+    pub invite_principal: Option<String>,
 }
 
 #[derive(Template, WebTemplate)]
@@ -59,46 +124,96 @@ pub struct CalendarsSection {
     pub user: Principal,
     pub calendars: Vec<CalendarTile>,
     pub deleted_calendars: Vec<(CollectionMetadata, Calendar)>,
-    /// When set, show the just-minted calendar credential (one-time banner).
+    /// `CalDAV` endpoint printed in the per-client instructions (§17.15).
+    pub caldav_url: String,
     pub credential_server_url: Option<String>,
     pub credential_username: Option<String>,
     pub credential_token: Option<String>,
     pub credential_calendar_id: Option<String>,
     /// The `target_email` the credential was delivered to, if one was given.
     pub credential_email: Option<String>,
+    pub guest_share_server_url: Option<String>,
+    pub guest_share_username: Option<String>,
+    pub guest_share_credential: Option<String>,
+    pub guest_share_calendar_id: Option<String>,
+    pub guest_share_principal: Option<String>,
+    pub guest_share_email: Option<String>,
+    pub guest_share_subscribe_url: Option<String>,
+    pub invite_url: Option<String>,
+    pub invited_email: Option<String>,
+    pub invite_collection_id: Option<String>,
+    pub invite_principal: Option<String>,
     pub error: Option<String>,
 }
 
-/// The shared Calendars-screen renderer: lists the user's calendars (with the
-/// per-tile credential-minting flag, share-link URL and active credentials)
-/// plus one-time credential/error banners.
-#[allow(clippy::too_many_arguments)]
-async fn render_calendars_page<CS: CalendarStore>(
+/// The `webcal://` display variant of an https/http export URL (scheme swap
+/// only — the token itself is never rewritten, §17.15).
+fn webcal_variant(url: &str) -> String {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .map_or_else(|| url.to_owned(), |rest| format!("webcal://{rest}"))
+}
+
+/// The unredeemed invite links of a calendar tile: invites are attributed per
+/// tile via `collection_id` (+ `kind`); group-collection invites carry the
+/// group as `target_group`, own-collection invites carry none (§17.9.1).
+fn tile_invite_links(
+    invites: &[Invite],
+    principal: &str,
+    user: &Principal,
+    collection_id: &str,
+    base_url: &str,
+) -> Vec<InviteLink> {
+    invites
+        .iter()
+        .filter(|invite| {
+            invite.kind.as_deref() == Some("calendar")
+                && invite.collection_id.as_deref() == Some(collection_id)
+                && if principal == user.id {
+                    invite.target_group.is_none()
+                } else {
+                    invite.target_group.as_deref() == Some(principal)
+                }
+        })
+        .map(|invite| InviteLink {
+            code: invite.code.clone(),
+            url: format!("{base_url}/register?code={}", invite.code),
+            invited_email: invite.target_email.clone(),
+            created_at: invite.created_at.clone(),
+        })
+        .collect()
+}
+
+/// The shared Calendars-screen renderer: lists the user's calendars with the
+/// per-tile sharing blocks (subscribe link, full-access credentials, invites
+/// — §17.15) plus one-time banners.
+#[allow(clippy::too_many_lines)]
+pub async fn render_calendars_page<CS: CalendarStore>(
     cal_store: &Arc<CS>,
     share_store: &Arc<dyn CollectionShareStore>,
     sub_store: Option<&Arc<dyn SubscriptionStore>>,
+    invite_store: &Arc<dyn InviteStore>,
     base_url: &str,
     user: &Principal,
-    credential_server_url: Option<String>,
-    credential_username: Option<String>,
-    credential_token: Option<String>,
-    credential_calendar_id: Option<String>,
-    credential_email: Option<String>,
-    error: Option<String>,
+    extras: CalendarsExtras,
 ) -> Response {
     let mut calendars = vec![];
     for group in user.memberships() {
         calendars.extend(cal_store.get_calendars(group).await.unwrap());
     }
 
+    let invites = invite_store.list_invites(false).await.unwrap_or_default();
+
     let mut calendar_infos = vec![];
     for calendar in calendars {
         let can_generate = user.is_admin(&calendar.principal);
-        // Share-link creation follows the Share page's rule: owner, or
-        // `edit`/`admin` group members (§17.9.2).
+        // Invite/guest-share minting is member management: owner, or `admin`
+        // privilege in the group (§17.9.2).
+        let can_invite = calendar.principal == user.id || user.is_admin(&calendar.principal);
+        // Subscribe-link creation: owner, or `edit`/`admin` group members
+        // (§17.9.2).
         let can_subscribe = sub_store.is_some() && user.can_write(&calendar.principal);
-        // The calendar's existing share link, if any (§17.7) — looked up per
-        // owner principal like the Share page does.
+        // The calendar's existing subscribe link, if any (§17.7).
         let sub = match sub_store {
             Some(store) => store
                 .get_subscriptions(&calendar.principal)
@@ -119,9 +234,16 @@ async fn render_calendars_page<CS: CalendarStore>(
                 privilege: share.privilege.as_str(),
                 target_email: share.target_email,
                 created_at: share.created_at,
-                can_manage: can_generate,
+                can_manage: can_invite,
             })
             .collect();
+        // Invite links are only shown where the user may mint them: a
+        // view-only group member must not see the group's registration URLs.
+        let invites = if can_invite {
+            tile_invite_links(&invites, &calendar.principal, user, &calendar.id, base_url)
+        } else {
+            Vec::new()
+        };
         calendar_infos.push(CalendarTile {
             meta: cal_store
                 .calendar_metadata(&calendar.principal, &calendar.id)
@@ -129,10 +251,16 @@ async fn render_calendars_page<CS: CalendarStore>(
                 .unwrap(),
             calendar,
             can_generate,
+            can_invite,
             subscribe_url: sub.as_ref().map(|s| export_url(base_url, &s.token, s.kind)),
+            subscribe_url_webcal: sub
+                .as_ref()
+                .map(|s| webcal_variant(&export_url(base_url, &s.token, s.kind))),
             sub_id: sub.as_ref().map(|s| s.id.clone()),
+            sub_created_at: sub.and_then(|s| s.created_at),
             can_subscribe,
             guest_shares,
+            invites,
         });
     }
 
@@ -152,16 +280,48 @@ async fn render_calendars_page<CS: CalendarStore>(
         ));
     }
 
+    let CalendarsExtras {
+        error,
+        credential_server_url,
+        credential_username,
+        credential_token,
+        credential_calendar_id,
+        credential_email,
+        guest_share_server_url,
+        guest_share_username,
+        guest_share_credential,
+        guest_share_calendar_id,
+        guest_share_principal,
+        guest_share_email,
+        guest_share_subscribe_url,
+        invite_url,
+        invited_email,
+        invite_collection_id,
+        invite_principal,
+    } = extras;
+
     UserPage {
         section: CalendarsSection {
             user: user.clone(),
             calendars: calendar_infos,
             deleted_calendars: deleted_calendar_infos,
+            caldav_url: format!("{base_url}/caldav"),
             credential_server_url,
             credential_username,
             credential_token,
             credential_calendar_id,
             credential_email,
+            guest_share_server_url,
+            guest_share_username,
+            guest_share_credential,
+            guest_share_calendar_id,
+            guest_share_principal,
+            guest_share_email,
+            guest_share_subscribe_url,
+            invite_url,
+            invited_email,
+            invite_collection_id,
+            invite_principal,
             error,
         },
         user: user.clone(),
@@ -169,11 +329,13 @@ async fn render_calendars_page<CS: CalendarStore>(
     .into_response()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn route_calendars<CS: CalendarStore>(
     Path(user_id): Path<String>,
     Extension(cal_store): Extension<Arc<CS>>,
     Extension(share_store): Extension<Arc<dyn CollectionShareStore>>,
     Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
+    Extension(invite_store): Extension<Arc<dyn InviteStore>>,
     Extension(public_url): Extension<String>,
     TypedHeader(host): TypedHeader<Host>,
     user: Principal,
@@ -186,14 +348,10 @@ pub async fn route_calendars<CS: CalendarStore>(
         &cal_store,
         &share_store,
         sub_store.as_ref(),
+        &invite_store,
         &base_url,
         &user,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        CalendarsExtras::default(),
     )
     .await
 }
@@ -249,14 +407,14 @@ pub struct CalendarCredentialsForm {
     pub principal: String,
     pub calendar_id: String,
     /// Optional delivery target; stored for audit and emailed when SMTP is
-    /// configured (same behavior as the Share page guest invite).
+    /// configured (same behavior as the guest-share invite).
     #[serde(default)]
     pub email: Option<String>,
 }
 
 /// Resolve the base URL the credential's server URL is printed with: the
 /// configured `[subscriptions] public_url`, else the request's own host
-/// (mirrors the Share page [`crate::routes::share`] logic).
+/// (mirrors the share-route logic).
 fn resolve_base_url(public_url: &str, host: &Host) -> String {
     if public_url.is_empty() {
         format!("https://{host}")
@@ -271,7 +429,7 @@ fn resolve_base_url(public_url: &str, host: &Host) -> String {
 ///
 /// The credential is a fresh `guest-{uuid}` principal + app token scoped by a
 /// `collection_shares` row to exactly this calendar with `admin` privilege —
-/// the same mechanism the Share page guest invite uses, but the privilege is
+/// the same mechanism the guest-share invite uses, but the privilege is
 /// always `admin` (full read/write/admin) and the surface is per-calendar.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn route_calendar_credentials<AP: AuthenticationProvider, CS: CalendarStore>(
@@ -280,6 +438,7 @@ pub async fn route_calendar_credentials<AP: AuthenticationProvider, CS: Calendar
     Extension(cal_store): Extension<Arc<CS>>,
     Extension(share_store): Extension<Arc<dyn CollectionShareStore>>,
     Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
+    Extension(invite_store): Extension<Arc<dyn InviteStore>>,
     Extension(smtp_accounts): Extension<Vec<SmtpAccount>>,
     Extension(public_url): Extension<String>,
     TypedHeader(host): TypedHeader<Host>,
@@ -308,19 +467,18 @@ pub async fn route_calendar_credentials<AP: AuthenticationProvider, CS: Calendar
             &cal_store,
             &share_store,
             sub_store.as_ref(),
+            &invite_store,
             &base_url,
             &user,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("No calendar specified.".to_owned()),
+            CalendarsExtras {
+                error: Some("No calendar specified.".to_owned()),
+                ..CalendarsExtras::default()
+            },
         )
         .await;
     }
 
-    // Fail fast on a wrong collection id (same discipline as the Share page).
+    // Fail fast on a wrong calendar id (same discipline as the share routes).
     if cal_store
         .get_calendar(&form.principal, &form.calendar_id, false)
         .await
@@ -330,22 +488,21 @@ pub async fn route_calendar_credentials<AP: AuthenticationProvider, CS: Calendar
             &cal_store,
             &share_store,
             sub_store.as_ref(),
+            &invite_store,
             &base_url,
             &user,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(format!(
-                "No such calendar '{}' for '{}'.",
-                form.calendar_id, form.principal
-            )),
+            CalendarsExtras {
+                error: Some(format!(
+                    "No such calendar '{}' for '{}'.",
+                    form.calendar_id, form.principal
+                )),
+                ..CalendarsExtras::default()
+            },
         )
         .await;
     }
 
-    // Validate the optional email (same as the Share page guest invite).
+    // Validate the optional email (same as the guest-share invite).
     let email: Option<String> = match form
         .email
         .as_deref()
@@ -357,14 +514,13 @@ pub async fn route_calendar_credentials<AP: AuthenticationProvider, CS: Calendar
                 &cal_store,
                 &share_store,
                 sub_store.as_ref(),
+                &invite_store,
                 &base_url,
                 &user,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some("Please enter a valid email address.".to_owned()),
+                CalendarsExtras {
+                    error: Some("Please enter a valid email address.".to_owned()),
+                    ..CalendarsExtras::default()
+                },
             )
             .await;
         }
@@ -393,14 +549,13 @@ pub async fn route_calendar_credentials<AP: AuthenticationProvider, CS: Calendar
             &cal_store,
             &share_store,
             sub_store.as_ref(),
+            &invite_store,
             &base_url,
             &user,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(format!("Could not create guest principal: {err}")),
+            CalendarsExtras {
+                error: Some(format!("Could not create guest principal: {err}")),
+                ..CalendarsExtras::default()
+            },
         )
         .await;
     }
@@ -421,14 +576,13 @@ pub async fn route_calendar_credentials<AP: AuthenticationProvider, CS: Calendar
                 &cal_store,
                 &share_store,
                 sub_store.as_ref(),
+                &invite_store,
                 &base_url,
                 &user,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(format!("Could not mint app token: {err}")),
+                CalendarsExtras {
+                    error: Some(format!("Could not mint app token: {err}")),
+                    ..CalendarsExtras::default()
+                },
             )
             .await;
         }
@@ -453,14 +607,13 @@ pub async fn route_calendar_credentials<AP: AuthenticationProvider, CS: Calendar
             &cal_store,
             &share_store,
             sub_store.as_ref(),
+            &invite_store,
             &base_url,
             &user,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(format!("Could not create calendar credential: {err}")),
+            CalendarsExtras {
+                error: Some(format!("Could not create calendar credential: {err}")),
+                ..CalendarsExtras::default()
+            },
         )
         .await;
     }
@@ -498,14 +651,17 @@ pub async fn route_calendar_credentials<AP: AuthenticationProvider, CS: Calendar
         &cal_store,
         &share_store,
         sub_store.as_ref(),
+        &invite_store,
         &base_url,
         &user,
-        Some(server_url),
-        Some(guest_id),
-        Some(credential),
-        Some(form.calendar_id),
-        email,
-        None,
+        CalendarsExtras {
+            credential_server_url: Some(server_url),
+            credential_username: Some(guest_id),
+            credential_token: Some(credential),
+            credential_calendar_id: Some(form.calendar_id),
+            credential_email: email,
+            ..CalendarsExtras::default()
+        },
     )
     .await
 }
@@ -550,15 +706,17 @@ pub struct CalendarSubscribeForm {
 }
 
 /// POST /{user}/calendar/subscribe — mint (or reuse) the calendar's
-/// credential-less share link from the Calendars screen (PLAN.md §17.7):
-/// the same `/export/{token}.ics` URL the Share page mints, surfaced where
+/// credential-less subscribe link from the Calendars screen (PLAN.md §17.7):
+/// the same `/export/{token}.ics` URL the share routes mint, surfaced where
 /// the calendar itself is listed. Reuses the existing subscription when one
 /// already exists, so the URL stays stable.
+#[allow(clippy::too_many_arguments)]
 pub async fn route_calendar_subscribe<CS: CalendarStore>(
     Path(user_id): Path<String>,
     Extension(cal_store): Extension<Arc<CS>>,
     Extension(share_store): Extension<Arc<dyn CollectionShareStore>>,
     Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
+    Extension(invite_store): Extension<Arc<dyn InviteStore>>,
     Extension(public_url): Extension<String>,
     TypedHeader(host): TypedHeader<Host>,
     user: Principal,
@@ -579,7 +737,7 @@ pub async fn route_calendar_subscribe<CS: CalendarStore>(
     };
 
     // Ownership: the user's own principal, or a group where they hold
-    // `edit`/`admin` privilege (same rule as the Share page's share links).
+    // `edit`/`admin` privilege (same rule as the share routes).
     if form.principal != user.id && !user.can_write(&form.principal) {
         return (
             StatusCode::FORBIDDEN,
@@ -592,6 +750,7 @@ pub async fn route_calendar_subscribe<CS: CalendarStore>(
         let cal_store = cal_store.clone();
         let share_store = share_store.clone();
         let sub_store = sub_store.clone();
+        let invite_store = invite_store.clone();
         let base_url = base_url.clone();
         let user = user.clone();
         move |msg: String| async move {
@@ -599,14 +758,13 @@ pub async fn route_calendar_subscribe<CS: CalendarStore>(
                 &cal_store,
                 &share_store,
                 Some(&sub_store),
+                &invite_store,
                 &base_url,
                 &user,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(msg),
+                CalendarsExtras {
+                    error: Some(msg),
+                    ..CalendarsExtras::default()
+                },
             )
             .await
         }
@@ -616,7 +774,7 @@ pub async fn route_calendar_subscribe<CS: CalendarStore>(
         return page_error("No calendar specified.".to_owned()).await;
     }
 
-    // Fail fast on a wrong collection id (same discipline as the Share page).
+    // Fail fast on a wrong calendar id (same discipline as the share routes).
     if cal_store
         .get_calendar(&form.principal, &form.calendar_id, false)
         .await
@@ -630,7 +788,7 @@ pub async fn route_calendar_subscribe<CS: CalendarStore>(
     }
 
     // Mint or reuse; a minting failure surfaces as an error banner (the
-    // calendar tile simply stays without a share link).
+    // calendar tile simply stays without a subscribe link).
     if ensure_subscribe_url(
         Some(&sub_store),
         &form.principal,
@@ -643,5 +801,9 @@ pub async fn route_calendar_subscribe<CS: CalendarStore>(
         return page_error("Could not create the share link.".to_owned()).await;
     }
 
-    Redirect::to(&format!("/frontend/user/{}/calendar", user.id)).into_response()
+    Redirect::to(&format!(
+        "/frontend/user/{}/calendar#cal-{}",
+        user.id, form.calendar_id
+    ))
+    .into_response()
 }

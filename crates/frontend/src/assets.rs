@@ -70,6 +70,11 @@ where
                     let hdrs = res.headers_mut().unwrap();
                     hdrs.typed_insert(ContentType::from(mime));
                     hdrs.typed_insert(ETag::from_str(&etag).unwrap());
+                    // Always revalidate with the ETag: assets are served with
+                    // no freshness lifetime, so CSS/JS changes reach browsers
+                    // on the next load instead of sticking in heuristic
+                    // caches (Omnical §17.15).
+                    hdrs.typed_insert(headers::CacheControl::new().with_no_cache());
                     Ok(res.body(Body::from(body)).unwrap())
                 }
                 None => Ok(StatusCode::NOT_FOUND.into_response()),

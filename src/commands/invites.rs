@@ -148,6 +148,9 @@ pub async fn cmd_invites(args: InvitesArgs, config: Config) -> anyhow::Result<()
             println!("{code}");
             if let (Some(to), Some(account), Some(base)) = (send_to, send_account, send_base) {
                 let register_url = format!("{base}/register?code={code}");
+                // EHLO with the public hostname — strict receivers reject
+                // unresolvable HELO names (smtp::set_ehlo_name_from_url).
+                smtp::set_ehlo_name_from_url(base);
                 let message = mime::build_registration_invite(
                     account,
                     to,

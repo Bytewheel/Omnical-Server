@@ -15,7 +15,7 @@
   {% for tile in calendars %}
   {% let calendar = tile.calendar %}
   {% let color = calendar.meta.color.to_owned().unwrap_or("transparent".to_owned()) %}
-  <li class="collection-list-item" style="--color: {{ color }}">
+  <li class="collection-list-item" id="cal-{{ calendar.id }}" style="--color: {{ color }}">
     <a href="/frontend/user/{{ calendar.principal }}/calendar/{{ calendar.id }}"></a>
     <div class="inner">
       <span class="title">
@@ -31,6 +31,164 @@
       {% if let Some(subscription_url) = calendar.subscription_url %}
       <span class="subscription-url">{{ subscription_url }}</span>
       {% endif %}
+      <div class="subscribe-block">
+        <span class="block-label">Subscribe link (read-only)</span>
+        {% if let Some(url) = tile.subscribe_url %}
+        <div class="share-url-row">
+          <a class="share-url" href="{{ url }}">{{ url }}</a>
+          {% if let Some(created_at) = tile.sub_created_at %}<span class="muted">· created {{ created_at }}</span>{% endif %}
+          <span class="invite-actions">
+            <button type="button" onclick="navigator.clipboard.writeText('{{ url }}')">Copy</button>
+            {% if let Some(sub_id) = tile.sub_id %}
+            <form method="POST" action="/frontend/user/{{ user.id }}/share/{{ sub_id }}/revoke">
+              <input type="hidden" name="principal" value="{{ calendar.principal }}">
+              <button type="submit" class="delete">Revoke</button>
+            </form>
+            {% endif %}
+          </span>
+        </div>
+        {% else if tile.can_subscribe %}
+        <form method="POST" action="/frontend/user/{{ user.id }}/calendar/subscribe" class="inline-form">
+          <input type="hidden" name="principal" value="{{ calendar.principal }}">
+          <input type="hidden" name="calendar_id" value="{{ calendar.id }}">
+          <button type="submit" title="Create a secret read-only subscription URL (Apple 'Add Subscribed Calendar', Google 'From URL', any webcal client)">Create subscribe link</button>
+        </form>
+        {% endif %}
+      </div>
+      <div class="access-block">
+        <span class="block-label">Full access (CalDAV)</span>
+        {% if guest_share_principal.as_deref().unwrap_or("") == calendar.principal && guest_share_calendar_id.as_deref().unwrap_or("") == calendar.id %}
+        {% if let Some(server_url) = guest_share_server_url.as_ref() %}
+        <div class="success">
+          {% if let Some(email) = guest_share_email.as_ref() %}
+          <p><strong>Guest access sent to {{ email }}!</strong> This one-time credential was created for <code>{{ guest_share_calendar_id.as_ref().unwrap() }}</code>:</p>
+          {% else %}
+          <p><strong>Guest access created!</strong> This one-time credential was created for <code>{{ guest_share_calendar_id.as_ref().unwrap() }}</code> — send the setup below to your guest:</p>
+          {% endif %}
+          <p>Server URL: <code>{{ server_url }}</code></p>
+          <p>Username: <code>{{ guest_share_username.as_ref().unwrap() }}</code></p>
+          <p>App token: <code>{{ guest_share_credential.as_ref().unwrap() }}</code></p>
+          {% if let Some(subscribe_url) = guest_share_subscribe_url.as_ref() %}
+          <p>Prefer a read-only subscription link (no account or app token needed)? <code>{{ subscribe_url }}</code></p>
+          {% endif %}
+          <p>Step-by-step setup for their device: <a href="#client-help-{{ calendar.id }}">Set up on your device…</a></p>
+        </div>
+        {% endif %}
+        {% endif %}
+        {% if invite_principal.as_deref().unwrap_or("") == calendar.principal && invite_collection_id.as_deref().unwrap_or("") == calendar.id %}
+        {% if let Some(url) = invite_url.as_ref() %}
+        <div class="success">
+          {% if let Some(email) = invited_email.as_ref() %}
+          <p><strong>Invite sent!</strong> Share this registration link with <code>{{ email }}</code>:</p>
+          {% else %}
+          <p><strong>Invite link generated!</strong> Anyone with this registration link can join:</p>
+          {% endif %}
+          <p><code>{{ url }}</code></p>
+          <p>On registration they are added to the group and get full access to its shared collections.</p>
+        </div>
+        {% endif %}
+        {% endif %}
+        {% if tile.can_invite %}
+        {% for invite in tile.invites %}
+        <div class="metadata">
+          Invite link{% if let Some(email) = invite.invited_email %} for {{ email }}{% endif %}
+          {% if let Some(created_at) = invite.created_at %} · created {{ created_at }}{% endif %}:
+          <a href="{{ invite.url }}">{{ invite.url }}</a>
+          <span class="invite-actions">
+            <button type="button" onclick="navigator.clipboard.writeText('{{ invite.url }}')">Copy</button>
+            <form method="POST" action="/frontend/user/{{ user.id }}/share/invite/{{ invite.code }}/revoke">
+              <input type="hidden" name="principal" value="{{ calendar.principal }}">
+              <button type="submit" class="delete">Revoke</button>
+            </form>
+          </span>
+        </div>
+        {% endfor %}
+        <form method="POST" action="/frontend/user/{{ user.id }}/share/invite" class="inline-form">
+          <input type="hidden" name="principal" value="{{ calendar.principal }}">
+          <input type="hidden" name="kind" value="calendar">
+          <input type="hidden" name="collection_id" value="{{ calendar.id }}">
+          <input class="invite-email" type="email" name="email" placeholder="email@example.com" required>
+          <button type="submit" title="Email a one-time registration invite: the invitee joins the group with full access">Send invite</button>
+        </form>
+        <form method="POST" action="/frontend/user/{{ user.id }}/share/invite" class="inline-form">
+          <input type="hidden" name="principal" value="{{ calendar.principal }}">
+          <input type="hidden" name="kind" value="calendar">
+          <input type="hidden" name="collection_id" value="{{ calendar.id }}">
+          <button type="submit" title="Mint a one-time registration link anyone you share it with can use">Generate invite link</button>
+        </form>
+        <form method="POST" action="/frontend/user/{{ user.id }}/share/guest-invite" class="inline-form invite-form">
+          <input type="hidden" name="principal" value="{{ calendar.principal }}">
+          <input type="hidden" name="collection_id" value="{{ calendar.id }}">
+          <select name="privilege">
+            <option value="view">View</option>
+            <option value="edit">Edit</option>
+            <option value="admin">Admin</option>
+          </select>
+          <input type="email" name="email" placeholder="email@example.com">
+          <button type="submit" title="Create a guest account with app-token access">Invite guest</button>
+        </form>
+        {% endif %}
+        {% if tile.can_generate %}
+        <form method="POST" action="/frontend/user/{{ user.id }}/calendar/credentials" class="inline-form">
+          <input type="hidden" name="principal" value="{{ calendar.principal }}">
+          <input type="hidden" name="calendar_id" value="{{ calendar.id }}">
+          <input class="invite-email" type="email" name="email" placeholder="email@example.com" title="Optional: email the credentials to this address">
+          <button type="submit" title="Generate full read/write/admin CalDAV credentials for this calendar">Generate credentials</button>
+        </form>
+        {% endif %}
+        {% for guest in tile.guest_shares %}
+        <div class="metadata">
+          CalDAV access: <code>{{ guest.guest_principal }}</code>
+          {%- if let Some(email) = guest.target_email %} ({{ email }}){% endif %}
+          · {{ guest.privilege }} access
+          {% if let Some(created_at) = guest.created_at %} · created {{ created_at }}{% endif %}
+          {% if guest.can_manage %}
+          <span class="invite-actions">
+            <form method="POST" action="/frontend/user/{{ user.id }}/calendar/credentials/{{ guest.share_id }}/revoke">
+              <input type="hidden" name="principal" value="{{ calendar.principal }}">
+              <button type="submit" class="delete">Revoke</button>
+            </form>
+          </span>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      <details class="client-help" id="client-help-{{ calendar.id }}">
+        <summary>Set up on your device…</summary>
+        <div class="client-help-body">
+          <h4>Subscribe — read-only, no account needed</h4>
+          {% if let Some(url) = tile.subscribe_url.as_ref() %}
+          <p class="description">Anyone with this link can see this calendar's current events (a live feed — no account, no password). Read-only.</p>
+          <p class="share-url-row">
+            <code class="share-url">{{ url }}</code>
+            <span class="invite-actions">
+              <button type="button" onclick="navigator.clipboard.writeText('{{ url }}')">Copy</button>
+              {% if let Some(webcal_url) = tile.subscribe_url_webcal.as_ref() %}
+              <button type="button" onclick="navigator.clipboard.writeText('{{ webcal_url }}')" title="Same link with the webcal:// scheme — opens directly in Apple Calendar and most desktop clients">Copy webcal://</button>
+              {% endif %}
+            </span>
+          </p>
+          {% else %}
+          <p class="description">Create a subscribe link first (see "Subscribe link (read-only)" above) to get a URL for these.</p>
+          {% endif %}
+          <ul>
+            <li><strong>Apple iPhone/iPad</strong>: Calendar app → Calendars → Add Calendar → Subscribe to Calendar → paste the link.</li>
+            <li><strong>Apple Mac</strong>: Calendar → File → New Calendar Subscription → paste; set "Auto-refresh" to hourly for timely updates.</li>
+            <li><strong>Google Calendar</strong>: calendar.google.com → Settings ⚙ → Add calendar → From URL → paste → Add. Google refreshes subscribed calendars on its own schedule — changes can take hours (sometimes a day) to appear. Read-only.</li>
+            <li><strong>Outlook (web / new Outlook)</strong>: Add calendar → Subscribe from web → paste + name → Subscribe. Read-only.</li>
+            <li><strong>Outlook classic (Windows desktop)</strong>: File → Account Settings → Internet Calendars → New → paste.</li>
+            <li><strong>Anything else</strong>: any webcal/ICS-subscribing app works — the link is a plain live ICS feed.</li>
+          </ul>
+          <h4>Full access — read + write (CalDAV)</h4>
+          <p class="description">To use the calendar in full (add, change, delete events) a CalDAV account with a credential is needed: either a guest username + app token (mint one with "Invite guest" above), or your own per-calendar app token (from "Generate credentials" above / your profile's app tokens). Server: <code>{{ caldav_url }}</code></p>
+          <ul>
+            <li><strong>Apple iPhone/iPad/Mac</strong>: Settings → Calendar → Accounts → Add Account → Other → Add CalDAV Account → server <code>{{ caldav_url }}</code>, user = the guest username, password = the app token.</li>
+            <li><strong>Android</strong>: the built-in Google Calendar app cannot add an external CalDAV server — install <strong>DAVx5</strong> → add account → CalDAV → paste <code>{{ caldav_url }}</code> + username + app token.</li>
+            <li><strong>Thunderbird</strong>: Calendar → New Calendar → On the Network → paste <code>{{ caldav_url }}</code> + username + app token.</li>
+            <li><strong>Google Calendar &amp; Outlook.com: not possible</strong> — neither supports adding an external CalDAV server; use the read-only subscribe link above instead.</li>
+          </ul>
+        </div>
+      </details>
       <div class="actions">
         <form action="/caldav/principal/{{ calendar.principal }}/{{ calendar.id }}" target="_blank" method="GET">
           <button type="submit">Download</button>
@@ -44,56 +202,11 @@
           color="{{ calendar.meta.color.as_deref().unwrap_or_default() }}"
           components="{{ calendar.components | json }}"
         ></edit-calendar-form>
-        {% if tile.can_generate %}
-        <form method="POST" action="/frontend/user/{{ user.id }}/calendar/credentials" class="inline-form">
-          <input type="hidden" name="principal" value="{{ calendar.principal }}">
-          <input type="hidden" name="calendar_id" value="{{ calendar.id }}">
-          <input class="invite-email" type="email" name="email" placeholder="email@example.com" title="Optional: email the credentials to this address">
-          <button type="submit" title="Generate full read/write/admin CalDAV credentials for this calendar">Generate credentials</button>
-        </form>
-        {% endif %}
-        {% if tile.can_subscribe && tile.subscribe_url.is_none() %}
-        <form method="POST" action="/frontend/user/{{ user.id }}/calendar/subscribe" class="inline-form">
-          <input type="hidden" name="principal" value="{{ calendar.principal }}">
-          <input type="hidden" name="calendar_id" value="{{ calendar.id }}">
-          <button type="submit" title="Create a secret read-only subscription URL (Apple 'Add Subscribed Calendar', Google 'From URL', any webcal client)">Subscribe URL</button>
-        </form>
-        {% endif %}
         <delete-button trash href="/caldav/principal/{{ calendar.principal }}/{{ calendar.id }}"></delete-button>
       </div>
-      {% if let Some(url) = tile.subscribe_url %}
-      <div class="metadata">
-        <a href="{{ url }}">{{ url }}</a>
-        <span class="invite-actions">
-          <button type="button" onclick="navigator.clipboard.writeText('{{ url }}')">Copy</button>
-          {% if let Some(sub_id) = tile.sub_id %}
-          <form method="POST" action="/frontend/user/{{ user.id }}/share/{{ sub_id }}/revoke">
-            <input type="hidden" name="principal" value="{{ calendar.principal }}">
-            <button type="submit" class="delete">Revoke</button>
-          </form>
-          {% endif %}
-        </span>
-      </div>
-      {% endif %}
       <div class="metadata">
         {{ tile.meta.len }} ({{ tile.meta.size | filesizeformat }}) objects, {{ tile.meta.deleted_len }} ({{ tile.meta.deleted_size | filesizeformat }}) deleted objects
       </div>
-      {% for guest in tile.guest_shares %}
-      <div class="metadata">
-        Credential {{ guest.guest_principal }}
-        {%- if let Some(email) = guest.target_email %} ({{ email }}){% endif %}
-        · {{ guest.privilege }} access
-        {% if let Some(created_at) = guest.created_at %} · created {{ created_at }}{% endif %}
-        {% if guest.can_manage %}
-        <span class="invite-actions">
-          <form method="POST" action="/frontend/user/{{ user.id }}/calendar/credentials/{{ guest.share_id }}/revoke">
-            <input type="hidden" name="principal" value="{{ calendar.principal }}">
-            <button type="submit" class="delete">Revoke</button>
-          </form>
-        </span>
-        {% endif %}
-      </div>
-      {% endfor %}
       <div class="color-chip"></div>
     </div>
   </li>
