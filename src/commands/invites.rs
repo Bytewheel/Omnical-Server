@@ -5,6 +5,7 @@ use anyhow::{Context, anyhow};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use rand::RngExt;
+use rustical_scheduling::{mime, smtp};
 
 use crate::{config::Config, get_data_stores};
 
@@ -60,6 +61,11 @@ pub struct CreateArgs {
     /// Who is issuing the invite (audit column)
     #[arg(long, default_value = "admin")]
     pub created_by: String,
+    /// Email the one-time registration link to --email (requires SMTP in
+    /// [scheduling] and [subscriptions] public_url). The invite itself is
+    /// still a platform invite: no group, no shared calendar.
+    #[arg(long)]
+    pub send: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -101,7 +107,29 @@ pub async fn cmd_invites(args: InvitesArgs, config: Config) -> anyhow::Result<()
             group,
             expires,
             created_by,
+            send,
         }) => {
+            // Validate --send prerequisites up front so nothing is minted
+            // that cannot be mailed (the code would then need revoking).
+            let (send_to, send_account, send_base) = match send {
+                true => {
+                    let to = email.as_ref().ok_or_else(|| {
+                        anyhow!("--send requires --email: the invite is mailed to that address")
+                    })?;
+                    let account = config.scheduling.smtp.first().ok_or_else(|| {
+                        anyhow!(
+                            "--send needs a configured [[scheduling.smtp]] account in [scheduling]"
+                        )
+                    })?;
+                    let base = config.subscriptions.public_url.as_deref().ok_or_else(|| {
+                        anyhow!(
+                            "--send needs [subscriptions] public_url to build the register link"
+                        )
+                    })?;
+                    (Some(to.as_str()), Some(account), Some(base))
+                }
+                false => (None, None, None),
+            };
             let code = generate_invite_code();
             let expires = expires
                 .as_deref()
@@ -118,6 +146,18 @@ pub async fn cmd_invites(args: InvitesArgs, config: Config) -> anyhow::Result<()
                 expires.as_deref().unwrap_or("none")
             );
             println!("{code}");
+            if let (Some(to), Some(account), Some(base)) = (send_to, send_account, send_base) {
+                let register_url = format!("{base}/register?code={code}");
+                let message = mime::build_registration_invite(
+                    account,
+                    to,
+                    &register_url,
+                    &created_by,
+                    expires.as_deref(),
+                );
+                smtp::send_mail(account, &account.identity, to, &message).await?;
+                eprintln!("Sent registration link to {to}: {register_url}");
+            }
         }
         InvitesCommand::List(ListArgs { all }) => {
             for invite in invite_store.list_invites(all).await? {
