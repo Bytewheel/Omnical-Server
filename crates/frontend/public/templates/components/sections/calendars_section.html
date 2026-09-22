@@ -52,8 +52,29 @@
           <button type="submit" title="Generate full read/write/admin CalDAV credentials for this calendar">Generate credentials</button>
         </form>
         {% endif %}
+        {% if tile.can_subscribe && tile.subscribe_url.is_none() %}
+        <form method="POST" action="/frontend/user/{{ user.id }}/calendar/subscribe" class="inline-form">
+          <input type="hidden" name="principal" value="{{ calendar.principal }}">
+          <input type="hidden" name="calendar_id" value="{{ calendar.id }}">
+          <button type="submit" title="Create a secret read-only subscription URL (Apple 'Add Subscribed Calendar', Google 'From URL', any webcal client)">Subscribe URL</button>
+        </form>
+        {% endif %}
         <delete-button trash href="/caldav/principal/{{ calendar.principal }}/{{ calendar.id }}"></delete-button>
       </div>
+      {% if let Some(url) = tile.subscribe_url %}
+      <div class="metadata">
+        <a href="{{ url }}">{{ url }}</a>
+        <span class="invite-actions">
+          <button type="button" onclick="navigator.clipboard.writeText('{{ url }}')">Copy</button>
+          {% if let Some(sub_id) = tile.sub_id %}
+          <form method="POST" action="/frontend/user/{{ user.id }}/share/{{ sub_id }}/revoke">
+            <input type="hidden" name="principal" value="{{ calendar.principal }}">
+            <button type="submit" class="delete">Revoke</button>
+          </form>
+          {% endif %}
+        </span>
+      </div>
+      {% endif %}
       <div class="metadata">
         {{ tile.meta.len }} ({{ tile.meta.size | filesizeformat }}) objects, {{ tile.meta.deleted_len }} ({{ tile.meta.deleted_size | filesizeformat }}) deleted objects
       </div>

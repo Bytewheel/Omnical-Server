@@ -4,10 +4,13 @@
 //! `admin` privilege (full read / write / admin), shows the credential once,
 //! and is only permitted for the user's own calendars or groups they admin.
 use super::{ResponseExtractString, get_app};
+use rustical_store::SubscriptionStore;
 use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType, Privilege};
 use rustical_store::{Calendar, CalendarMetadata, CalendarWriteStore, CollectionShareStore};
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
-use rustical_store_sqlite::{SqliteCollectionShareStore, SqlitePrincipalStore};
+use rustical_store_sqlite::{
+    SqliteCollectionShareStore, SqlitePrincipalStore, SqliteSubscriptionStore,
+};
 use tower::ServiceExt;
 
 use axum::body::Body;
@@ -669,6 +672,159 @@ async fn test_calendar_credentials_revoke_rejects_non_admin_and_foreign(
         "user",
         "pass",
         form("principal=editablegroup"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_calendar_subscribe_mints_url_shown_on_tile(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_fixtures(&context).await;
+    let sub_store = SqliteSubscriptionStore::new(context.cal_store.clone());
+    let app = get_app(context);
+
+    // Before minting: every listed calendar the user may write (own, admin
+    // group, edit group) offers the Subscribe URL button — three tiles.
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/calendar",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    assert_eq!(
+        body.matches("/frontend/user/user/calendar/subscribe")
+            .count(),
+        3,
+        "own + admin-group + edit-group tiles get a subscribe button"
+    );
+    assert!(!body.contains("/export/"), "no share link exists yet");
+
+    // Mint for the own calendar → redirect back to the Calendars screen.
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/calendar/subscribe",
+        "user",
+        "pass",
+        form("principal=user&calendar_id=personal"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // The tile now shows the credential-less URL; the create button for that
+    // tile is gone (two remain: the group calendars).
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/calendar",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let body = resp.extract_string().await;
+    assert!(
+        body.contains("https://public.example/export/"),
+        "export URL shown on the tile"
+    );
+    assert_eq!(
+        body.matches("/frontend/user/user/calendar/subscribe")
+            .count(),
+        2,
+        "the minted tile no longer offers a create button"
+    );
+
+    // Exactly one subscription row, and the URL is served publicly.
+    let subs = sub_store.get_subscriptions("user").await.unwrap();
+    assert_eq!(subs.len(), 1, "one subscription minted");
+    let url = format!("https://public.example/export/{}.ics", subs[0].token);
+    assert!(
+        body.contains(&url),
+        "tile shows the subscription URL: {url}"
+    );
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(&url["https://public.example".len()..])
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "export feed serves");
+
+    // Minting again reuses the same subscription (stable URL, no pile-up).
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/calendar/subscribe",
+        "user",
+        "pass",
+        form("principal=user&calendar_id=personal"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let subs = sub_store.get_subscriptions("user").await.unwrap();
+    assert_eq!(subs.len(), 1, "existing subscription reused");
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_calendar_subscribe_rejects_foreign_and_unknown(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_fixtures(&context).await;
+    let sub_store = SqliteSubscriptionStore::new(context.cal_store.clone());
+    let app = get_app(context);
+
+    // Foreign principal (no membership at all) → 403, nothing minted.
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/calendar/subscribe",
+        "user",
+        "pass",
+        form("principal=foreigngroup&calendar_id=foreigncal"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Unknown calendar → error banner, nothing minted.
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/calendar/subscribe",
+        "user",
+        "pass",
+        form("principal=user&calendar_id=nope"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    assert!(
+        body.contains("No such calendar &#39;nope&#39; for &#39;user&#39;."),
+        "error banner shown: {body}"
+    );
+    assert!(
+        sub_store
+            .get_subscriptions("user")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Another user's page → 401.
+    let req = request(
+        Method::POST,
+        "/frontend/user/bob/calendar/subscribe",
+        "user",
+        "pass",
+        form("principal=user&calendar_id=personal"),
     );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);

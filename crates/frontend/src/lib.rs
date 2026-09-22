@@ -38,7 +38,7 @@ use crate::routes::{
     app_token::{route_delete_app_token, route_post_app_token},
     calendar::{
         route_calendar, route_calendar_credentials, route_calendar_credentials_revoke,
-        route_calendar_restore,
+        route_calendar_restore, route_calendar_subscribe,
     },
     groups::{
         route_group_detail, route_group_member_privilege, route_group_member_remove,
@@ -99,6 +99,10 @@ pub fn frontend_router<
         .route(
             "/{user}/calendar/credentials/{id}/revoke",
             post(route_calendar_credentials_revoke),
+        )
+        .route(
+            "/{user}/calendar/subscribe",
+            post(route_calendar_subscribe::<CS>),
         )
         .route("/{user}/calendar/{calendar}", get(route_calendar::<CS>))
         .route(
