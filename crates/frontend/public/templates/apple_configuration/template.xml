@@ -24,16 +24,16 @@
       <string>{{ token }}</string>
 
       <key>PayloadDescription</key>
-      <string>{{ user }} RustiCal CalDAV profile</string>
+      <string>{{ user }} Omnical CalDAV profile</string>
 
       <key>PayloadDisplayName</key>
-      <string>{{ user }} RustiCal CalDAV profile</string>
+      <string>{{ user }} Omnical CalDAV profile</string>
 
       <key>PayloadIdentifier</key>
       <string>{{ hostname }}.cal.{{ user }}</string>
 
       <key>PayloadOrganization</key>
-      <string>RustiCal</string>
+      <string>Omnical</string>
 
       <key>PayloadType</key>
       <string>com.apple.caldav.account</string>
@@ -66,16 +66,16 @@
       <string>{{ token }}</string>
 
       <key>PayloadDescription</key>
-      <string>{{ user }} (as {{ membership }}) RustiCal CalDAV profile</string>
+      <string>{{ user }} (as {{ membership }}) Omnical CalDAV profile</string>
 
       <key>PayloadDisplayName</key>
-      <string>{{ user }} (as {{ membership }}) RustiCal CalDAV profile</string>
+      <string>{{ user }} (as {{ membership }}) Omnical CalDAV profile</string>
 
       <key>PayloadIdentifier</key>
       <string>{{ hostname }}.cal.{{ user }}.{{ membership }}</string>
 
       <key>PayloadOrganization</key>
-      <string>RustiCal</string>
+      <string>Omnical</string>
 
       <key>PayloadType</key>
       <string>com.apple.caldav.account</string>
@@ -108,16 +108,16 @@
       <string>{{ token }}</string>
 
       <key>PayloadDescription</key>
-      <string>{{ user }} RustiCal CardDAV profile</string>
+      <string>{{ user }} Omnical CardDAV profile</string>
 
       <key>PayloadDisplayName</key>
-      <string>{{ user }} RustiCal CardDAV profile</string>
+      <string>{{ user }} Omnical CardDAV profile</string>
 
       <key>PayloadIdentifier</key>
       <string>{{ hostname }}.card.{{ user }}</string>
 
       <key>PayloadOrganization</key>
-      <string>RustiCal</string>
+      <string>Omnical</string>
 
       <key>PayloadType</key>
       <string>com.apple.carddav.account</string>
@@ -132,10 +132,10 @@
   </array>
 
   <key>PayloadDescription</key>
-  <string>Set up your RustiCal CalDAV/CardDAV account for {{ user }}@{{ hostname }} with app token {{ token_name }}</string>
+  <string>Set up your Omnical CalDAV/CardDAV account for {{ user }}@{{ hostname }} with app token {{ token_name }}</string>
 
   <key>PayloadDisplayName</key>
-  <string>RustiCal CalDAV/CardDAV</string>
+  <string>Omnical CalDAV/CardDAV</string>
 
   <key>PayloadIdentifier</key>
   <string>{{ hostname }}.{{ user }}</string>

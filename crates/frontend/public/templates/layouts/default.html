@@ -5,7 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>{% block title %}RustiCal{% endblock %}</title>
+  <title>{% block title %}Omnical{% endblock %}</title>
   <link rel="stylesheet" href="/frontend/assets/style.css" />
   {% block imports %}{% endblock %}
 </head>
@@ -13,7 +13,7 @@
 <body>
   {% block header %}
   <header>
-      <a class="logo" href="/frontend/user">RustiCal</a>
+      <a class="logo" href="/frontend/user">Omnical</a>
       {% block header_center %}{% endblock %}
       {% if self.get_user().is_some() %}
         <form method="POST" action="/frontend/logout" class="logout_form">
@@ -27,7 +27,7 @@
       {% block content %}<p>Placeholder</p>{% endblock %}
     </main>
     <footer>
-        <a href="{{ env!("CARGO_PKG_REPOSITORY") }}" target="_blank">RustiCal {{ env!("CARGO_PKG_VERSION") }}</a>
+        <a href="{{ env!("CARGO_PKG_REPOSITORY") }}" target="_blank">Omnical {{ env!("CARGO_PKG_VERSION") }}</a>
         <a href="/frontend/assets/licenses.html" target="_blank">Open Source Licenses</a>
     </footer>
   </div>
