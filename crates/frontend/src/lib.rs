@@ -35,7 +35,7 @@ use oidc_user_store::OidcUserStore;
 
 use crate::routes::{
     addressbook::{route_addressbook, route_addressbook_restore},
-    app_token::{route_delete_app_token, route_post_app_token},
+    app_token::{route_delete_app_token, route_post_app_token, route_regenerate_app_token},
     calendar::{
         route_calendar, route_calendar_credentials, route_calendar_credentials_revoke,
         route_calendar_restore, route_calendar_subscribe,
@@ -98,6 +98,12 @@ pub fn frontend_router<
             // POST because HTML5 forms don't support DELETE method
             "/{user}/app_token/{id}/delete",
             post(route_delete_app_token::<AP>),
+        )
+        // Regenerate — rotate the secret of an existing token in place (the
+        // "lost token" retrieval path; shown once, full access unchanged)
+        .route(
+            "/{user}/app_token/{id}/regenerate",
+            post(route_regenerate_app_token::<AP>),
         )
         // Calendar
         .route("/{user}/calendar", get(route_calendars::<CS>))

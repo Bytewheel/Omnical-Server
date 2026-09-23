@@ -16,6 +16,22 @@ pub struct SqlitePrincipalStore {
     db: SqlitePool,
 }
 
+/// pbkdf2-hash an app-token secret for storage (add + regenerate share it).
+fn hash_app_token(token: &str) -> Result<String, Error> {
+    let salt = Salt::try_from_rng(&mut SysRng).map_err(|err| Error::Other(err.into()))?;
+    pbkdf2::Pbkdf2::SHA512
+        .hash_password_with_params(
+            token.as_bytes(),
+            &salt,
+            // The app token has a high entropy so we are quite safe from quessing attacks
+            // Also if an attacker got access to the hashes they'd have already gotten
+            // access to the whole database.
+            Params::new(1000).expect("1000 rounds are valid"),
+        )
+        .map_err(|_| Error::PasswordHash)
+        .map(|hash| hash.to_string())
+}
+
 impl SqlitePrincipalStore {
     // Omnical §17.10: stamp a guest's share privilege into the principal's
     // own-id privilege slot. `privilege_for(self)` would otherwise default to
@@ -260,18 +276,7 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         token: String,
     ) -> Result<String, Error> {
         let id = uuid::Uuid::new_v4().to_string();
-        let salt = Salt::try_from_rng(&mut SysRng).map_err(|err| Error::Other(err.into()))?;
-        let token_hash = pbkdf2::Pbkdf2::SHA512
-            .hash_password_with_params(
-                token.as_bytes(),
-                &salt,
-                // The app token has a high entropy so we are quite safe from quessing attacks
-                // Also if an attacker got access to the hashes they'd have already gotten
-                // access to the whole database.
-                Params::new(1000).expect("1000 rounds are valid"),
-            )
-            .map_err(|_| Error::PasswordHash)?
-            .to_string();
+        let token_hash = hash_app_token(&token)?;
         sqlx::query!(
             r#"
             INSERT INTO app_tokens
@@ -287,6 +292,29 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         .await
         .map_err(crate::Error::from)?;
         Ok(id)
+    }
+
+    #[instrument(skip(token))]
+    async fn update_app_token(
+        &self,
+        user_id: &str,
+        token_id: &str,
+        token: String,
+    ) -> Result<(), Error> {
+        let token_hash = hash_app_token(&token)?;
+        // Runtime query (not the query! macro) so no sqlx prepare-cache
+        // entry is needed — same pattern as stamp_guest_share.
+        let result = sqlx::query("UPDATE app_tokens SET token = ? WHERE (principal, id) = (?, ?)")
+            .bind(token_hash)
+            .bind(user_id)
+            .bind(token_id)
+            .execute(&self.db)
+            .await
+            .map_err(crate::Error::from)?;
+        if result.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
     }
 
     #[instrument]

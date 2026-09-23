@@ -84,6 +84,23 @@ pub trait AuthenticationProvider: Send + Sync + 'static {
     ) -> Result<String, Error>;
     async fn remove_app_token(&self, user_id: &str, token_id: &str) -> Result<(), Error>;
 
+    /// Rotates the secret of an existing app token (same id, name and
+    /// `created_at`; the old secret stops validating immediately). The new
+    /// secret is stored hashed, so it is only ever available to the caller
+    /// that provided it — the portal regenerate flow shows it once.
+    ///
+    /// # Errors
+    /// - [`Error::NotFound`] when the principal has no token with this id
+    /// - [`Error::ReadOnly`] if the store does not implement updates
+    async fn update_app_token(
+        &self,
+        _user_id: &str,
+        _token_id: &str,
+        _token: String,
+    ) -> Result<(), Error> {
+        Err(Error::ReadOnly)
+    }
+
     async fn get_app_tokens(&self, principal: &str) -> Result<Vec<AppToken>, Error>;
 
     async fn add_membership(&self, principal: &str, member_of: &str) -> Result<(), Error>;

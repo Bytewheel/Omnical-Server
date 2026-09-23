@@ -1,5 +1,6 @@
 use std::{str::FromStr, sync::Arc};
 
+use crate::routes::user::{RegeneratedToken, render_profile_page};
 use askama::Template;
 use axum::{
     Extension, Form,
@@ -9,7 +10,7 @@ use axum::{
 };
 use axum_extra::TypedHeader;
 use headers::{ContentType, HeaderMapExt, Host};
-use http::{HeaderValue, StatusCode, header};
+use http::{HeaderMap, HeaderValue, StatusCode, header};
 use rand::{RngExt, distr::Alphanumeric};
 use rustical_dav::rfc_3986_percent_encode;
 use rustical_store::auth::{AuthenticationProvider, Principal};
@@ -91,6 +92,53 @@ pub async fn route_post_app_token<AP: AuthenticationProvider>(
     } else {
         Ok((StatusCode::OK, token).into_response())
     }
+}
+
+/// `POST /{user}/app_token/{id}/regenerate` — rotate the secret of an existing
+/// app token (same id and name) and show the new value once on the profile
+/// page. This is the "I lost my token" path: app-token secrets are stored
+/// hashed and can never be re-displayed, so regenerating is the only way to
+/// get a working credential for that token again. The old secret stops
+/// validating immediately.
+pub async fn route_regenerate_app_token<AP: AuthenticationProvider>(
+    user: Principal,
+    Extension(auth_provider): Extension<Arc<AP>>,
+    Extension(public_url): Extension<String>,
+    Path((user_id, token_id)): Path<(String, String)>,
+    TypedHeader(host): TypedHeader<Host>,
+    headers: HeaderMap,
+) -> Result<Response, rustical_store::Error> {
+    if user_id != user.id {
+        return Ok(StatusCode::UNAUTHORIZED.into_response());
+    }
+    // Scope the token to the acting user's own list (ownership gate, and it
+    // gives us the token's name for the banner).
+    let name = auth_provider
+        .get_app_tokens(&user.id)
+        .await?
+        .into_iter()
+        .find(|token| token.id == token_id)
+        .map(|token| token.name)
+        .ok_or(rustical_store::Error::NotFound)?;
+
+    let secret = generate_app_token();
+    auth_provider
+        .update_app_token(&user.id, &token_id, secret.clone())
+        .await?;
+
+    let mut token_prefix = token_id.clone();
+    token_prefix.truncate(4);
+    let token = format!("{token_prefix}_{secret}");
+
+    Ok(render_profile_page(
+        &auth_provider,
+        &public_url,
+        &host,
+        &headers,
+        &user,
+        Some(RegeneratedToken { name, token }),
+    )
+    .await)
 }
 
 pub async fn route_delete_app_token<AP: AuthenticationProvider>(

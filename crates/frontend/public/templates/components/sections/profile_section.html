@@ -11,6 +11,19 @@
 {% endif %}
 
 <h3>App tokens</h3>
+<p class="description">App tokens are the passwords your calendar and contacts apps use to sign in to this server — one per app (e.g. <code>davx5</code>, <code>thunderbird</code>, <code>apple</code>), each with <strong>full read + write access</strong> to your calendars, tasks and contacts. The token's value is only shown once, right after you generate it. If you lose one, <strong>Regenerate</strong> it: the app keeps its name and full access, the old secret stops working, and the new one is shown once. Full step-by-step instructions: <a href="#app-token-help">How to use app tokens…</a></p>
+{% if let Some(regenerated) = regenerated.as_ref() %}
+<div class="success">
+  <p><strong>"{{ regenerated.name }}" regenerated!</strong> The old secret no longer works. This new one is shown only once — same token, same full access, just update the password in the app that uses it:</p>
+  <p class="share-url-row">
+    <code class="share-url">{{ regenerated.token }}</code>
+    <span class="invite-actions">
+      <button type="button" onclick="navigator.clipboard.writeText('{{ regenerated.token }}')">Copy</button>
+    </span>
+  </p>
+  <p class="description">Full setup: <a href="#app-token-help">How to use app tokens…</a></p>
+</div>
+{% endif %}
 <table id="app-tokens">
   <thead>
     <tr>
@@ -29,9 +42,14 @@
         {% endif %}
       </td>
       <td>
-        <form action="/frontend/user/{{ user.id }}/app_token/{{ app_token.id }}/delete" method="POST">
-          <button type="submit" class="delete">Delete</button>
-        </form>
+        <div class="token-row-actions">
+          <form action="/frontend/user/{{ user.id }}/app_token/{{ app_token.id }}/regenerate" method="POST">
+            <button type="submit" title="Show a new secret for this token (full access is kept; the old secret stops working)">Regenerate</button>
+          </form>
+          <form action="/frontend/user/{{ user.id }}/app_token/{{ app_token.id }}/delete" method="POST">
+            <button type="submit" class="delete">Delete</button>
+          </form>
+        </div>
       </td>
     </tr>
     {% endfor %}
@@ -39,6 +57,33 @@
 </table>
 
 <generate-app-token-form user="{{ user.id }}" />
+
+<details class="client-help" id="app-token-help">
+  <summary>How to use app tokens…</summary>
+  <div class="client-help-body">
+    <p class="description">An app token works like a per-app password. Any app that speaks CalDAV (calendars, tasks) or CardDAV (contacts) signs in with:</p>
+    <ul>
+      <li><strong>Username</strong>: <code>{{ user.id }}</code> — your login name, not your email address.</li>
+      <li><strong>Password</strong>: the app token — generate one with the form above, one per app, e.g. <code>davx5</code> or <code>thunderbird</code>.</li>
+      <li><strong>Calendar server (CalDAV)</strong>: <code>{{ caldav_url }}</code></li>
+      <li><strong>Contacts server (CardDAV)</strong>: <code>{{ carddav_url }}</code></li>
+    </ul>
+    <p class="description">The token value is only shown once when it's created — the server stores it hashed, so nobody (not even you) can look it up afterwards. If you lose it: press <strong>Regenerate</strong> next to the token above — the app keeps its name and full access, the old secret stops working, and the new one is shown once. Deleting a token signs that app out everywhere.</p>
+    <h4>Calendars (CalDAV)</h4>
+    <ul>
+      <li><strong>Apple iPhone/iPad/Mac</strong>: Settings → Calendar → Accounts → Add Account → Other → Add CalDAV Account → server <code>{{ caldav_url }}</code>, user = <code>{{ user.id }}</code>, password = the app token.</li>
+      <li><strong>Android</strong>: the built-in Google Calendar app cannot add an external CalDAV server — install <strong>DAVx5</strong> → add account → CalDAV → paste <code>{{ caldav_url }}</code> + username + app token.</li>
+      <li><strong>Thunderbird</strong>: Calendar → New Calendar → On the Network → paste <code>{{ caldav_url }}</code> + username + app token.</li>
+      <li><strong>Google Calendar &amp; Outlook.com: not possible</strong> — neither supports adding an external CalDAV server; use a calendar's read-only subscribe link from the Calendars tab instead.</li>
+    </ul>
+    <h4>Contacts (CardDAV)</h4>
+    <ul>
+      <li><strong>Apple iPhone/iPad/Mac</strong>: Settings → Contacts → Accounts → Add Account → Other → Add CardDAV Account → server <code>{{ carddav_url }}</code>, user = <code>{{ user.id }}</code>, password = the app token.</li>
+      <li><strong>Android</strong>: install <strong>DAVx5</strong> → add account → CardDAV → paste <code>{{ carddav_url }}</code> + username + app token (the same DAVx5 account syncs both).</li>
+      <li><strong>Thunderbird</strong>: add the CardDAV address book at <code>{{ carddav_url }}</code> with the same username and app token.</li>
+    </ul>
+  </div>
+</details>
 
 {% if let Some(hostname) = davx5_hostname %}
 <a href="intent://{{ hostname | urlencode }}#Intent;action=android.intent.action.VIEW;component=at.bitfire.davdroid.ui.setup.LoginActivity;scheme=davx5;package=at.bitfire.davdroid;S.loginFlow=1;end">Configure in DAVx5</a>

@@ -446,7 +446,7 @@ pub struct CalendarCredentialsForm {
 /// Resolve the base URL the credential's server URL is printed with: the
 /// configured `[subscriptions] public_url`, else the request's own host
 /// (mirrors the share-route logic).
-fn resolve_base_url(public_url: &str, host: &Host) -> String {
+pub(super) fn resolve_base_url(public_url: &str, host: &Host) -> String {
     if public_url.is_empty() {
         format!("https://{host}")
     } else {

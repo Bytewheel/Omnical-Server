@@ -737,6 +737,13 @@ generate-app-token-form {
       margin-bottom: 1em;
     }
 
+    .token-label {
+      flex: 0 0 100%;
+      font-size: 0.85em;
+      font-weight: 600;
+      color: var(--text-color-warning);
+    }
+
     .token-value {
       flex: 1;
       min-width: 0;
@@ -749,6 +756,16 @@ generate-app-token-form {
       padding: .7em 1em;
       display: block;
       line-height: 1.5;
+    }
+
+    .token-hint {
+      margin: 0 0 1em;
+      font-size: 0.9em;
+
+      a {
+        color: var(--primary);
+        text-decoration: underline;
+      }
     }
   }
 }

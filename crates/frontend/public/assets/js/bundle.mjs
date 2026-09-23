@@ -1608,6 +1608,7 @@ var GenerateAppTokenForm = class GenerateAppTokenForm extends i$2 {
 	constructor(..._args) {
 		super(..._args);
 		this.user = "";
+		this.token = "";
 		this.uaApple = navigator.userAgent.includes("Apple") || navigator.userAgent.includes("macOS") || navigator.userAgent.includes("Macintosh");
 		this.form = e();
 	}
@@ -1632,9 +1633,15 @@ var GenerateAppTokenForm = class GenerateAppTokenForm extends i$2 {
 		this.token = token;
 		form.reset();
 	}
-	async copyToken(e) {
-		await navigator.clipboard.writeText(this.token);
-		e.target.textContent = "Copied!";
+	async copy(text, e) {
+		await navigator.clipboard.writeText(text);
+		if (e.target instanceof HTMLElement) e.target.textContent = "Copied!";
+	}
+	get caldavUrl() {
+		return `${location.origin}/caldav`;
+	}
+	get carddavUrl() {
+		return `${location.origin}/carddav`;
 	}
 	render() {
 		return b`
@@ -1651,9 +1658,26 @@ var GenerateAppTokenForm = class GenerateAppTokenForm extends i$2 {
       <div class="token-result" ?hidden="${!this.token}">
         <p class="token-result-warning">This token will only be shown once. Copy it now and keep it secret.</p>
         <div class="token-result-row">
-          <code class="token-value">${this.token}</code>
-          <button type="button" @click=${this.copyToken}>Copy</button>
+          <span class="token-label">Username</span>
+          <code class="token-value">${this.user}</code>
+          <button type="button" @click=${(e) => this.copy(this.user, e)}>Copy</button>
         </div>
+        <div class="token-result-row">
+          <span class="token-label">Calendar server (CalDAV)</span>
+          <code class="token-value">${this.caldavUrl}</code>
+          <button type="button" @click=${(e) => this.copy(this.caldavUrl, e)}>Copy</button>
+        </div>
+        <div class="token-result-row">
+          <span class="token-label">Contacts server (CardDAV)</span>
+          <code class="token-value">${this.carddavUrl}</code>
+          <button type="button" @click=${(e) => this.copy(this.carddavUrl, e)}>Copy</button>
+        </div>
+        <div class="token-result-row">
+          <span class="token-label">App token (password)</span>
+          <code class="token-value">${this.token}</code>
+          <button type="button" @click=${(e) => this.copy(this.token, e)}>Copy</button>
+        </div>
+        <p class="token-hint">Enter the username, the server URL for what you want to sync, and this token as the password in your app — full step-by-step help: <a href="#app-token-help">How to use app tokens</a>.</p>
         <button @click=${() => location.reload()}>Done</button>
       </div>
     `;
