@@ -15,11 +15,45 @@
 {% if let Some(description) = calendar.meta.description %}<p>{{ description }}</p>{% endif%}
 
 {% if let Some(subscription_url) = calendar.subscription_url %}
-<h2>Subscription URL</h2>
+<h2>Linked platform source</h2>
+<p class="description">This calendar mirrors an external feed:</p>
 <a href="{{ subscription_url }}">{{ subscription_url }}</a>
 {% endif %}
 
-<h2>Debug information</h2>
-<pre>{{ calendar|json(2) }}</pre>
-
+<details class="client-help" open>
+  <summary>Set up on your device…</summary>
+  <div class="client-help-body">
+    <h4>Subscribe — read-only, no account needed</h4>
+    {% if let Some(url) = subscribe_url.as_ref() %}
+    <p class="description">Anyone with this link can see this calendar's current events (a live feed — no account, no password). Read-only.</p>
+    <p class="share-url-row">
+      <code class="share-url">{{ url }}</code>
+      <span class="invite-actions">
+        <button type="button" onclick="navigator.clipboard.writeText('{{ url }}')">Copy</button>
+        {% if let Some(webcal_url) = subscribe_url_webcal.as_ref() %}
+        <button type="button" onclick="navigator.clipboard.writeText('{{ webcal_url }}')" title="Same link with the webcal:// scheme — opens directly in Apple Calendar and most desktop clients">Copy webcal://</button>
+        {% endif %}
+      </span>
+    </p>
+    {% else %}
+    <p class="description">Create a subscribe link on the <a href="/frontend/user/{{ user.id }}/calendar#cal-{{ calendar.id }}">Calendars tab</a> to get a URL for these.</p>
+    {% endif %}
+    <ul>
+      <li><strong>Apple iPhone/iPad</strong>: Calendar app → Calendars → Add Calendar → Subscribe to Calendar → paste the link.</li>
+      <li><strong>Apple Mac</strong>: Calendar → File → New Calendar Subscription → paste; set "Auto-refresh" to hourly for timely updates.</li>
+      <li><strong>Google Calendar</strong>: calendar.google.com → Settings ⚙ → Add calendar → From URL → paste → Add. Google refreshes subscribed calendars on its own schedule — changes can take hours (sometimes a day) to appear. Read-only.</li>
+      <li><strong>Outlook (web / new Outlook)</strong>: Add calendar → Subscribe from web → paste + name → Subscribe. Read-only.</li>
+      <li><strong>Outlook classic (Windows desktop)</strong>: File → Account Settings → Internet Calendars → New → paste.</li>
+      <li><strong>Anything else</strong>: any webcal/ICS-subscribing app works — the link is a plain live ICS feed.</li>
+    </ul>
+    <h4>Full access — read + write (CalDAV)</h4>
+    <p class="description">To use the calendar in full (add, change, delete events) a CalDAV account with a credential is needed: either a guest username + app token, or your own per-calendar app token (mint one on the <a href="/frontend/user/{{ user.id }}/calendar#cal-{{ calendar.id }}">Calendars tab</a> with "Invite guest" or "Generate credentials", or use your profile's app tokens). Server: <code>{{ caldav_url }}</code></p>
+    <ul>
+      <li><strong>Apple iPhone/iPad/Mac</strong>: Settings → Calendar → Accounts → Add Account → Other → Add CalDAV Account → server <code>{{ caldav_url }}</code>, user = the guest username, password = the app token.</li>
+      <li><strong>Android</strong>: the built-in Google Calendar app cannot add an external CalDAV server — install <strong>DAVx5</strong> → add account → CalDAV → paste <code>{{ caldav_url }}</code> + username + app token.</li>
+      <li><strong>Thunderbird</strong>: Calendar → New Calendar → On the Network → paste <code>{{ caldav_url }}</code> + username + app token.</li>
+      <li><strong>Google Calendar &amp; Outlook.com: not possible</strong> — neither supports adding an external CalDAV server; use the read-only subscribe link above instead.</li>
+    </ul>
+  </div>
+</details>
 {%endblock %}

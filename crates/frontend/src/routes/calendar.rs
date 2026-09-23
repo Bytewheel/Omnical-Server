@@ -361,6 +361,14 @@ pub async fn route_calendars<CS: CalendarStore>(
 struct CalendarPage {
     calendar: Calendar,
     user: Principal,
+    /// `CalDAV` endpoint printed in the per-client instructions (§17.15).
+    caldav_url: String,
+    /// The calendar's existing credential-less subscribe link
+    /// (`/export/{token}.ics`), when a subscription exists (§17.7).
+    subscribe_url: Option<String>,
+    /// The same URL with the `webcal://` scheme — display variant only, the
+    /// stored token keeps working over plain https (§17.15).
+    subscribe_url_webcal: Option<String>,
 }
 
 impl DefaultLayoutData for CalendarPage {
@@ -369,17 +377,40 @@ impl DefaultLayoutData for CalendarPage {
     }
 }
 
-pub async fn route_calendar<C: CalendarStore>(
+pub async fn route_calendar<CS: CalendarStore>(
     Path((owner, cal_id)): Path<(String, String)>,
-    Extension(store): Extension<Arc<C>>,
+    Extension(store): Extension<Arc<CS>>,
+    Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
+    Extension(public_url): Extension<String>,
+    TypedHeader(host): TypedHeader<Host>,
     user: Principal,
 ) -> Result<Response, rustical_store::Error> {
     if !user.is_principal(&owner) {
         return Ok(StatusCode::UNAUTHORIZED.into_response());
     }
+    let calendar = store.get_calendar(&owner, &cal_id, true).await?;
+    let base_url = resolve_base_url(&public_url, &host);
+    // The calendar's existing subscribe link, if any (same lookup as the
+    // Calendars screen, §17.7).
+    let sub = match &sub_store {
+        Some(sub_store) => sub_store
+            .get_subscriptions(&owner)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|s| s.kind == SubscriptionKind::Calendar && s.collection_id == cal_id),
+        None => None,
+    };
+    let subscribe_url = sub
+        .as_ref()
+        .map(|s| export_url(&base_url, &s.token, s.kind));
+    let subscribe_url_webcal = subscribe_url.as_deref().map(webcal_variant);
     Ok(CalendarPage {
-        calendar: store.get_calendar(&owner, &cal_id, true).await?,
+        calendar,
         user,
+        caldav_url: format!("{base_url}/caldav"),
+        subscribe_url,
+        subscribe_url_webcal,
     }
     .into_response())
 }

@@ -829,3 +829,100 @@ async fn test_calendar_subscribe_rejects_foreign_and_unknown(
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// The calendar detail page (the tile link target) shows the per-client
+/// setup instructions — not the old raw calendar JSON dump: with a subscribe
+/// link minted, the export + webcal URLs and the CalDAV server URL appear;
+/// without one, the page points back to the Calendars tab.
+#[rstest]
+#[tokio::test]
+async fn test_calendar_detail_page_shows_setup_instructions(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_fixtures(&context).await;
+    let sub_store = SqliteSubscriptionStore::new(context.cal_store.clone());
+    let app = get_app(context);
+
+    // Mint a subscribe link for the own calendar first.
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/calendar/subscribe",
+        "user",
+        "pass",
+        form("principal=user&calendar_id=personal"),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let subs = sub_store.get_subscriptions("user").await.unwrap();
+    assert_eq!(subs.len(), 1);
+
+    // Detail page of the own calendar: instructions, no JSON dump.
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/calendar/personal",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    assert!(!body.contains("Debug information"), "JSON dump gone");
+    assert!(
+        body.contains("Set up on your device"),
+        "setup instructions present: {body}"
+    );
+    let url = format!("https://public.example/export/{}.ics", subs[0].token);
+    assert!(body.contains(&url), "subscribe URL shown: {url}");
+    assert!(
+        body.contains("webcal://public.example/export/"),
+        "webcal:// variant offered"
+    );
+    assert!(
+        body.contains("https://public.example/caldav"),
+        "CalDAV server URL prefilled"
+    );
+    assert!(body.contains("DAVx5"));
+    assert!(body.contains("Thunderbird"));
+
+    // Detail page of a group calendar without a subscribe link (tile links
+    // use the owning principal in the path): the fallback points to the
+    // Calendars tab, CalDAV instructions still shown.
+    let req = request(
+        Method::GET,
+        "/frontend/user/editablegroup/calendar/editablecal",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    assert!(!body.contains("/export/"), "no subscribe link exists");
+    assert!(
+        body.contains("Create a subscribe link on the"),
+        "fallback points to the Calendars tab: {body}"
+    );
+    assert!(
+        body.contains("/frontend/user/user/calendar#cal-editablecal"),
+        "tile anchor linked: {body}"
+    );
+    assert!(
+        body.contains("https://public.example/caldav"),
+        "CalDAV instructions still shown"
+    );
+
+    // Someone else's page → 401.
+    let req = request(
+        Method::GET,
+        "/frontend/user/bob/calendar/personal",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
