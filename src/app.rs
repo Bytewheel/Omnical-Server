@@ -35,6 +35,72 @@ use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 use tracing::Span;
 use tracing::field::display;
 
+/// The decisions `make_app` makes about **which** routers to mount.
+///
+/// This exists because the two halves of building a server are different kinds
+/// of work and get confused for it. Deciding is a function of configuration;
+/// mounting is a function of the stores. Per-tenant config overrides (§6.3)
+/// need those to be separable, because *one* `make_app_for` has to serve N
+/// tenants that disagree about decisions while sharing the shape of the
+/// mounting — a single `Config` → `Router` function cannot express that, since
+/// every tenant would overwrite the last.
+///
+/// It is deliberately **not** `crate::config::Config`. The integration suite
+/// builds a partial configuration by hand — no `[data_store]`, no `[tracing]`,
+/// no `[maintenance]` — and §6.1's gate is that the refactor passes the 98-test
+/// baseline with **zero test edits**. Bundling to `Config` would force every
+/// test to construct a whole one, which is a test edit by another name.
+#[derive(Clone)]
+pub struct AppConfig {
+    pub frontend: FrontendConfig,
+    pub oidc: Option<OidcConfig>,
+    pub caldav: CalDavConfig,
+    /// `None` disables scheduling entirely; `Some` with `rsvp_links_enabled()`
+    /// false still disables the public RSVP router but keeps the scheduler.
+    pub scheduler: Option<Arc<Scheduler>>,
+    pub subscriptions: Option<Arc<dyn SubscriptionStore>>,
+    pub registration: Option<Arc<RegistrationContext>>,
+    pub nextcloud_login: NextcloudLoginConfig,
+    pub dav_push_enabled: bool,
+    pub session_cookie_samesite_strict: bool,
+    pub payload_limit_mb: usize,
+    /// `[subscriptions] public_url` with the HTTP-bind fallback already applied.
+    pub subscriptions_public_url: String,
+    pub smtp_accounts: Vec<rustical_scheduling::SmtpAccount>,
+}
+
+/// The stores a router is mounted over.
+///
+/// Split from [`AppConfig`] for the same reason: the stores are per-tenant and
+/// the decisions are per-tenant, but they are not the same axis, and §6.2's
+/// construction path needs to hand one `AppConfig` to a router built over a
+/// different `AppStores` per tenant without either knowing about the other.
+pub struct AppStores<AS, CS, DP, AP> {
+    pub addr_store: Arc<AS>,
+    pub cal_store: Arc<CS>,
+    pub dav_push_store: Arc<DP>,
+    /// **Sized, not `Arc<dyn AuthenticationProvider>`.** The DAV and frontend
+    /// routers are generic over a concrete `AP` (`caldav_router<AP: …>`,
+    /// `frontend_router<AP: …>`), so erasing the provider to a trait object here
+    /// would not compile. The stores that *are* already trait objects upstream
+    /// — `source_store`, `invite_store`, `share_store`, `password_reset_store` —
+    /// stay erased, because that is how the callers already hold them.
+    pub auth_provider: Arc<AP>,
+    pub source_store: Arc<dyn CalendarSourceStore>,
+    pub invite_store: Arc<dyn rustical_store::InviteStore>,
+    pub share_store: Arc<dyn rustical_store::CollectionShareStore>,
+    pub password_reset_store: Arc<dyn rustical_store::PasswordResetStore>,
+}
+
+/// The single-tenant entry point, and the **unchanged** public signature of
+/// this module since before the tenancy work.
+///
+/// Its argument list is long and positional because two callers depend on it —
+/// `cmd_serve` in `lib.rs` and `get_app` in the integration suite — and §6.1's
+/// gate is that the 98-test baseline passes with zero test edits. It is kept
+/// exactly as it was for that reason and no other: it is a compatibility shim
+/// over [`make_app_for`], and the moment both callers are on the bundle it can
+/// go.
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -67,6 +133,85 @@ pub fn make_app<
     password_reset_store: Arc<dyn rustical_store::PasswordResetStore>,
     smtp_accounts: Vec<rustical_scheduling::SmtpAccount>,
 ) -> Router<()> {
+    make_app_for(
+        AppConfig {
+            frontend: frontend_config,
+            oidc: oidc_config,
+            caldav: caldav_config,
+            scheduler,
+            subscriptions,
+            registration,
+            nextcloud_login: nextcloud_login_config.clone(),
+            dav_push_enabled,
+            session_cookie_samesite_strict,
+            payload_limit_mb,
+            subscriptions_public_url,
+            smtp_accounts,
+        },
+        AppStores {
+            addr_store,
+            cal_store,
+            dav_push_store,
+            auth_provider,
+            source_store,
+            invite_store,
+            share_store,
+            password_reset_store,
+        },
+    )
+}
+
+/// Mount one server. Pure construction: every "should this router exist"
+/// decision was made by the caller and arrived in [`AppConfig`], so there is
+/// nothing left here to interpret.
+///
+/// The body below is `make_app`'s body as it stood before §6.1, moved here
+/// unchanged — same routes, same order of merges, same layers. That verbatim
+/// move is the whole claim of this refactor and the only thing its gate checks,
+/// which is why the one pre-existing `redundant clone` down there is still there
+/// and is not being fixed: removing it would edit the body this commit promises
+/// not to have touched.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    clippy::missing_panics_doc
+)]
+pub fn make_app_for<AS, CS, DP, AP>(
+    config: AppConfig,
+    stores: AppStores<AS, CS, DP, AP>,
+) -> Router<()>
+where
+    AS: AddressbookStore + PrefixedCalendarStore,
+    CS: CalendarStore,
+    DP: DavPushStore,
+    AP: AuthenticationProvider,
+{
+    let AppConfig {
+        frontend: frontend_config,
+        oidc: oidc_config,
+        caldav: caldav_config,
+        scheduler,
+        subscriptions,
+        registration,
+        nextcloud_login: nextcloud_login_config,
+        dav_push_enabled,
+        session_cookie_samesite_strict,
+        payload_limit_mb,
+        subscriptions_public_url,
+        smtp_accounts,
+    } = config;
+    let AppStores {
+        addr_store,
+        cal_store,
+        dav_push_store,
+        auth_provider,
+        source_store,
+        invite_store,
+        share_store,
+        password_reset_store,
+    } = stores;
+
     let birthday_store = addr_store.clone();
     let combined_cal_store =
         Arc::new(CombinedCalendarStore::new(cal_store.clone()).with_store(birthday_store));
