@@ -44,6 +44,12 @@ use rustical_store_sqlite::{
 use std::sync::Arc;
 use tower::ServiceExt;
 
+/// A tenant as the control plane would hand it to `make_app_for`.
+///
+/// Every field, including the three that §3.4 added for the control-plane row
+/// (`plan`, `suspended_at`, `created_at`). Listing them here is the point: these
+/// tests care about `slug`, and a helper that quietly filled in the rest is how
+/// a field stops being exercised by anything.
 fn tenant(slug: &str) -> Tenant {
     Tenant {
         id: slug.parse().unwrap(),
@@ -51,6 +57,9 @@ fn tenant(slug: &str) -> Tenant {
         display_name: slug.to_owned(),
         status: TenantStatus::Active,
         config_json: "{}".to_owned(),
+        plan: "free".to_owned(),
+        suspended_at: None,
+        created_at: None,
     }
 }
 

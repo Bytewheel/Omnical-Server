@@ -31,6 +31,7 @@ headers.workspace = true
 tower.workspace = true
 futures-core.workspace = true
 tower-sessions.workspace = true
+uuid.workspace = true
 vtimezones-rs.workspace = true
 password-auth.workspace = true
 

@@ -4669,6 +4669,7 @@ dependencies = [
  "tower",
  "tower-sessions",
  "tracing",
+ "uuid",
  "vtimezones-rs",
 ]
 

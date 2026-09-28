@@ -16,6 +16,7 @@ mod secret;
 mod subscription_store;
 pub mod synctoken;
 pub mod tenant;
+pub mod tenant_store;
 
 #[cfg(test)]
 pub mod tests;
@@ -31,6 +32,7 @@ pub use scheduling_store::*;
 pub use secret::Secret;
 pub use subscription_store::*;
 pub use tenant::{Tenant, TenantId, TenantStatus};
+pub use tenant_store::{NewTenant, TenantQuota, TenantStore};
 
 pub use addressbook::Addressbook;
 pub use calendar::{Calendar, CalendarMetadata};

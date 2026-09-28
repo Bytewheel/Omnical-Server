@@ -56,6 +56,37 @@ impl TenantId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// A fresh, random tenant id.
+    ///
+    /// A lowercase UUID rather than §3.4's suggested ULID, and the difference
+    /// is deliberate. A ULID's alphabet is `0-9A-Z`, so **a ULID does not
+    /// satisfy this type's own validation** — every use would need a
+    /// `to_lowercase()` around it, which is exactly the kind of quiet fix that
+    /// gets forgotten the first time an id is used somewhere new. A UUID is
+    /// already `[0-9a-f-]`.
+    ///
+    /// The other half of §3.4's "ulid/short random id" is *sortability*, and it
+    /// is not bought here: it would mean enabling `uuid`'s `v7` feature across
+    /// the whole workspace, and nothing needs it. This id is a primary key and a
+    /// directory name; ordering comes from `created_at`.
+    ///
+    /// # Panics
+    /// Never, in practice. The `expect` fires only if a lowercase UUID string
+    /// failed [`TenantId`]'s own validation, which would mean this crate's
+    /// validator had been changed to reject `[0-9a-f-]` — a compile-time fact
+    /// masquerading as a runtime one. It is checked per call rather than once in
+    /// a test because it is the cheapest way to keep the two definitions from
+    /// drifting apart silently.
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(
+            uuid::Uuid::new_v4()
+                .to_string()
+                .parse()
+                .expect("a lowercase uuid is [0-9a-f-], so it satisfies TenantId by construction"),
+        )
+    }
 }
 
 impl TryFrom<String> for TenantId {
@@ -172,6 +203,23 @@ impl FromStr for TenantStatus {
 /// this struct carries the raw string rather than a parsed override type. The
 /// resolution direction is global config ← tenant overrides; a missing key
 /// inherits, so the blob is sparse by design.
+///
+/// ## The field list is not a table row
+///
+/// §3.4's `tenants` table also has `quota_*` columns. They are **not** here, on
+/// purpose: they live in [`crate::tenant_store::TenantQuota`], which has its own
+/// `None`-means-unlimited semantics. Folding them in would have made this struct
+/// a faithful mirror of one table row, and a struct that mirrors a row invites
+/// the reading — "this *is* a tenant" — that §3.2 spends a page arguing
+/// against. It is not a row; it is what dispatch needs in order to build
+/// something, and quotas are not that.
+///
+/// The fields that *are* here split cleanly into three groups, and that is the
+/// test for whether a new field belongs: **identity** (`id`, `slug`,
+/// `display_name`, `plan`), **authority to serve** (`status`, `suspended_at`),
+/// and **how to build this tenant's router** (`config_json`). Audit timestamps
+/// qualify because a suspension is an action someone took and someone will
+/// eventually ask when.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tenant {
     pub id: TenantId,
@@ -183,6 +231,19 @@ pub struct Tenant {
     /// Per-tenant overrides for the global-only config sections (§3.6). Raw
     /// JSON, resolved before construction.
     pub config_json: String,
+    /// Billing tier name (§3.4, defaults to `free`). Carried as an opaque
+    /// string: this build has no billing, and inventing a plan enum now would
+    /// make every future tier a schema migration.
+    pub plan: String,
+    /// ISO 8601 UTC; when the tenant was suspended, `None` while active.
+    ///
+    /// Kept distinct from `status` because a boolean cannot answer "since when
+    /// did this break", and a suspension that cannot be dated is an incident
+    /// nobody can scope.
+    pub suspended_at: Option<String>,
+    /// ISO 8601 UTC creation time, used to order [`crate::tenant_store::
+    /// TenantStore::list_tenants`] newest-first.
+    pub created_at: Option<String>,
 }
 
 impl Tenant {
@@ -270,6 +331,9 @@ mod tests {
             display_name: "Acme".to_owned(),
             status: TenantStatus::Active,
             config_json: "{}".to_owned(),
+            plan: "free".to_owned(),
+            suspended_at: None,
+            created_at: None,
         };
         assert!(base.is_active());
         let suspended = Tenant {
@@ -290,6 +354,9 @@ mod tests {
             display_name: "Acme".to_owned(),
             status: TenantStatus::Active,
             config_json: r#"{"rsvp_secret":"abc"}"#.to_owned(),
+            plan: "free".to_owned(),
+            suspended_at: None,
+            created_at: None,
         };
         assert_eq!(t.config_json, r#"{"rsvp_secret":"abc"}"#);
     }

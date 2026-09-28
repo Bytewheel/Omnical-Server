@@ -13,6 +13,7 @@ mod collection_share_store;
 mod invite_store;
 mod principal_store;
 mod subscription_store;
+mod tenant_store;
 
 #[derive(Debug, Clone)]
 pub struct TestStoreContext {
