@@ -1,7 +1,7 @@
 //! CLI round-trip test for the guest-share extension (PLAN.md §17.10.8):
 //! `guest-share add` → `guest-share list` → `guest-share revoke`, asserted
 //! against the database after every step.
-use rustical::config::{Config, DataStoreConfig, SqliteDataStoreConfig};
+use rustical::config::{Config, DataStoreConfig, SqliteDataStoreConfig, TenancyConfig};
 use rustical::guest_shares::{AddArgs, GuestShareCommand, ListArgs, PrivilegeArg, RevokeArgs};
 use rustical::{GuestSharesArgs, cmd_guest_shares};
 use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType, Privilege};
@@ -14,6 +14,7 @@ use rustical_store_sqlite::{
 
 fn test_config(db_url: String) -> Config {
     Config {
+        tenancy: TenancyConfig::default(),
         data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
             db_url,
             run_repairs: true,

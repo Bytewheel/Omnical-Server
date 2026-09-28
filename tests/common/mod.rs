@@ -1,6 +1,6 @@
 use rustical::{
     Args, cmd_serve,
-    config::{Config, DataStoreConfig, HttpConfig, SqliteDataStoreConfig},
+    config::{Config, DataStoreConfig, HttpConfig, SqliteDataStoreConfig, TenancyConfig},
 };
 use std::{
     collections::HashSet,
@@ -57,6 +57,7 @@ where
         let rt = tokio::runtime::Runtime::new().unwrap();
         let fut = async {
             let mut config = Config {
+                tenancy: TenancyConfig::default(),
                 data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
                     db_url: db_url.unwrap_or(":memory:".to_owned()),
                     run_repairs: true,

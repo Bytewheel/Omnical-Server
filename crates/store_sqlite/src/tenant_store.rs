@@ -269,6 +269,27 @@ impl TenantStore for SqliteTenantStore {
     }
 
     #[instrument(skip(self))]
+    async fn is_host_claimed(&self, host: &str) -> Result<bool, rustical_store::Error> {
+        // Deliberately not filtered on tenant status, and deliberately not a
+        // join: the question is only whether the *name* is taken.
+        let exists: Option<i64> = sqlx::query("SELECT 1 FROM tenant_hosts WHERE host = ?")
+            .bind(host)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Error::from)?
+            .map(|r| r.get("1"));
+        Ok(exists.is_some())
+    }
+
+    #[instrument(skip(self))]
+    async fn get_any_tenant_by_slug(
+        &self,
+        slug: &str,
+    ) -> Result<Option<Tenant>, rustical_store::Error> {
+        self.find_any("slug = ?", slug).await
+    }
+
+    #[instrument(skip(self))]
     async fn list_tenants(
         &self,
         include_suspended: bool,

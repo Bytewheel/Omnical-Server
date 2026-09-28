@@ -138,6 +138,42 @@ pub trait TenantStore: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Whether *any* tenant claims this host, active or not.
+    ///
+    /// **This exists because of a bug the dispatch tests found**, and the reason
+    /// is worth stating precisely, because the fix is not obvious from the
+    /// symptom.
+    ///
+    /// [`TenantStore::get_tenant_by_host`] filters on `status = 'active'`, which
+    /// is right for *resolution* and wrong for *ownership*. With both an explicit
+    /// host claim and a `default_tenant` configured, a request for a
+    /// **suspended** tenant's hostname would fail the active-only lookup and
+    /// then fall through the remaining match rules to `default_tenant` — and be
+    /// served the default tenant's data, under the suspended tenant's URL.
+    ///
+    /// That is worse than a 404: it is one customer being shown another
+    /// customer's calendar. The fix is to distinguish "nobody owns this host"
+    /// (keep matching) from "a suspended tenant owns it" (stop, 404).
+    ///
+    /// # Errors
+    /// - [`Error::Other`] on a store failure.
+    async fn is_host_claimed(&self, _host: &str) -> Result<bool, Error> {
+        Ok(false)
+    }
+
+    /// Look up a tenant by slug **including suspended ones**, so that dispatch
+    /// can tell a suspended tenant apart from a nonexistent one.
+    ///
+    /// Same reasoning as [`TenantStore::is_host_claimed`]: a request for
+    /// `{slug}.{base_domain}` where that slug exists but is suspended must 404,
+    /// not fall through to `default_tenant`.
+    ///
+    /// # Errors
+    /// - [`Error::Other`] on a store failure.
+    async fn get_any_tenant_by_slug(&self, _slug: &str) -> Result<Option<Tenant>, Error> {
+        Ok(None)
+    }
+
     /// List tenants, newest first, optionally including suspended ones.
     ///
     /// The one getter that does not filter on `status`, because an admin view

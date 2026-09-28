@@ -1,0 +1,207 @@
+//! Wiring for the tenancy-enabled serve path — `PLAN_DEPLOYMENTS.md` §3.6.
+//!
+//! This is the only place that turns `[tenancy]` configuration into a running
+//! dispatcher. It lives in its own module rather than in `cmd_serve` because
+//! `cmd_serve` is already 130 lines of sequential startup and §18.11's rule is
+//! that a commit whose claim is "this path is unchanged" should not edit the
+//! thing it claims to leave alone. The `enabled = false` arm of `cmd_serve`
+//! touches nothing in this file.
+//!
+//! ## What is built here, in order
+//!
+//! 1. the **control plane** — a second SQLite file, opened and migrated;
+//! 2. the **store cache** — an LRU sized by `max_cached_tenants`;
+//! 3. a **builder closure** that turns one [`Tenant`] into its stores and router.
+//!
+//! Step 3 is a closure rather than a function so that the per-tenant config
+//! merge (§3.6's `config_json`, item 10) can be added *inside* it without
+//! touching the dispatch loop. The dispatch code has no idea a tenant can carry
+//! configuration, which is what keeps it honest.
+//!
+//! ## Two failures this refuses to paper over
+//!
+//! - A **`data_root` that does not exist** is created, because §3.4's
+//!   `create_if_missing` creates a file and not the two directories above it.
+//! - A **missing `default_tenant` on an appliance-style install** is a refusal
+//!   to boot, from [`TenancyConfig::validate`], not a 404 on every request.
+
+use rustical_store_sqlite::{SqliteTenantStore, create_control_plane_pool};
+use std::path::Path;
+use std::sync::Arc;
+use tracing::info;
+
+use crate::app::AppConfig;
+use crate::config::Config;
+use crate::host_dispatch::{HostDispatch, TenancyAwareApp, TenantBuilder};
+use crate::store_bundle::StoreBundleCache;
+
+/// Build the serving app for a tenancy-enabled install.
+///
+/// # Errors
+/// Anything [`TenancyConfig::validate`](crate::config::TenancyConfig::validate)
+/// rejects, plus a failure to open or migrate the control plane. Both are
+/// startup failures: a server that boots and then 404s everybody is worse than
+/// one that refuses to start and says why.
+pub async fn serve_dispatch(config: &Config) -> Result<TenancyAwareApp, String> {
+    config.tenancy.validate()?;
+
+    let control_plane = open_control_plane(&config.tenancy.control_db_url).await?;
+    let cache = Arc::new(StoreBundleCache::new(config.tenancy.max_cached_tenants));
+
+    info!(
+        enabled = config.tenancy.enabled,
+        base_domain = %config.tenancy.base_domain,
+        default_tenant = %config.tenancy.default_tenant,
+        max_cached_tenants = config.tenancy.max_cached_tenants,
+        "tenancy enabled: requests will be dispatched by Host"
+    );
+
+    let builder = tenant_builder(config, &control_plane, &cache);
+    Ok(TenancyAwareApp::Hosted(Arc::new(HostDispatch::new(
+        control_plane,
+        cache,
+        builder,
+        config.tenancy.clone(),
+    ))))
+}
+
+/// Open and migrate the control plane — a **different file** from any tenant
+/// store (§3.4).
+async fn open_control_plane(url: &str) -> Result<SqliteTenantStore, String> {
+    let pool = create_control_plane_pool(url, true)
+        .await
+        .map_err(|e| format!("could not open the control plane at {url}: {e}"))?;
+    Ok(SqliteTenantStore::new(pool))
+}
+
+/// Where tenant store files go: `[tenancy] data_root`, or the directory of the
+/// configured `db_url`.
+///
+/// The fallback is what keeps the N=1 case on exactly today's path (§3.4) — no
+/// migration, no surprise. The directory is taken from the store URL, so the
+/// scheme and the query string are stripped rather than treated as part of a
+/// path.
+fn data_root(config: &Config) -> Result<std::path::PathBuf, String> {
+    if !config.tenancy.data_root.is_empty() {
+        return Ok(Path::new(&config.tenancy.data_root).to_path_buf());
+    }
+    // A `match` rather than a `let ... else`, because the fallback arm is
+    // unreachable while `DataStoreConfig` has one variant and it is being kept on
+    // purpose: if a Postgres variant is added (§7 wave 3) this turns a wrong
+    // store path into a startup error naming the missing setting, instead of a
+    // panic or a silent mis-derivation. `match` says the same thing without a
+    // lint suppression.
+    let sqlite = match &config.data_store {
+        crate::config::DataStoreConfig::Sqlite(sqlite) => sqlite,
+        #[allow(
+            unreachable_patterns,
+            reason = "kept for when DataStoreConfig grows a variant"
+        )]
+        other => {
+            return Err(format!(
+                "[tenancy] data_root is unset and the data store is {other:?}, so a per-tenant \
+                 `store path` cannot be derived"
+            ));
+        }
+    };
+    let path = sqlite.db_url.trim_start_matches("sqlite://");
+    let path = path.split('?').next().unwrap_or(path);
+    Path::new(path).parent().map_or_else(
+        || Err(format!("could not derive a tenant data_root from {path}")),
+        |parent| Ok(parent.to_path_buf()),
+    )
+}
+
+/// The closure that turns one tenant into `(stores, router)`.
+///
+/// Everything a tenant needs is inside the closure, so the dispatch loop stays a
+/// pure "resolve then serve".
+fn tenant_builder(
+    config: &Config,
+    _control_plane: &SqliteTenantStore,
+    _cache: &Arc<StoreBundleCache>,
+) -> TenantBuilder {
+    let config = config.clone();
+    Arc::new(move |tenant| {
+        let config = config.clone();
+        Box::pin(async move {
+            let root = data_root(&config)?;
+
+            // The store directory, created before SQLite is asked for the file:
+            // `create_if_missing(true)` creates a *file*, not the two
+            // directories above it, so without this every brand-new tenant
+            // would 500 on its first request.
+            let db_path = config.tenancy.ensure_tenant_store_dir(&root, &tenant.id)?;
+            let db_url = format!("sqlite://{}", db_path.display());
+
+            let data_store =
+                crate::config::DataStoreConfig::Sqlite(crate::config::SqliteDataStoreConfig {
+                    db_url,
+                    run_repairs: false,
+                    skip_broken: false,
+                });
+            // `migrate: true`, and this is not a shortcut. A tenant's store is
+            // created by whatever inserts the row — the CLI in item 11, or a
+            // test seeding the control plane — and **nothing** guarantees that
+            // actor ran the migrations. With `false`, the first request for a
+            // brand-new tenant fails with `no such table: davpush_vapid_key` and
+            // every subsequent one fails identically: a tenant that exists, is
+            // dispatched to, and can never serve.
+            //
+            // It is cheap in the steady state: SQLx records applied migrations in
+            // `_sqlx_migrations`, so this is one indexed lookup per *build*, and
+            // a build happens once per tenant per cache residency — not per
+            // request. The expensive parts of `get_store_bundle` (the repair
+            // sweep and per-principal validation) are already switched off by
+            // `run_repairs: false` above, and are a no-op on a fresh tenant with
+            // no principals.
+            let bundle = crate::get_store_bundle(true, &data_store)
+                .await
+                .map_err(|e| format!("tenant {} stores: {e}", tenant.slug))?;
+
+            // `config_json` is **not** merged here. That is item 10, and until it
+            // lands a tenant's per-tenant overrides are stored but inert — which
+            // is the safe direction, because a missing override falls back to
+            // the global value rather than to nothing.
+            let app_config = app_config_for(&config);
+
+            let mut bundle = bundle;
+            let router = crate::app::make_app_for(Some(tenant), app_config, bundle.app_stores());
+            // DAV-Push is wired per tenant in a later part; until then the
+            // channel is left unconsumed rather than silently drained, so a
+            // notification cannot be lost to a receiver nobody is reading.
+            let _ = bundle.take_update_recv();
+            Ok((bundle, router))
+        })
+    })
+}
+
+/// The router decisions for one tenant, from the global config.
+///
+/// A copy of `cmd_serve`'s own call, which is the duplication §3.6 warns about.
+/// It is a *copy* rather than a shared helper because sharing it would mean
+/// editing `cmd_serve`'s `make_app` arguments — the thing §18.11 promised this
+/// commit would not touch. The cost is that the two lists must be kept in step,
+/// and the mitigation is that both call `make_app_for` with the same
+/// [`AppConfig`] type, so a field added to one is a compile error in the other.
+fn app_config_for(config: &Config) -> AppConfig {
+    let public_base = config
+        .subscriptions
+        .public_url
+        .clone()
+        .unwrap_or_else(|| "http://localhost".to_owned());
+    AppConfig {
+        frontend: config.frontend.clone(),
+        oidc: config.oidc.clone(),
+        caldav: config.caldav.clone(),
+        scheduler: None,
+        subscriptions: None,
+        registration: None,
+        nextcloud_login: config.nextcloud_login.clone(),
+        dav_push_enabled: config.dav_push.enabled,
+        session_cookie_samesite_strict: config.http.session_cookie_samesite_strict,
+        payload_limit_mb: config.http.payload_limit_mb,
+        subscriptions_public_url: public_base,
+        smtp_accounts: config.scheduling.smtp.clone(),
+    }
+}

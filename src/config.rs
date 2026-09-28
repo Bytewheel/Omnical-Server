@@ -7,6 +7,7 @@ use rustical_caldav::CalDavConfig;
 use rustical_frontend::FrontendConfig;
 use rustical_oidc::OidcConfig;
 use rustical_scheduling::SchedulingConfig;
+use rustical_store::tenant::{MAX_SLUG_LEN, TenantId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -322,10 +323,164 @@ impl Default for RegistrationConfig {
     }
 }
 
+/// Multi-tenancy — `PLAN_DEPLOYMENTS.md` §3.6.
+///
+/// ## `enabled = false` must mean "exactly as today"
+///
+/// That is §3.6's own wording and it is the property that let §8 and §9 ship
+/// without waiting for §6. It is enforced structurally rather than by
+/// discipline: `cmd_serve` builds [`make_app`](crate::app::make_app) and serves
+/// it with **no dispatch layer at all** when this is false, so there is no code
+/// path in which tenancy is "on but not routing".
+///
+/// ## What is deliberately missing
+///
+/// §3.6 lists eight keys. Six are here. Two are **not**, and both omissions are
+/// deliberate rather than oversights — the common thread is that both would
+/// parse and then do nothing in this tree, and a config key that is accepted and
+/// ignored is worse than a missing one, because the operator has no way to tell
+/// which they are looking at:
+///
+/// - **`trusted_proxies`** (C5, §7.3.4) is the `X-Forwarded-Host` / `X-Forwarded-For`
+///   trust list. It is a *security* knob, and the code that honours it does not
+///   exist yet. An operator who set it would get a rate-limit bypass while their
+///   config claimed otherwise. It arrives with §7.3.4, and §3.6's "MUST be set
+///   for hosted" is about that commit, not this one.
+/// - **`[tenancy.sessions]`** (C4, §3.7) selects a `SessionStore`. The
+///   `session-redis` cargo feature does not exist in this tree, so
+///   `store = "redis"` would be a literal that deserialises and is then never
+///   read. It arrives with `crates/store_redis`.
+///
+/// A user who has read the plan and written `store = "redis"` gets a hard
+/// `unknown field` error from `deny_unknown_fields` rather than a silent no-op,
+/// which is the correct failure: loud, immediate, and pointing at the fix.
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct TenancyConfig {
+    /// Master switch. `false` — the default — keeps single-tenant behaviour.
+    pub enabled: bool,
+    /// N=1 self-host/appliance: every `Host` lands on this tenant. The one
+    /// setting that makes dispatch useful *without* any DNS, which is why §3.3
+    /// puts it at match 4 rather than treating it as a special case: on a LAN
+    /// the request's `Host` is whatever the router's own hostname happened to
+    /// be, and resolving that to a tenant is the whole point of an appliance.
+    pub default_tenant: String,
+    /// Hosted: `{slug}.{base_domain}` resolution (§3.3 match 2).
+    pub base_domain: String,
+    /// Hosted: the bare apex domain, which has no tenant of its own.
+    pub default_domain: String,
+    /// Where per-tenant store files live. Defaults to the directory of the
+    /// configured `db_url`, so the N=1 case keeps exactly today's path — no
+    /// migration, no surprise (§3.4).
+    pub data_root: String,
+    /// §3.5's LRU size. `0` is coerced to 1 by
+    /// [`StoreBundleCache::new`](crate::store_bundle::StoreBundleCache::new)
+    /// rather than honoured.
+    pub max_cached_tenants: usize,
+    /// The control plane's own database — a **different file** from any tenant
+    /// store, on purpose (§3.4).
+    pub control_db_url: String,
+}
+
+impl TenancyConfig {
+    /// The store path for a tenant: `<data_root>/tenants/<tenant_id>/db.sqlite3`
+    /// (§3.4).
+    ///
+    /// The **id**, not the slug: a slug can be renamed when a customer rebrands,
+    /// and renaming a directory that a running server has open is a different
+    /// class of problem from renaming a row.
+    #[must_use]
+    pub fn tenant_db_path(&self, data_root: &std::path::Path, tenant_id: &str) -> String {
+        data_root
+            .join("tenants")
+            .join(tenant_id)
+            .join("db.sqlite3")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Create a tenant's store directory and return the path to its database.
+    ///
+    /// §3.4 writes the convention as `<data_root>/tenants/<tenant_id>/db.sqlite3`,
+    /// and the missing half of that sentence is that **SQLite will not create
+    /// the directory**. `create_db_pool` sets `create_if_missing(true)`, which
+    /// creates a *file*, not the two directories above it — so without this, the
+    /// very first request for a brand-new tenant fails with
+    /// `unable to open database file` (SQLite code 14) and every subsequent one
+    /// fails the same way. A tenant that cannot serve is worse than a tenant
+    /// that does not exist, because the 500 looks like our bug rather than a
+    /// missing `mkdir`.
+    ///
+    /// `create_dir_all`, not `create_dir`, because the parent may not exist on a
+    /// first install.
+    ///
+    /// # Errors
+    /// The `io::Error` from `create_dir_all`, with the path in the message.
+    pub fn ensure_tenant_store_dir(
+        &self,
+        data_root: &std::path::Path,
+        tenant_id: &TenantId,
+    ) -> Result<std::path::PathBuf, String> {
+        let dir = data_root.join("tenants").join(tenant_id.as_str());
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            format!(
+                "could not create the store directory {}: {e}",
+                dir.display()
+            )
+        })?;
+        Ok(dir.join("db.sqlite3"))
+    }
+
+    /// Reject a tenancy configuration that cannot work, with a message that
+    /// says what to change.
+    ///
+    /// Called once at startup. A misconfiguration found on the first request is
+    /// a 500 for one unlucky tenant; found here it is a refusal to boot, which
+    /// is the only useful time to learn that `base_domain` is set on an
+    /// appliance.
+    ///
+    /// # Errors
+    /// A message naming the offending key.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            // Every other key is inert while tenancy is off, and an operator who
+            // set `base_domain` and left `enabled = false` has almost certainly
+            // made a mistake worth naming — but this is a warning, not a refusal:
+            // a staged rollout turns tenancy on in a second commit.
+            return Ok(());
+        }
+        if self.default_tenant.is_empty() && self.base_domain.is_empty() {
+            return Err(
+                "[tenancy] is enabled but neither default_tenant nor base_domain is set, so no \
+                 Host header can resolve to a tenant. For a self-hosted or appliance install set \
+                 default_tenant; for a hosted deployment set base_domain."
+                    .to_owned(),
+            );
+        }
+        if !self.default_tenant.is_empty() && self.default_tenant.parse::<TenantId>().is_err() {
+            return Err(format!(
+                "[tenancy] default_tenant = {:?} is not a valid tenant id: slugs are \
+                 [a-z0-9-]{{1,{}}}",
+                self.default_tenant, MAX_SLUG_LEN
+            ));
+        }
+        if self.control_db_url.is_empty() {
+            return Err(
+                "[tenancy] control_db_url must be set; the control plane is a separate \
+                        database from any tenant store (§3.4)"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub data_store: DataStoreConfig,
+    #[serde(default)]
+    pub tenancy: TenancyConfig,
     #[serde(default)]
     pub http: HttpConfig,
     #[serde(default)]
@@ -360,6 +515,7 @@ impl Config {
     #[must_use]
     pub fn default_config() -> Self {
         Self {
+            tenancy: TenancyConfig::default(),
             http: HttpConfig::default(),
             caldav: CalDavConfig::default(),
             data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {

@@ -8,7 +8,7 @@
 //! is worse than no backup tool — so tamper detection, the running-server
 //! guard, tar-slip rejection and the refusal to clobber a database are all
 //! asserted here rather than assumed.
-use rustical::config::{Config, DataStoreConfig, HttpConfig, SqliteDataStoreConfig};
+use rustical::config::{Config, DataStoreConfig, HttpConfig, SqliteDataStoreConfig, TenancyConfig};
 use rustical::{
     ArchiveEntry, BackupArgs, BackupManifest, CONFIG_ENTRY, DB_ENTRY, MANIFEST_ENTRY,
     MANIFEST_FORMAT, RestoreArgs, cmd_backup, cmd_restore,
@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 fn test_config(db_path: &Path) -> Config {
     Config {
+        tenancy: TenancyConfig::default(),
         data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
             db_url: db_path.to_string_lossy().into_owned(),
             run_repairs: false,

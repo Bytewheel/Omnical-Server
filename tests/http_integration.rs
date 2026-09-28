@@ -5,7 +5,10 @@ use http::{Method, StatusCode};
 use reqwest::redirect::Policy;
 use rustical::{
     PrincipalsArgs, cmd_health, cmd_invites, cmd_principals, cmd_subscriptions,
-    config::{Config, DataStoreConfig, HttpConfig, SqliteDataStoreConfig, SubscriptionsConfig},
+    config::{
+        Config, DataStoreConfig, HttpConfig, SqliteDataStoreConfig, SubscriptionsConfig,
+        TenancyConfig,
+    },
     invites::{CreateArgs as InviteCreateArgs, InvitesArgs, InvitesCommand},
     membership::{AssignArgs, MembershipArgs, MembershipCommand},
     principals::{CreateArgs, EditArgs, PrincipalsCommand},
@@ -118,6 +121,7 @@ async fn test_initial_setup() {
                 }),
             },
             Config {
+                tenancy: TenancyConfig::default(),
                 data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
                     db_url: db_path.clone(),
                     run_repairs: true,
@@ -151,6 +155,7 @@ async fn test_initial_setup() {
                 }),
             },
             Config {
+                tenancy: TenancyConfig::default(),
                 data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
                     db_url: db_path.clone(),
                     run_repairs: true,
@@ -261,6 +266,7 @@ async fn test_principal_impersonation() {
     test_runner(Some(db_path.clone()), async |port| {
         let origin = format!("http://localhost:{port}");
         let config = Config {
+            tenancy: TenancyConfig::default(),
             data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
                 db_url: db_path.clone(),
                 run_repairs: true,
@@ -487,6 +493,7 @@ async fn test_subscriptions_export() {
         async |port| {
             let origin = format!("http://localhost:{port}");
             let config = Config {
+                tenancy: TenancyConfig::default(),
                 data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
                     db_url: db_path.clone(),
                     run_repairs: true,
@@ -663,6 +670,7 @@ async fn test_register_enabled_provisions() {
         async |port| {
             let origin = format!("http://localhost:{port}");
             let config = Config {
+                tenancy: TenancyConfig::default(),
                 data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
                     db_url: db_path.clone(),
                     run_repairs: true,

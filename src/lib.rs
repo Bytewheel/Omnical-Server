@@ -6,6 +6,7 @@ use axum::ServiceExt;
 use axum::extract::Request;
 use clap::{Parser, Subcommand};
 use config::{DataStoreConfig, SqliteDataStoreConfig};
+use host_dispatch::TenancyAwareApp;
 use provided_listeners::ProvidedListeners;
 use register::RegistrationContext;
 use rustical_dav_push::{DavPushService, DavPushStore, VapidStore};
@@ -42,10 +43,12 @@ mod tasks;
 pub use commands::*;
 pub mod config;
 pub mod export;
+pub mod host_dispatch;
 pub mod register;
 pub mod rsvp;
 mod setup_tracing;
 pub mod store_bundle;
+pub mod tenancy;
 // Shared with the frontend crate so the portal prints byte-identical
 // export URLs to the CLI (PLAN.md §17.8.4).
 pub use rustical_frontend::url_builder;
@@ -220,6 +223,13 @@ pub async fn cmd_serve(
         setup_tracing(&config.tracing);
     }
 
+    // Captured at the very top, because `cmd_serve` moves fields out of `config`
+    // as it goes (`dav_push.allowed_push_servers` among them) and a clone taken
+    // further down would be a clone of a half-moved value. The tenancy branch
+    // needs a whole `Config`; the single-tenant branch ignores both.
+    let tenancy_enabled = config.tenancy.enabled;
+    let config_for_tenancy = config.clone();
+
     let (
         addr_store,
         cal_store,
@@ -291,6 +301,10 @@ pub async fn cmd_serve(
         rustical_scheduling::smtp::set_ehlo_name_from_url(public_url);
     }
 
+    // §3.6's "enabled = false behaves exactly as today", enforced here rather
+    // than by convention: the `false` arm below builds the *same* `make_app`
+    // call with the *same* arguments and puts no dispatch layer in front of it.
+    // There is no third path in which tenancy is on but not routing.
     let app = make_app(
         addr_store.clone(),
         cal_store.clone(),
@@ -313,6 +327,16 @@ pub async fn cmd_serve(
         password_reset_store,
         config.scheduling.smtp.clone(),
     );
+    let app = if tenancy_enabled {
+        crate::tenancy::serve_dispatch(&config_for_tenancy)
+            .await
+            .map_err(anyhow::Error::msg)?
+    } else {
+        // Byte-for-byte the pre-tenancy path. No `HostDispatch`, no control
+        // plane, no cache: this arm does not touch any of them.
+        TenancyAwareApp::Single(app)
+    };
+
     let app = ServiceExt::<Request>::into_make_service(
         NormalizePathLayer::trim_trailing_slash().layer(app),
     );
