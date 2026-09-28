@@ -24,12 +24,16 @@
 //! diverge") therefore holds by construction rather than by review, and the
 //! `deny_unknown_fields` round-trip is a property of the type.
 use crate::config::{Config, DataStoreConfig, HttpBindConfig, SqliteDataStoreConfig};
+use crate::register::seed_collections;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use rand::RngExt;
 use rustical_scheduling::{ImapAccount, SmtpAccount};
 use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType};
-use rustical_store_sqlite::{SqlitePrincipalStore, create_db_pool};
+use rustical_store_sqlite::{
+    SqliteAddressbookStore, SqliteCalendarStore, SqlitePrincipalStore, create_db_pool,
+};
+use sqlx::SqlitePool;
 use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -85,6 +89,22 @@ impl TlsChoice {
             _ => None,
         }
     }
+
+    /// The same question answered by a flag or an `OMNICAL_SETUP_*` variable.
+    ///
+    /// A `.env` file or a provisioning manifest says `proxy`, not `c`, so both
+    /// are accepted; `parse` stays the char parser the interactive prompt
+    /// needs. Kept adjacent to `OPTIONS` on purpose — the two must not drift,
+    /// and a test asserts that every letter in `OPTIONS` parses.
+    #[must_use]
+    pub fn parse_word(answer: &str) -> Option<Self> {
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "c" | "p" | "proxy" | "reverse-proxy" | "caddy" | "nginx" => Some(Self::Proxy),
+            "d" | "dav-tls" | "davtls" => Some(Self::DavTls),
+            "n" | "none" => Some(Self::None),
+            _ => None,
+        }
+    }
 }
 
 /// How new accounts may be created.
@@ -114,6 +134,18 @@ impl RegistrationChoice {
             'i' => Some(Self::InviteOnly),
             'o' => Some(Self::Open),
             'c' => Some(Self::Closed),
+            _ => None,
+        }
+    }
+
+    /// The same question answered by a flag or an `OMNICAL_SETUP_*` variable.
+    /// See [`TlsChoice::parse_word`] for why both spellings exist.
+    #[must_use]
+    pub fn parse_word(answer: &str) -> Option<Self> {
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "i" | "invite-only" | "invite_only" | "invite" | "invites" => Some(Self::InviteOnly),
+            "o" | "open" => Some(Self::Open),
+            "c" | "closed" | "close" => Some(Self::Closed),
             _ => None,
         }
     }
@@ -153,10 +185,118 @@ pub struct SetupReport {
     /// because rotating it invalidates every outstanding RSVP link.
     pub rsvp_secret_generated: bool,
     pub public_url: Option<String>,
+    /// `true` when nothing was prompted: every answer came from a flag or an
+    /// `OMNICAL_SETUP_*` variable. Reported so a caller (and a test) can tell
+    /// an unattended run from a scripted-stdin one.
+    pub unattended: bool,
 }
 
 #[derive(Debug, Parser)]
-pub struct SetupArgs {}
+pub struct SetupArgs {
+    /// Take every answer from the options below instead of prompting
+    ///
+    /// The options are `env`-backed so a container or a provisioning system can
+    /// answer them with no shell in the image. A question with no answer is an
+    /// error naming the variable to set — never a default, and never a prompt.
+    /// Unattended is opt-in, so nothing about the interactive wizard changes
+    /// unless you ask for it.
+    #[arg(long, env = "OMNICAL_SETUP_UNATTENDED")]
+    pub unattended: bool,
+    /// Where to keep db.sqlite3 (e.g. /var/lib/omnical)
+    #[arg(long, env = "OMNICAL_SETUP_DATA_DIR")]
+    pub data_dir: Option<String>,
+    /// Address to listen on (e.g. `0.0.0.0:4000`, or `unix:/run/omnical.sock`)
+    #[arg(long, env = "OMNICAL_SETUP_BIND")]
+    pub bind: Option<String>,
+    /// Public https:// URL clients will use. Unset = not reachable yet, and
+    /// the share feeds stay off. Never cleared by an unattended run.
+    #[arg(long, env = "OMNICAL_SETUP_PUBLIC_URL")]
+    pub public_url: Option<String>,
+    /// Who terminates TLS: proxy, dav-tls or none. Advice only — it selects
+    /// the next steps that get printed, and writes no config key.
+    #[arg(long, env = "OMNICAL_SETUP_TLS")]
+    pub tls: Option<String>,
+    /// How accounts may be created: invite-only, open or closed
+    #[arg(long, env = "OMNICAL_SETUP_REGISTRATION")]
+    pub registration: Option<String>,
+    /// The first administrator's email address
+    #[arg(long, env = "OMNICAL_SETUP_ADMIN_EMAIL")]
+    pub admin_email: Option<String>,
+    /// The first administrator's password, 12 characters or more
+    ///
+    /// **Environment only, deliberately not a flag.** An administrator password
+    /// on a command line is visible in `ps` to every user on the host; an
+    /// environment variable is not, and is still the right channel for the
+    /// unattended path. It is read only when the account is actually being
+    /// created, so it can be removed from the environment after the first run.
+    #[arg(long, env = "OMNICAL_SETUP_ADMIN_PASSWORD", hide = true)]
+    pub admin_password: Option<String>,
+}
+
+/// The pre-answered questions of an unattended run.
+///
+/// A question is required — `--unattended` errors rather than defaulting — with
+/// one exception: the public URL, which is optional because "not reachable yet"
+/// is a real state for a first install behind a proxy that does not exist. See
+/// the `run_setup_with` body for the one asymmetry, which is that an unattended
+/// run may *set or keep* the public URL but never clear it.
+///
+/// **Why the `OMNICAL_SETUP_` prefix and not `RUSTICAL_`:** the server's config
+/// is read by figment as `RUSTICAL_*` with `__` as the section separator
+/// (`main.rs:22`), and every struct in `config.rs` is `deny_unknown_fields`. A
+/// wizard answer smuggled in as `RUSTICAL_SETUP__DATA_DIR` would therefore be
+/// a *config parse error* the moment the same environment reached `rustical
+/// serve` — which is precisely what happens in a Compose file, where the setup
+/// service and the server service share one environment block. A separate
+/// namespace cannot collide.
+#[derive(Debug, Default, Clone)]
+pub struct SetupAnswers {
+    /// Opt in to the no-prompt path. See [`SetupArgs::unattended`].
+    pub unattended: bool,
+    pub data_dir: Option<String>,
+    pub bind: Option<String>,
+    pub public_url: Option<String>,
+    pub tls: Option<String>,
+    pub registration: Option<String>,
+    pub admin_email: Option<String>,
+    pub admin_password: Option<String>,
+}
+
+impl SetupAnswers {
+    /// From parsed CLI args. The environment is already folded in by clap, so
+    /// this is the single place the two input channels meet — and therefore the
+    /// single place the `--unattended` rule is enforced.
+    ///
+    /// **The answers are discarded unless `--unattended` is set**, and that is
+    /// not tidiness. These flags are `env`-backed, so clap fills them in from
+    /// `OMNICAL_SETUP_*` *whether or not* unattended was asked for: an
+    /// `OMNICAL_SETUP_DATA_DIR` in the environment silently pre-answers question
+    /// 1 of the **interactive** wizard. Everything downstream then shifts by one
+    /// line of a piped answer script, and because `HttpBindConfig::from_str`
+    /// accepts almost any string as a host, the *next* answer — a filesystem
+    /// path — is accepted as the listen address. The result is a config with
+    /// `bind = "/var/lib/omnical"` and a server that cannot start, produced by
+    /// a run that reported success at every step. `install.sh` sets exactly
+    /// that variable, and it is how this was found: the §18.7 self-host gate
+    /// ran the attended path by hand, and the wizard's own step 2 printed the
+    /// data directory where the bind address should have been.
+    #[must_use]
+    pub fn from_args(args: &SetupArgs) -> Self {
+        if !args.unattended {
+            return Self::default();
+        }
+        Self {
+            unattended: true,
+            data_dir: args.data_dir.clone(),
+            bind: args.bind.clone(),
+            public_url: args.public_url.clone(),
+            tls: args.tls.clone(),
+            registration: args.registration.clone(),
+            admin_email: args.admin_email.clone(),
+            admin_password: args.admin_password.clone(),
+        }
+    }
+}
 
 /// Interactive entry point: stdin in, stdout out, no secret printed.
 ///
@@ -168,24 +308,25 @@ pub struct SetupArgs {}
     clippy::missing_panics_doc,
     clippy::future_not_send
 )]
-pub async fn cmd_setup(_args: SetupArgs, config_file: &Path) -> Result<()> {
+pub async fn cmd_setup(args: SetupArgs, config_file: &Path) -> Result<()> {
     let stdin = std::io::stdin();
     let interactive = stdin.is_terminal();
     let mut input = stdin.lock();
     let mut output = std::io::stdout();
-    run_setup(&mut input, &mut output, config_file, interactive).await?;
+    let answers = SetupAnswers::from_args(&args);
+    run_setup_with(&mut input, &mut output, config_file, interactive, &answers).await?;
     Ok(())
 }
 
-/// The wizard, with its input and output injected.
+/// The wizard with nothing pre-answered, i.e. every question is asked.
 ///
-/// `interactive` only decides whether secrets are read with echo disabled; the
-/// questions and the answers are otherwise identical, which is what makes a
-/// piped-stdin test meaningful.
+/// This is the historical entry point and stays exactly as it was: the
+/// unattended path is reachable only by asking for it, so no existing caller —
+/// and no existing test — can change behaviour by accident.
 #[allow(
-    clippy::too_many_lines,
     clippy::missing_errors_doc,
-    clippy::missing_panics_doc
+    clippy::missing_panics_doc,
+    clippy::future_not_send
 )]
 pub async fn run_setup(
     input: &mut impl BufRead,
@@ -193,9 +334,47 @@ pub async fn run_setup(
     config_file: &Path,
     interactive: bool,
 ) -> Result<SetupReport> {
+    run_setup_with(
+        input,
+        output,
+        config_file,
+        interactive,
+        &SetupAnswers::default(),
+    )
+    .await
+}
+
+/// The wizard, with its input and output injected.
+///
+/// `interactive` only decides whether secrets are read with echo disabled; the
+/// questions and the answers are otherwise identical, which is what makes a
+/// piped-stdin test meaningful. `answers` pre-answers individual questions, and
+/// `answers.unattended` removes the possibility of a prompt entirely: a
+/// question with no answer is then an error naming the flag that would answer
+/// it, never a silent default.
+#[allow(
+    clippy::too_many_lines,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc
+)]
+pub async fn run_setup_with(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    config_file: &Path,
+    interactive: bool,
+    answers: &SetupAnswers,
+) -> Result<SetupReport> {
     let existing = load_existing_config(config_file)?;
     writeln!(output, "Omnical setup — {}", config_file.display())?;
-    if existing.is_some() {
+    if answers.unattended {
+        // Said out loud because this line is the only evidence, in a container
+        // log, of *how* the config that is about to be written was decided.
+        writeln!(
+            output,
+            "Unattended: every question is answered by a flag or an OMNICAL_SETUP_* \
+             variable. Nothing will be prompted, and a missing answer is an error."
+        )?;
+    } else if existing.is_some() {
         writeln!(
             output,
             "An existing configuration was found. Press enter to keep any value in [brackets]."
@@ -213,11 +392,10 @@ pub async fn run_setup(
         .sqlite_db_path()
         .and_then(|db| db.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
-    let data_dir = prompt_text(
-        input,
-        output,
-        "1. Data directory",
-        &default_data_dir.to_string_lossy(),
+    let data_dir = match preanswered(
+        answers.data_dir.as_deref(),
+        FLAG_DATA_DIR,
+        answers.unattended,
         |answer| {
             if answer.is_empty() {
                 Err(anyhow!("a data directory is required"))
@@ -225,7 +403,22 @@ pub async fn run_setup(
                 Ok(())
             }
         },
-    )?;
+    )? {
+        Some(answer) => answer,
+        None => prompt_text(
+            input,
+            output,
+            "1. Data directory",
+            &default_data_dir.to_string_lossy(),
+            |answer| {
+                if answer.is_empty() {
+                    Err(anyhow!("a data directory is required"))
+                } else {
+                    Ok(())
+                }
+            },
+        )?,
+    };
     let data_dir = PathBuf::from(data_dir);
     let db_path = data_dir.join("db.sqlite3");
     config.data_store = DataStoreConfig::Sqlite(SqliteDataStoreConfig {
@@ -237,17 +430,25 @@ pub async fn run_setup(
     // 2. Listen address. A fresh install gets the documented default; a
     // re-run keeps whatever the config already says, because changing the bind
     // under a running service is exactly the surprise a re-run must not cause.
-    let bind = prompt_text(
-        input,
-        output,
-        "2. Address to listen on",
-        if reloading {
-            config.http.bind.as_deref().unwrap_or(DEFAULT_BIND)
-        } else {
-            DEFAULT_BIND
-        },
+    let bind = match preanswered(
+        answers.bind.as_deref(),
+        FLAG_BIND,
+        answers.unattended,
         |answer| HttpBindConfig::from_str(answer).map(|_| ()),
-    )?;
+    )? {
+        Some(answer) => answer,
+        None => prompt_text(
+            input,
+            output,
+            "2. Address to listen on",
+            if reloading {
+                config.http.bind.as_deref().unwrap_or(DEFAULT_BIND)
+            } else {
+                DEFAULT_BIND
+            },
+            |answer| HttpBindConfig::from_str(answer).map(|_| ()),
+        )?,
+    };
     config.http.bind = Some(bind.clone());
     // `http.host` / `http.port` are a *deprecated* bind override in 0.16.1:
     // they take precedence over `bind` and make the server try to bind the
@@ -257,17 +458,26 @@ pub async fn run_setup(
     config.http.port = None;
 
     // 3. Public URL — the base every client-facing link is built from.
-    let public_url = prompt_optional_text(
-        input,
-        output,
-        "3. Public URL (blank if this server is not reachable yet)",
-        config.subscriptions.public_url.clone(),
-        |answer| {
-            url::Url::parse(answer)
-                .map(|_| ())
-                .map_err(anyhow::Error::from)
-        },
-    )?;
+    //
+    // The one *optional* answer, and it is asymmetric on purpose: an unattended
+    // run can set the public URL or leave it alone, but it can never **clear**
+    // one. Clearing it is an attended edit, because the unattended surface is
+    // the one a container restart re-runs for months — a variable that quietly
+    // deletes a working public URL on the next `docker compose up` would be the
+    // worst possible behaviour for a provisioning path, and there is no
+    // unattended caller that needs to clear it.
+    let public_url = match answers.public_url.as_deref() {
+        Some(answer) if !answer.trim().is_empty() => Some(validate_url(FLAG_PUBLIC_URL, answer)?),
+        Some(_) => config.subscriptions.public_url.clone(),
+        None if answers.unattended => config.subscriptions.public_url.clone(),
+        None => prompt_optional_text(
+            input,
+            output,
+            "3. Public URL (blank if this server is not reachable yet)",
+            config.subscriptions.public_url.clone(),
+            |answer| validate_url("3. Public URL", answer).map(|_| ()),
+        )?,
+    };
     if public_url.is_some() {
         // Public share feeds need a public base to be worth mounting at all.
         config.subscriptions.enabled = true;
@@ -280,40 +490,77 @@ pub async fn run_setup(
     }
 
     // 4. TLS — advice only, see `TlsChoice`.
-    let tls = prompt_choice(
-        input,
-        output,
-        "4. How is TLS terminated?",
-        TlsChoice::OPTIONS,
-        TlsChoice::DEFAULT,
-        TlsChoice::key,
-        TlsChoice::parse,
-    )?;
+    let tls = match preanswered(
+        answers.tls.as_deref(),
+        FLAG_TLS,
+        answers.unattended,
+        |answer| parse_tls(answer).map(|_| ()),
+    )? {
+        Some(answer) => parse_tls(&answer)?,
+        None => prompt_choice(
+            input,
+            output,
+            "4. How is TLS terminated?",
+            TlsChoice::OPTIONS,
+            TlsChoice::DEFAULT,
+            TlsChoice::key,
+            TlsChoice::parse,
+        )?,
+    };
 
     // 5 + 6. Mail. Both optional, and a re-run keeps what is configured
     // without ever showing or re-asking for a stored password.
-    let (smtp, imap) = prompt_mail(
-        input,
-        output,
-        &config.scheduling.smtp,
-        &config.scheduling.imap,
-        interactive,
-    )?;
+    //
+    // An unattended run does not ask and does not set: a mail account is the
+    // one answer whose value is a long-lived password typed into a config file
+    // that ends up in an image layer, a CI log or an `inspect` output. The
+    // wizard therefore refuses to *add* mail unattended, and — symmetrically
+    // with the public URL — will not *remove* it either. Mail is configured by
+    // an attended re-run, which is the path §18.6 already designed for.
+    let (smtp, imap) = if answers.unattended {
+        if !config.scheduling.smtp.is_empty() {
+            writeln!(
+                output,
+                "5+6. Mail left exactly as configured — an unattended run never reads or \
+                 writes a mail password. Re-run this wizard without --unattended to change it."
+            )?;
+        }
+        (
+            config.scheduling.smtp.clone(),
+            config.scheduling.imap.clone(),
+        )
+    } else {
+        prompt_mail(
+            input,
+            output,
+            &config.scheduling.smtp,
+            &config.scheduling.imap,
+            interactive,
+        )?
+    };
     config.scheduling.smtp = smtp;
     config.scheduling.imap = imap;
     config.scheduling.enabled = !config.scheduling.smtp.is_empty();
 
     // 7. Registration.
     let default_registration = RegistrationChoice::from_config(&config.registration);
-    let registration = prompt_choice(
-        input,
-        output,
-        "7. Registration",
-        RegistrationChoice::OPTIONS,
-        default_registration,
-        RegistrationChoice::key,
-        RegistrationChoice::parse,
-    )?;
+    let registration = match preanswered(
+        answers.registration.as_deref(),
+        FLAG_REGISTRATION,
+        answers.unattended,
+        |answer| parse_registration(answer).map(|_| ()),
+    )? {
+        Some(answer) => parse_registration(&answer)?,
+        None => prompt_choice(
+            input,
+            output,
+            "7. Registration",
+            RegistrationChoice::OPTIONS,
+            default_registration,
+            RegistrationChoice::key,
+            RegistrationChoice::parse,
+        )?,
+    };
     registration.apply(&mut config.registration);
 
     // The RSVP secret is the one secret this command ever *creates*. It is
@@ -339,7 +586,6 @@ pub async fn run_setup(
             )
         })?;
     let principal_store = SqlitePrincipalStore::new(pool.clone());
-
     // 8. The first administrator — asked last, because the answer depends on
     // what the database already holds. Asking it earlier is how a wizard
     // invites you to create a *second* admin on a re-run.
@@ -347,9 +593,11 @@ pub async fn run_setup(
     let (admin, admin_created) = ensure_administrator(
         input,
         output,
+        &pool,
         &principal_store,
         interactive,
         min_password_length,
+        answers,
     )
     .await?;
 
@@ -366,6 +614,7 @@ pub async fn run_setup(
         registration,
         rsvp_secret_generated,
         public_url,
+        unattended: answers.unattended,
     };
     print_next_steps(output, &report)?;
     Ok(report)
@@ -375,9 +624,11 @@ pub async fn run_setup(
 async fn ensure_administrator(
     input: &mut impl BufRead,
     output: &mut impl Write,
+    pool: &SqlitePool,
     principal_store: &SqlitePrincipalStore,
     interactive: bool,
     min_password_length: usize,
+    answers: &SetupAnswers,
 ) -> Result<(String, bool)> {
     let mut existing: Vec<String> = principal_store
         .get_principals()
@@ -393,19 +644,21 @@ async fn ensure_administrator(
         .cloned()
         .unwrap_or_else(|| DEFAULT_ADMIN.to_owned());
 
-    let admin = prompt_text(
-        input,
-        output,
-        "8. Administrator email address",
-        &default_admin,
-        |answer| {
-            if answer.contains('@') && answer.len() > 3 {
-                Ok(())
-            } else {
-                Err(anyhow!("that does not look like an email address"))
-            }
-        },
-    )?;
+    let admin = match preanswered(
+        answers.admin_email.as_deref(),
+        FLAG_ADMIN_EMAIL,
+        answers.unattended,
+        validate_email,
+    )? {
+        Some(answer) => answer,
+        None => prompt_text(
+            input,
+            output,
+            "8. Administrator email address",
+            &default_admin,
+            validate_email,
+        )?,
+    };
 
     if let Some(principal) = principal_store.get_principal(&admin).await? {
         writeln!(
@@ -416,8 +669,14 @@ async fn ensure_administrator(
         // A principal with no password can only sign in through OIDC. Offer
         // to set one, but never overwrite a password that is already set.
         if principal.password.is_none() {
-            let password =
-                prompt_new_password(input, output, &admin, interactive, min_password_length)?;
+            let password = new_password(
+                input,
+                output,
+                &admin,
+                interactive,
+                min_password_length,
+                answers,
+            )?;
             principal_store
                 .insert_principal(
                     Principal {
@@ -433,7 +692,14 @@ async fn ensure_administrator(
         return Ok((admin, false));
     }
 
-    let password = prompt_new_password(input, output, &admin, interactive, min_password_length)?;
+    let password = new_password(
+        input,
+        output,
+        &admin,
+        interactive,
+        min_password_length,
+        answers,
+    )?;
     principal_store
         .insert_principal(
             Principal {
@@ -449,6 +715,22 @@ async fn ensure_administrator(
         )
         .await?;
     writeln!(output, "Created administrator {admin}.")?;
+
+    // …with the collections a client needs, because the next step this wizard
+    // prints is "add a client from the calendar page". Same code registration
+    // uses, so a wizard-created administrator and a self-registered one are
+    // indistinguishable to a client — see `register::seed_collections`.
+    let (send, _recv) = tokio::sync::mpsc::channel(1000);
+    let cal_store = SqliteCalendarStore::new(pool.clone(), send.clone(), true);
+    let addr_store = SqliteAddressbookStore::new(pool.clone(), send, true);
+    seed_collections(&cal_store, &addr_store, &admin)
+        .await
+        .context("seeding the administrator's calendar and addressbook")?;
+    writeln!(
+        output,
+        "Created the 'personal' calendar, the 'tasks' calendar and the 'personal' \
+         addressbook for {admin}."
+    )?;
     Ok((admin, true))
 }
 
@@ -583,6 +865,16 @@ fn print_next_steps(output: &mut impl Write, report: &SetupReport) -> Result<()>
              \x20    invalidates every invitation link already sent."
         )?;
     }
+    if report.unattended {
+        // The one thing an unattended run could not do, said where the operator
+        // is already looking, rather than in a manual nobody opens.
+        writeln!(
+            output,
+            "  5. No mail account was configured — an unattended run never reads or writes a\n\
+             \x20    mail password. Run `rustical setup` without --unattended to add SMTP/IMAP;\n\
+             \x20    invitations stay off until you do."
+        )?;
+    }
     writeln!(
         output,
         "\nRe-run this wizard at any time to edit these answers. It will not reset the\n\
@@ -595,7 +887,76 @@ fn bind_port(bind: &str) -> &str {
     bind.rsplit(':').next().unwrap_or("4000")
 }
 
-// --- prompts --------------------------------------------------------------
+// --- pre-answered questions (the unattended path) ---------------------------
+
+/// The flag that answers each question, and the `OMNICAL_SETUP_*` variable
+/// behind it, spelled out so every error message can name both.
+///
+/// The error message is the *product* here. An unattended run that fails must
+/// say which variable to set and what it will accept; a bare "missing field" in
+/// a `docker compose up` log is a support ticket, and the whole point of the
+/// unattended path is that it is not one.
+const FLAG_DATA_DIR: &str = "--data-dir (OMNICAL_SETUP_DATA_DIR)";
+const FLAG_BIND: &str = "--bind (OMNICAL_SETUP_BIND)";
+const FLAG_PUBLIC_URL: &str = "--public-url (OMNICAL_SETUP_PUBLIC_URL)";
+const FLAG_TLS: &str = "--tls (OMNICAL_SETUP_TLS)";
+const FLAG_REGISTRATION: &str = "--registration (OMNICAL_SETUP_REGISTRATION)";
+const FLAG_ADMIN_EMAIL: &str = "--admin-email (OMNICAL_SETUP_ADMIN_EMAIL)";
+const ENV_ADMIN_PASSWORD: &str = "OMNICAL_SETUP_ADMIN_PASSWORD";
+
+/// A question that was answered ahead of time, or that still needs asking.
+///
+/// * `Some(answer)` — the caller got its value, validated with the *same*
+///   predicate the prompt would have used, so a pre-answered value is not
+///   subject to laxer rules than a typed one.
+/// * `None` — ask the question.
+///
+/// Unattended and unanswered is an **error**, never a default. That is the
+/// whole safety property of this mode: `read_line` returning `None` at end of
+/// input already fails loudly (§18.6 burn scar 1), and this keeps that true
+/// when the input is not stdin at all.
+fn preanswered(
+    answer: Option<&str>,
+    flag: &str,
+    unattended: bool,
+    validate: impl Fn(&str) -> Result<()>,
+) -> Result<Option<String>> {
+    let Some(answer) = answer else {
+        if unattended {
+            bail!(
+                "unattended setup needs an answer for this question: pass {flag}\n\
+                 \x20   (run `rustical setup` without --unattended to be asked instead)"
+            );
+        }
+        return Ok(None);
+    };
+    validate(answer).map_err(|reason| anyhow!("{flag}: {reason}"))?;
+    Ok(Some(answer.trim().to_owned()))
+}
+
+fn validate_email(answer: &str) -> Result<()> {
+    if answer.contains('@') && answer.len() > 3 {
+        Ok(())
+    } else {
+        Err(anyhow!("that does not look like an email address"))
+    }
+}
+
+fn validate_url(what: &str, answer: &str) -> Result<String> {
+    url::Url::parse(answer)
+        .map(|_| answer.to_owned())
+        .map_err(|e| anyhow!("{what}: {e}"))
+}
+
+fn parse_tls(answer: &str) -> Result<TlsChoice> {
+    TlsChoice::parse_word(answer)
+        .ok_or_else(|| anyhow!("{FLAG_TLS} must be one of: proxy, dav-tls, none"))
+}
+
+fn parse_registration(answer: &str) -> Result<RegistrationChoice> {
+    RegistrationChoice::parse_word(answer)
+        .ok_or_else(|| anyhow!("{FLAG_REGISTRATION} must be one of: invite-only, open, closed"))
+}
 
 /// Ask until the answer validates. An empty answer takes the default.
 fn prompt_text(
@@ -685,6 +1046,38 @@ fn prompt_choice<T: Copy>(
         )?;
     }
     bail!("giving up on: {label}")
+}
+
+/// A password for a new administrator, from the environment or the prompt.
+///
+/// The supplied password is held to the **same** length floor as a typed one.
+/// An unattended path that accepted a 4-character password because nobody was
+/// watching would be the worst version of this feature.
+fn new_password(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    admin: &str,
+    interactive: bool,
+    min_password_length: usize,
+    answers: &SetupAnswers,
+) -> Result<String> {
+    let minimum = min_password_length.max(MIN_ADMIN_PASSWORD);
+    if let Some(password) = answers.admin_password.as_deref() {
+        if password.chars().count() < minimum {
+            bail!("{ENV_ADMIN_PASSWORD} is too short — at least {minimum} characters");
+        }
+        return Ok(password.to_owned());
+    }
+    if answers.unattended {
+        bail!(
+            "unattended setup cannot ask for the administrator's password.\n\
+             \x20   Set {ENV_ADMIN_PASSWORD} (environment only, never a flag: an argument \
+             would be visible in `ps`).\n\
+             \x20   It is read only when this account does not exist yet, so it can be \
+             removed from the environment after the first run."
+        );
+    }
+    prompt_new_password(input, output, admin, interactive, min_password_length)
 }
 
 /// A password for a new administrator: typed twice, masked on a terminal, and
@@ -892,13 +1285,7 @@ fn prompt_imap(
 }
 
 fn prompt_email(input: &mut impl BufRead, output: &mut impl Write, label: &str) -> Result<String> {
-    prompt_text(input, output, label, DEFAULT_ADMIN, |answer| {
-        if answer.contains('@') && answer.len() > 3 {
-            Ok(())
-        } else {
-            Err(anyhow!("that does not look like an email address"))
-        }
-    })
+    prompt_text(input, output, label, DEFAULT_ADMIN, validate_email)
 }
 
 fn prompt_port(
@@ -947,8 +1334,8 @@ fn prompt_yes_no(
 #[cfg(test)]
 mod tests {
     use super::{
-        RegistrationChoice, TlsChoice, generate_rsvp_secret, prompt_choice, prompt_text,
-        prompt_yes_no,
+        RegistrationChoice, SetupAnswers, TlsChoice, generate_rsvp_secret, preanswered,
+        prompt_choice, prompt_text, prompt_yes_no,
     };
     use crate::config::RegistrationConfig;
     use anyhow::anyhow;
@@ -1120,5 +1507,248 @@ mod tests {
         assert_eq!(super::bind_port("0.0.0.0:4000"), "4000");
         assert_eq!(super::bind_port("127.0.0.1:8443"), "8443");
         assert_eq!(super::bind_port("[::]:4000"), "4000");
+    }
+
+    /// The `OMNICAL_SETUP_*` variables must do nothing at all unless
+    /// `--unattended` was asked for.
+    ///
+    /// These flags are `env`-backed, so clap fills them in regardless — an
+    /// `OMNICAL_SETUP_DATA_DIR` in the environment otherwise pre-answers
+    /// question 1 of the *interactive* wizard, which shifts a piped answer
+    /// script by one line and lets the next answer (a filesystem path) be
+    /// accepted as the listen address. `install.sh` sets that variable, and the
+    /// resulting config said `bind = "/var/lib/omnical"`. See
+    /// `SetupAnswers::from_args`.
+    #[test]
+    fn test_environment_answers_are_inert_without_unattended() {
+        let args = super::SetupArgs {
+            unattended: false,
+            data_dir: Some("/var/lib/omnical".to_owned()),
+            bind: Some("127.0.0.1:4000".to_owned()),
+            public_url: Some("https://cal.example.com".to_owned()),
+            tls: Some("proxy".to_owned()),
+            registration: Some("open".to_owned()),
+            admin_email: Some("someone@example.com".to_owned()),
+            admin_password: Some("a-long-enough-password".to_owned()),
+        };
+        let answers = super::SetupAnswers::from_args(&args);
+        assert!(!answers.unattended);
+        assert_eq!(answers.data_dir, None);
+        assert_eq!(answers.bind, None);
+        assert_eq!(answers.public_url, None);
+        assert_eq!(answers.tls, None);
+        assert_eq!(answers.registration, None);
+        assert_eq!(answers.admin_email, None);
+        assert_eq!(answers.admin_password, None);
+    }
+
+    /// …and with `--unattended` they are all live, including the password.
+    #[test]
+    fn test_environment_answers_are_used_with_unattended() {
+        let args = super::SetupArgs {
+            unattended: true,
+            data_dir: Some("/var/lib/omnical".to_owned()),
+            bind: Some("127.0.0.1:4000".to_owned()),
+            public_url: Some("https://cal.example.com".to_owned()),
+            tls: Some("proxy".to_owned()),
+            registration: Some("open".to_owned()),
+            admin_email: Some("someone@example.com".to_owned()),
+            admin_password: Some("a-long-enough-password".to_owned()),
+        };
+        let answers = super::SetupAnswers::from_args(&args);
+        assert!(answers.unattended);
+        assert_eq!(answers.data_dir.as_deref(), Some("/var/lib/omnical"));
+        assert_eq!(answers.bind.as_deref(), Some("127.0.0.1:4000"));
+        assert_eq!(answers.tls.as_deref(), Some("proxy"));
+        assert_eq!(
+            answers.admin_password.as_deref(),
+            Some("a-long-enough-password")
+        );
+    }
+
+    // --- the unattended path ------------------------------------------------
+
+    /// A pre-answered question is validated by the *same* predicate the prompt
+    /// would have used. If these drifted, an unattended install would quietly
+    /// accept a bind address the interactive one rejects.
+    #[test]
+    fn test_preanswered_runs_the_prompt_validator() {
+        let validator = |answer: &str| {
+            if answer.contains(':') {
+                Ok(())
+            } else {
+                Err(anyhow!("not an address"))
+            }
+        };
+        assert_eq!(
+            preanswered(Some("0.0.0.0:4000"), "--bind", true, validator)
+                .unwrap()
+                .as_deref(),
+            Some("0.0.0.0:4000")
+        );
+        // A single line carrying the flag *and* the reason, rather than an
+        // `anyhow` context chain: `{}` formatting shows only the outermost error, so
+        // a context here would put "not an address" nowhere a log reader ever sees
+        // it — the message is the product in a `docker compose up` log.
+        let error = preanswered(
+            Some("nonsense"),
+            "--bind (OMNICAL_SETUP_BIND)",
+            true,
+            validator,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not an address"), "{error}");
+        assert!(
+            error.contains("--bind"),
+            "the error must name the flag: {error}"
+        );
+    }
+
+    /// The safety property of the whole mode: unattended + unanswered is an
+    /// error, never a default. §18.6's burn scar was a wizard that took
+    /// defaults when input ran dry; this is the same rule one level up.
+    #[test]
+    fn test_preanswered_never_defaults_when_unattended() {
+        let error = preanswered(None, super::FLAG_DATA_DIR, true, |_: &str| Ok(()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unattended setup needs an answer"),
+            "{error}"
+        );
+        assert!(error.contains("OMNICAL_SETUP_DATA_DIR"), "{error}");
+    }
+
+    /// Without `--unattended` a missing answer still means "ask", which is what
+    /// keeps the existing wizard and its 12 tests untouched.
+    #[test]
+    fn test_preanswered_asks_when_not_unattended() {
+        assert!(
+            preanswered(None, "--data-dir", false, |_| Ok(()))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_preanswered_trims() {
+        assert_eq!(
+            preanswered(
+                Some("  /var/lib/omnical \n"),
+                "--data-dir",
+                true,
+                |_| Ok(())
+            )
+            .unwrap(),
+            Some("/var/lib/omnical".to_owned())
+        );
+    }
+
+    /// The letters the interactive prompt offers and the words a `.env` file
+    /// carries must accept the same set of choices. A new option added to
+    /// `OPTIONS` without a word here would be reachable by hand and not by
+    /// container — the exact silent gap §8.1's two channels must not have.
+    #[test]
+    fn test_parse_word_covers_every_letter_in_options() {
+        for (letter, word) in [('c', "proxy"), ('d', "dav-tls"), ('n', "none")] {
+            assert!(
+                TlsChoice::OPTIONS.contains(letter),
+                "{letter} missing from OPTIONS"
+            );
+            assert_eq!(TlsChoice::parse(letter), TlsChoice::parse_word(word));
+            assert_eq!(
+                TlsChoice::parse(letter),
+                TlsChoice::parse_word(&letter.to_string())
+            );
+        }
+        for (letter, word) in [('i', "invite-only"), ('o', "open"), ('c', "closed")] {
+            assert!(
+                RegistrationChoice::OPTIONS.contains(letter),
+                "{letter} missing from OPTIONS"
+            );
+            assert_eq!(
+                RegistrationChoice::parse(letter),
+                RegistrationChoice::parse_word(word)
+            );
+        }
+    }
+
+    /// A `.env` value is written by humans: case, padding and the word form.
+    #[test]
+    fn test_parse_word_is_forgiving_about_spelling_and_case() {
+        assert_eq!(TlsChoice::parse_word(" Proxy "), Some(TlsChoice::Proxy));
+        assert_eq!(TlsChoice::parse_word("DAV-TLS"), Some(TlsChoice::DavTls));
+        assert_eq!(TlsChoice::parse_word("None"), Some(TlsChoice::None));
+        assert_eq!(TlsChoice::parse_word("tls-terminated"), None);
+        assert_eq!(
+            RegistrationChoice::parse_word("INVITE-ONLY"),
+            Some(RegistrationChoice::InviteOnly)
+        );
+        assert_eq!(RegistrationChoice::parse_word("yes"), None);
+    }
+
+    /// An unattended password is held to the same floor as a typed one, and is
+    /// never read when the account already exists.
+    #[tokio::test]
+    async fn test_unattended_password_obeys_the_length_floor() {
+        let answers = SetupAnswers {
+            unattended: true,
+            admin_password: Some("short".to_owned()),
+            ..SetupAnswers::default()
+        };
+        let error = super::new_password(
+            &mut Cursor::new(Vec::new()),
+            &mut Vec::new(),
+            "admin@example.com",
+            false,
+            12,
+            &answers,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("too short"), "{error}");
+        assert!(error.contains("12"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn test_unattended_without_a_password_says_where_to_put_it() {
+        let answers = SetupAnswers {
+            unattended: true,
+            ..SetupAnswers::default()
+        };
+        let error = super::new_password(
+            &mut Cursor::new(Vec::new()),
+            &mut Vec::new(),
+            "admin@example.com",
+            false,
+            12,
+            &answers,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("OMNICAL_SETUP_ADMIN_PASSWORD"), "{error}");
+        // The `ps` warning is the reason it is an env var and not a flag, and it
+        // is only useful if the message actually says so.
+        assert!(error.contains("ps"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn test_unattended_password_is_taken_verbatim() {
+        let answers = SetupAnswers {
+            unattended: true,
+            admin_password: Some("correct-horse-battery".to_owned()),
+            ..SetupAnswers::default()
+        };
+        let password = super::new_password(
+            &mut Cursor::new(Vec::new()),
+            &mut Vec::new(),
+            "admin@example.com",
+            false,
+            12,
+            &answers,
+        )
+        .unwrap();
+        assert_eq!(password, "correct-horse-battery");
     }
 }

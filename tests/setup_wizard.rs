@@ -14,10 +14,16 @@
 //! already holds, so a re-run cannot talk someone into creating a second
 //! administrator.
 use rustical::config::Config;
-use rustical::{RegistrationChoice, SetupReport, TlsChoice, run_setup};
+use rustical::{
+    RegistrationChoice, SetupAnswers, SetupReport, TlsChoice, run_setup, run_setup_with,
+};
 use rustical_store::auth::AuthenticationProvider;
-use rustical_store_sqlite::{SqlitePrincipalStore, create_db_pool};
+use rustical_store::{AddressbookReadStore, CalendarReadStore, CollectionOperation};
+use rustical_store_sqlite::{
+    SqliteAddressbookStore, SqliteCalendarStore, SqlitePrincipalStore, create_db_pool,
+};
 use std::io::Cursor;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// A first run: accept every default except a real data directory, a public
@@ -525,4 +531,449 @@ async fn test_config_file_location_is_honoured() {
         .unwrap();
     assert_eq!(report.config_file, config_file);
     assert!(config_file.is_file(), "{}", config_file.display());
+}
+
+// ── the unattended path (PLAN_DEPLOYMENTS.md §8.1, row 40) ───────────────────
+//
+// The Compose channel has to bring a server up with nobody at the keyboard.
+// The image is `FROM scratch` (rustical/Dockerfile:44) so there is no shell to
+// pipe a scripted stdin from, and `stdin_open` would leave the wizard blocked on
+// a read that never ends. So the wizard itself takes the answers, and these
+// tests are the gate that it does — on this host, with the real database, which
+// is the part of row 40 that does not need Docker.
+
+/// The complete unattended answer set, as `compose.omnical.yml` supplies it.
+fn unattended_answers(data_dir: &Path) -> SetupAnswers {
+    SetupAnswers {
+        unattended: true,
+        data_dir: Some(data_dir.to_string_lossy().into_owned()),
+        bind: Some("0.0.0.0:4000".to_owned()),
+        public_url: Some("https://cal.example.com".to_owned()),
+        tls: Some("proxy".to_owned()),
+        registration: Some("invite-only".to_owned()),
+        admin_email: Some("owner@example.com".to_owned()),
+        admin_password: Some("correct-horse-battery".to_owned()),
+    }
+}
+
+/// The administrator the wizard creates must be able to sync *something*.
+///
+/// The wizard's third next step is "sign in as this administrator, then add a
+/// client from the calendar page". Before `register::seed_collections` was
+/// shared with the wizard, that promise was false: the account was created with
+/// no collections at all, and the first thing a self-hoster's client did —
+/// `PROPFIND /caldav/principal/<admin>/personal/` — was a 404, on an account
+/// the installer had just created for them. Found by the §8.1 self-host gate
+/// (`router-dav/scripts/selfhost-gate.sh`), which is why it is asserted here
+/// too: the shell gate needs a release build and a server, this does not.
+#[tokio::test]
+async fn test_the_administrator_gets_collections() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    let (report, output) = run(dir.path(), &first_run_answers(&data_dir)).await;
+    assert!(report.admin_created);
+
+    let pool = create_db_pool(&report.db_path.to_string_lossy(), false)
+        .await
+        .unwrap();
+    let cal_store = SqliteCalendarStore::new(pool.clone(), send_channel(), true);
+    let addr_store = SqliteAddressbookStore::new(pool.clone(), send_channel(), true);
+    let admin = report.admin.as_str();
+
+    for cal in ["personal", "tasks"] {
+        // `get_calendars` rather than `get_calendar`: the latter returns a
+        // `Calendar` and *errors* on a missing id, so "does it exist" would be
+        // an `Err` to catch rather than an `Option` to read.
+        let ids: Vec<String> = cal_store
+            .get_calendars(admin)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|calendar| calendar.id)
+            .collect();
+        assert!(
+            ids.contains(&cal.to_owned()),
+            "the wizard created {admin} with no '{cal}' calendar (has {ids:?})"
+        );
+    }
+    let book_ids: Vec<String> = addr_store
+        .get_addressbooks(admin)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|book| book.id)
+        .collect();
+    assert!(
+        book_ids.contains(&"personal".to_owned()),
+        "the wizard created {admin} with no 'personal' addressbook (has {book_ids:?})"
+    );
+
+    // Not empty either: a first sync that returns nothing looks identical to a
+    // broken server, and this is the first sync a self-hoster ever sees.
+    let objects = cal_store.get_objects(admin, "personal").await.unwrap();
+    assert!(
+        !objects.is_empty(),
+        "the seeded 'personal' calendar is empty"
+    );
+    assert!(
+        objects
+            .iter()
+            .any(|(_id, object)| object.get_ics().contains("SUMMARY:Welcome")),
+        "no welcome object among {}",
+        objects.len()
+    );
+    pool.close().await;
+
+    // …and it is said out loud, because "3. add a client" is only true if the
+    // collections exist.
+    assert!(
+        output.contains("'personal' calendar"),
+        "the wizard does not report the collections it created:\n{output}"
+    );
+}
+
+fn send_channel() -> tokio::sync::mpsc::Sender<CollectionOperation> {
+    let (send, _recv) = tokio::sync::mpsc::channel(1000);
+    send
+}
+
+/// An unattended run on an **empty stdin**, which is the whole point: a
+/// container's stdin is either closed or a socket nobody writes to.
+#[tokio::test]
+async fn test_unattended_needs_no_stdin_at_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    let answers = unattended_answers(&data_dir);
+    let mut input = Cursor::new(Vec::new());
+    let mut output: Vec<u8> = Vec::new();
+    let config_file = dir.path().join("config.toml");
+
+    let report = run_setup_with(&mut input, &mut output, &config_file, false, &answers)
+        .await
+        .expect("an unattended run must complete with nothing on stdin");
+    let printed = String::from_utf8(output).unwrap();
+
+    assert!(report.unattended);
+    assert!(report.admin_created);
+    assert_eq!(report.admin, "owner@example.com");
+    assert_eq!(report.tls, TlsChoice::Proxy);
+    assert_eq!(report.registration, RegistrationChoice::InviteOnly);
+    assert_eq!(report.data_dir, data_dir);
+    assert!(report.db_path.is_file(), "{}", report.db_path.display());
+    assert_eq!(principals(&report.db_path).await, ["owner@example.com"]);
+    assert!(
+        password_hash(&report.db_path, "owner@example.com")
+            .await
+            .is_some()
+    );
+    assert!(
+        printed.contains("Unattended"),
+        "a container log is the only place the operator can see how the config was \
+         decided: {printed}"
+    );
+
+    // Same guarantees as the interactive path, or it is not the same command.
+    assert_eq!(report.config_file, config_file);
+    let mode = std::fs::metadata(&config_file)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "the config holds secrets; mode was {mode:o}");
+}
+
+/// A missing answer is a **loud failure**, not a default. This is the test that
+/// makes the unattended path safe to hand to a provisioning system: the failure
+/// mode of a typo is a stopped container with a legible reason.
+#[tokio::test]
+async fn test_unattended_missing_answer_is_an_error_not_a_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut answers = unattended_answers(&dir.path().join("data"));
+    answers.tls = None;
+    let mut input = Cursor::new(Vec::new());
+    let mut output: Vec<u8> = Vec::new();
+
+    let error = run_setup_with(
+        &mut input,
+        &mut output,
+        &dir.path().join("config.toml"),
+        false,
+        &answers,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(
+        error.contains("unattended setup needs an answer"),
+        "{error}"
+    );
+    assert!(error.contains("OMNICAL_SETUP_TLS"), "{error}");
+    assert!(
+        !dir.path().join("config.toml").exists(),
+        "a run that could not answer everything must not leave a half-written config"
+    );
+}
+
+/// The unattended path is a re-run, not a first-run-only code path: it must
+/// behave exactly like the interactive re-run against a live install.
+#[tokio::test]
+async fn test_unattended_rerun_preserves_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    let config_file = dir.path().join("config.toml");
+    let answers = unattended_answers(&data_dir);
+
+    let first = run_setup_with(
+        &mut Cursor::new(Vec::new()),
+        &mut Vec::new(),
+        &config_file,
+        false,
+        &answers,
+    )
+    .await
+    .unwrap();
+    let hash_after_first = password_hash(&first.db_path, "owner@example.com").await;
+
+    // The password is removed from the environment, exactly as the compose
+    // comment tells an operator to do after the first run. A re-run that needed
+    // it would make that instruction a lie.
+    let rerun = SetupAnswers {
+        admin_password: None,
+        ..answers.clone()
+    };
+    let second = run_setup_with(
+        &mut Cursor::new(Vec::new()),
+        &mut Vec::new(),
+        &config_file,
+        false,
+        &rerun,
+    )
+    .await
+    .expect("a re-run must not need the administrator password");
+
+    assert!(!second.admin_created, "a re-run must not create anything");
+    assert!(
+        !second.rsvp_secret_generated,
+        "the RSVP secret must be kept"
+    );
+    assert_eq!(principals(&second.db_path).await, ["owner@example.com"]);
+    assert_eq!(
+        password_hash(&second.db_path, "owner@example.com").await,
+        hash_after_first,
+        "a re-run must never reset the administrator's password"
+    );
+}
+
+/// An unattended run changes the answers it was given — a public URL, a bind, a
+/// registration mode — and leaves the ones it was not given alone.
+#[tokio::test]
+async fn test_unattended_applies_its_answers_to_the_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    let config_file = dir.path().join("config.toml");
+    let answers = unattended_answers(&data_dir);
+    let report = run_setup_with(
+        &mut Cursor::new(Vec::new()),
+        &mut Vec::new(),
+        &config_file,
+        false,
+        &answers,
+    )
+    .await
+    .unwrap();
+
+    // Loading it back through the production config type is the real assertion:
+    // it proves `deny_unknown_fields` is happy with what the wizard wrote
+    // (§8.3's gate, row 45) and lets us read the values back.
+    let text = std::fs::read_to_string(&report.config_file).unwrap();
+    let config: Config = toml::from_str(&text).expect("the written config must load");
+
+    assert_eq!(
+        config.sqlite_db_path().as_deref(),
+        Some(report.db_path.as_path()),
+        "the config's db_url and the database the wizard actually opened must be \
+         the same file — this is the one that silently creates two installs"
+    );
+    assert_eq!(config.http.bind.as_deref(), Some("0.0.0.0:4000"));
+    assert!(
+        config.subscriptions.enabled,
+        "a public URL means the share feeds are worth mounting"
+    );
+    assert_eq!(
+        config.subscriptions.public_url.as_deref(),
+        Some("https://cal.example.com")
+    );
+    assert!(config.registration.enabled);
+    assert!(config.registration.invite_required);
+    assert!(!config.scheduling.enabled, "no mail was configured");
+}
+
+/// An unattended run is a *provisioning* surface, so the one answer it must
+/// never take is a mail password: that value ends up in a config file which
+/// ends up in a volume, a CI log or an `inspect` output.
+#[tokio::test]
+async fn test_unattended_never_configures_mail_but_keeps_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    let config_file = dir.path().join("config.toml");
+    let mut output: Vec<u8> = Vec::new();
+
+    // First, an interactive run *with* SMTP, as today. The five SMTP answers
+    // have to be spliced in at the point the wizard asks them — which is
+    // immediately after the yes/no, and *before* the IMAP question (§18.6 burn
+    // scar 1: the answer script is a contract).
+    let mut smtp_answers = first_run_answers(&data_dir);
+    smtp_answers.splice(
+        5..5,
+        [
+            "owner@example.com", // from address
+            "smtp.example.com",  // host
+            "587",               // port
+            "owner@example.com", // username
+            "smtp-password",     // password
+        ]
+        .iter()
+        .map(|s| (*s).to_owned()),
+    );
+    smtp_answers[4] = "y".to_owned(); // send invitations over SMTP?
+    let interactive = run(dir.path(), &smtp_answers).await;
+    assert!(interactive.0.config_file.is_file());
+
+    // Now an unattended re-run over the same config, with no mail answers
+    // offered at all. The account must survive untouched.
+    let answers = unattended_answers(&data_dir);
+    let report = run_setup_with(
+        &mut Cursor::new(Vec::new()),
+        &mut output,
+        &config_file,
+        false,
+        &answers,
+    )
+    .await
+    .expect("an unattended re-run must not be blocked by existing mail config");
+
+    let text = std::fs::read_to_string(&report.config_file).unwrap();
+    let config: Config = toml::from_str(&text).unwrap();
+    assert_eq!(
+        config.scheduling.smtp.len(),
+        1,
+        "an unattended run must not silently drop a configured mail account: \
+         losing SMTP breaks every invitation with no visible cause"
+    );
+    assert_eq!(config.scheduling.smtp[0].host, "smtp.example.com");
+    assert!(config.scheduling.enabled);
+
+    let printed = String::from_utf8(output).unwrap();
+    assert!(
+        printed.contains("never reads or writes a mail password"),
+        "and it must say so: {printed}"
+    );
+}
+
+/// A fresh unattended install with no public URL is legitimate — the proxy is
+/// not configured yet. The share feeds stay off, and the re-run does not clear
+/// a public URL an earlier run had set.
+#[tokio::test]
+async fn test_unattended_public_url_sets_or_keeps_never_clears() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    let config_file = dir.path().join("config.toml");
+
+    // No public URL at all on the first run.
+    let answers = SetupAnswers {
+        public_url: None,
+        ..unattended_answers(&data_dir)
+    };
+    let first = run_setup_with(
+        &mut Cursor::new(Vec::new()),
+        &mut Vec::new(),
+        &config_file,
+        false,
+        &answers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.public_url, None);
+    let text = std::fs::read_to_string(&config_file).unwrap();
+    let config: Config = toml::from_str(&text).unwrap();
+    assert_eq!(config.subscriptions.public_url, None);
+    assert!(!config.subscriptions.enabled);
+
+    // Then the proxy exists and the operator sets it.
+    let with_url = unattended_answers(&data_dir);
+    run_setup_with(
+        &mut Cursor::new(Vec::new()),
+        &mut Vec::new(),
+        &config_file,
+        false,
+        &with_url,
+    )
+    .await
+    .unwrap();
+    let text = std::fs::read_to_string(&config_file).unwrap();
+    let config: Config = toml::from_str(&text).unwrap();
+    assert_eq!(
+        config.subscriptions.public_url.as_deref(),
+        Some("https://cal.example.com")
+    );
+
+    // Then the variable is dropped from the environment — an operator tidying
+    // up, or a compose file whose default changed. The public URL must survive,
+    // because a provisioning run is the wrong place to lose a working hostname.
+    let without_url = SetupAnswers {
+        public_url: None,
+        ..unattended_answers(&data_dir)
+    };
+    let third = run_setup_with(
+        &mut Cursor::new(Vec::new()),
+        &mut Vec::new(),
+        &config_file,
+        false,
+        &without_url,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        third.public_url.as_deref(),
+        Some("https://cal.example.com"),
+        "an unattended run may set or keep the public URL, never clear it"
+    );
+}
+
+/// A password supplied by a provisioning system is still a password: the same
+/// floor, or the unattended path is a way to create a weak administrator.
+#[tokio::test]
+async fn test_unattended_password_still_obeys_the_floor() {
+    let dir = tempfile::tempdir().unwrap();
+    let answers = SetupAnswers {
+        admin_password: Some("short".to_owned()),
+        ..unattended_answers(&dir.path().join("data"))
+    };
+    let error = run_setup_with(
+        &mut Cursor::new(Vec::new()),
+        &mut Vec::new(),
+        &dir.path().join("config.toml"),
+        false,
+        &answers,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("too short"), "{error}");
+
+    // The unit test in setup.rs covers the branch directly; this one proves the
+    // error escapes the whole wizard having already done real work. Note the
+    // config *is* written by then — the wizard writes it before it touches the
+    // database on purpose, so a re-run is the fix for a failed one. What must
+    // not exist is the administrator.
+    let db_path = dir.path().join("data").join("db.sqlite3");
+    assert!(
+        db_path.exists(),
+        "the wizard got as far as the database before the password check"
+    );
+    assert!(
+        principals(&db_path).await.is_empty(),
+        "a rejected password must not leave an account behind"
+    );
 }

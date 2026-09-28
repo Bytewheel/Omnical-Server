@@ -19,7 +19,10 @@ pub use guest_shares::{GuestSharesArgs, cmd_guest_shares};
 pub use health::{HealthArgs, cmd_health};
 pub use invites::{InvitesArgs, cmd_invites};
 pub use principals::{PrincipalsArgs, cmd_principals};
-pub use setup::{RegistrationChoice, SetupArgs, SetupReport, TlsChoice, cmd_setup, run_setup};
+pub use setup::{
+    RegistrationChoice, SetupAnswers, SetupArgs, SetupReport, TlsChoice, cmd_setup, run_setup,
+    run_setup_with,
+};
 pub use subscriptions::{SubscriptionsArgs, cmd_subscriptions};
 
 #[derive(Debug, Parser)]

@@ -539,8 +539,9 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
         }
     }
 
-    // Seed collections (discovery parity, PLAN.md §17.8.2).
-    if let Err(err) = seed_collections(&state, email).await {
+    // Seed collections (discovery parity, PLAN.md §17.8.2). Shared with
+    // `rustical setup` — see `seed_collections`.
+    if let Err(err) = seed_collections(&*state.cal_store, &*state.addr_store, email).await {
         error!(%err, "registration: collection seeding failed");
         return internal_error();
     }
@@ -582,8 +583,33 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
     render_success(email, displayname, host, &app_tokens, &feeds).into_response()
 }
 
-async fn seed_collections<AS: AddressbookStore, CS: CalendarStore>(
-    state: &RegisterState<AS, CS>,
+/// Create the collections a new account needs to be useful: a `personal`
+/// calendar, a `tasks` calendar and a `personal` addressbook, with a welcome
+/// object in each.
+///
+/// **Shared with `rustical setup`**, deliberately. The wizard prints "sign in as
+/// this administrator, then add a client from the calendar page" as its third
+/// next step; before this was shared, that promise was false — the wizard's
+/// administrator had no collections at all, so the first thing a client did,
+/// `PROPFIND /caldav/principal/<admin>/personal/`, was a **404**, on an account
+/// the installer had just created for them. Found by the §8.1 self-host gate
+/// (`router-dav/scripts/selfhost-gate.sh`), not by reading the code: both
+/// callers would have passed their own tests.
+///
+/// The signature takes the two stores rather than a `RegisterState` because the
+/// wizard has a pool and a principal store, not a `RegisterState` — and
+/// manufacturing one would have meant building a limiter and an
+/// `AuthenticationProvider` to reach a function that needs neither.
+///
+/// # Errors
+///
+/// Propagates whatever the calendar or addressbook store returns. Registration
+/// treats that as a failed sign-up; the wizard treats it as a failed install
+/// and says so, rather than leaving a principal with no calendar behind it.
+#[allow(clippy::missing_errors_doc)]
+pub async fn seed_collections<AS: AddressbookStore, CS: CalendarStore>(
+    cal_store: &CS,
+    addr_store: &AS,
     email: &str,
 ) -> Result<(), StoreError> {
     let personal_calendar = Calendar {
@@ -606,7 +632,7 @@ async fn seed_collections<AS: AddressbookStore, CS: CalendarStore>(
         push_topic: random_token(),
         components: vec![CalendarObjectType::Event, CalendarObjectType::Journal],
     };
-    state.cal_store.insert_calendar(personal_calendar).await?;
+    cal_store.insert_calendar(personal_calendar).await?;
     let tasks_calendar = Calendar {
         id: "tasks".to_owned(),
         principal: email.to_owned(),
@@ -623,10 +649,9 @@ async fn seed_collections<AS: AddressbookStore, CS: CalendarStore>(
         push_topic: random_token(),
         components: vec![CalendarObjectType::Todo],
     };
-    state.cal_store.insert_calendar(tasks_calendar).await?;
+    cal_store.insert_calendar(tasks_calendar).await?;
 
-    state
-        .cal_store
+    cal_store
         .put_objects(
             email,
             "personal",
@@ -637,8 +662,7 @@ async fn seed_collections<AS: AddressbookStore, CS: CalendarStore>(
             false,
         )
         .await?;
-    state
-        .cal_store
+    cal_store
         .put_objects(
             email,
             "tasks",
@@ -656,7 +680,7 @@ async fn seed_collections<AS: AddressbookStore, CS: CalendarStore>(
         synctoken: 0,
         push_topic: random_token(),
     };
-    state.addr_store.insert_addressbook(personal_book).await?;
+    addr_store.insert_addressbook(personal_book).await?;
     Ok(())
 }
 
