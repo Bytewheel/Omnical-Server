@@ -29,6 +29,7 @@ use setup_tracing::setup_tracing;
 use std::fs;
 use std::os::unix::fs::FileTypeExt;
 use std::sync::Arc;
+use store_bundle::StoreBundle;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::Receiver;
 use tower::Layer;
@@ -44,6 +45,7 @@ pub mod export;
 pub mod register;
 pub mod rsvp;
 mod setup_tracing;
+pub mod store_bundle;
 // Shared with the frontend crate so the portal prints byte-identical
 // export URLs to the CLI (PLAN.md §17.8.4).
 pub use rustical_frontend::url_builder;
@@ -82,23 +84,17 @@ pub enum Command {
     Setup(commands::SetupArgs),
 }
 
+/// The twelve stores, as a named [`StoreBundle`].
+///
+/// §3.2 needs one of these per tenant, and the tuple this replaces had two
+/// adjacent `Arc<dyn …>` fields over the same pool (`subscription_store` and
+/// `invite_store`) that a reorder would not have caught. The construction body
+/// below is unchanged from the tuple version; only the return shape differs.
 #[allow(clippy::missing_errors_doc)]
-pub async fn get_data_stores(
+pub async fn get_store_bundle(
     migrate: bool,
     config: &DataStoreConfig,
-) -> Result<(
-    Arc<impl AddressbookStore + PrefixedCalendarStore>,
-    Arc<impl CalendarStore>,
-    Arc<impl DavPushStore>,
-    Arc<impl AuthenticationProvider>,
-    Receiver<CollectionOperation>,
-    Arc<dyn SchedulingStore>,
-    Arc<dyn SubscriptionStore>,
-    Arc<dyn InviteStore>,
-    Arc<dyn CalendarSourceStore>,
-    Arc<dyn CollectionShareStore>,
-    Arc<dyn PasswordResetStore>,
-)> {
+) -> Result<StoreBundle<SqlitePrincipalStore>> {
     Ok(match &config {
         DataStoreConfig::Sqlite(SqliteDataStoreConfig {
             db_url,
@@ -152,21 +148,62 @@ pub async fn get_data_stores(
                 addressbook_store.validate_objects(&principal.id).await?;
             }
 
-            (
-                addressbook_store,
+            StoreBundle {
+                addr_store: addressbook_store,
                 cal_store,
                 dav_push_store,
-                principal_store,
-                recv,
+                auth_provider: principal_store,
+                update_recv: Some(recv),
                 scheduling_store,
                 subscription_store,
                 invite_store,
                 calendar_source_store,
                 share_store,
                 password_reset_store,
-            )
+            }
         }
     })
+}
+
+/// [`get_data_stores`] as a 12-tuple — **a shim**.
+///
+/// Kept so the five CLI call sites did not have to move in this commit, the
+/// same way `make_app` outlived `make_app_for` (§18.11). New code should call
+/// [`get_store_bundle`]: the tuple's element order is checked by nothing, and
+/// two of its fields are `Arc<dyn …>` over the same pool.
+#[allow(clippy::missing_errors_doc, clippy::type_complexity)]
+pub async fn get_data_stores(
+    migrate: bool,
+    config: &DataStoreConfig,
+) -> Result<(
+    Arc<impl AddressbookStore + PrefixedCalendarStore>,
+    Arc<impl CalendarStore>,
+    Arc<impl DavPushStore>,
+    Arc<impl AuthenticationProvider>,
+    Receiver<CollectionOperation>,
+    Arc<dyn SchedulingStore>,
+    Arc<dyn SubscriptionStore>,
+    Arc<dyn InviteStore>,
+    Arc<dyn CalendarSourceStore>,
+    Arc<dyn CollectionShareStore>,
+    Arc<dyn PasswordResetStore>,
+)> {
+    let b = get_store_bundle(migrate, config).await?;
+    Ok((
+        b.addr_store,
+        b.cal_store,
+        b.dav_push_store,
+        b.auth_provider,
+        b.update_recv.ok_or_else(|| {
+            anyhow::anyhow!("the DAV-Push channel was taken before the stores were unpacked")
+        })?,
+        b.scheduling_store,
+        b.subscription_store,
+        b.invite_store,
+        b.calendar_source_store,
+        b.share_store,
+        b.password_reset_store,
+    ))
 }
 
 #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
