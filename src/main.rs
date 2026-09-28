@@ -6,9 +6,10 @@ use figment::providers::{Env, Format, Toml};
 use rustical::config::Config;
 use rustical::{Args, Command};
 use rustical::{
-    cmd_gen_config, cmd_guest_shares, cmd_health, cmd_invites, cmd_principals, cmd_serve,
-    cmd_subscriptions,
+    cmd_backup, cmd_gen_config, cmd_guest_shares, cmd_health, cmd_invites, cmd_principals,
+    cmd_restore, cmd_serve, cmd_subscriptions,
 };
+use std::path::PathBuf;
 use tracing::warn;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -24,6 +25,10 @@ async fn main() -> Result<()> {
             .map_err(anyhow::Error::from)
     };
 
+    // Copied out before the match because `--include-config` needs the path and
+    // the closure above borrows `args`.
+    let config_file = PathBuf::from(&args.config_file);
+
     match args.command {
         Command::GenConfig(gen_config_args) => cmd_gen_config(gen_config_args),
         Command::Principals(principals_args) => {
@@ -36,6 +41,10 @@ async fn main() -> Result<()> {
         Command::GuestShare(guest_share_args) => {
             cmd_guest_shares(guest_share_args, parse_config()?).await
         }
+        Command::Backup(backup_args) => cmd_backup(backup_args, parse_config()?, &config_file)
+            .await
+            .map(|_| ()),
+        Command::Restore(restore_args) => cmd_restore(restore_args, parse_config()?).await,
         Command::Health(health_args) => {
             let config: Config = parse_config()?;
             cmd_health(config.http, health_args).await

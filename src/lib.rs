@@ -74,6 +74,10 @@ pub enum Command {
     Invites(InvitesArgs),
     #[command(about = "Manage per-calendar guest shares (Omnical §17.10)")]
     GuestShare(GuestSharesArgs),
+    #[command(about = "Write a verified backup archive of the database (PLAN_DEPLOYMENTS.md §8.4)")]
+    Backup(commands::BackupArgs),
+    #[command(about = "Restore a backup archive, verifying it first (§8.4)")]
+    Restore(commands::RestoreArgs),
 }
 
 #[allow(clippy::missing_errors_doc)]

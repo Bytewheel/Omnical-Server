@@ -8,6 +8,7 @@ use rustical_frontend::FrontendConfig;
 use rustical_scheduling::SchedulingConfig;
 
 pub mod app_token;
+pub mod backup;
 pub mod guest_shares;
 mod health;
 pub mod invites;
@@ -15,6 +16,10 @@ pub mod membership;
 pub mod principals;
 pub mod subscriptions;
 
+pub use backup::{
+    ArchiveEntry, BackupArgs, BackupManifest, CONFIG_ENTRY, DB_ENTRY, MANIFEST_ENTRY,
+    MANIFEST_FORMAT, RestoreArgs, cmd_backup, cmd_restore,
+};
 pub use guest_shares::{GuestSharesArgs, cmd_guest_shares};
 pub use health::{HealthArgs, cmd_health};
 pub use invites::{InvitesArgs, cmd_invites};
