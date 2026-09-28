@@ -349,3 +349,48 @@ pub struct Config {
     #[serde(default)]
     pub maintenance: MaintenanceConfig,
 }
+
+impl Config {
+    /// What a fresh install starts from.
+    ///
+    /// Shared by `rustical gen-config` and `rustical setup` on purpose:
+    /// `PLAN_DEPLOYMENTS.md` §8.3 requires the two config paths not to
+    /// diverge, and the only way to guarantee that is for both to build the
+    /// same value rather than two hand-maintained literals.
+    #[must_use]
+    pub fn default_config() -> Self {
+        Self {
+            http: HttpConfig::default(),
+            caldav: CalDavConfig::default(),
+            data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
+                db_url: "/var/lib/rustical/db.sqlite3".to_owned(),
+                run_repairs: true,
+                skip_broken: true,
+            }),
+            tracing: TracingConfig::default(),
+            frontend: FrontendConfig {
+                enabled: true,
+                allow_password_login: true,
+                ..FrontendConfig::default()
+            },
+            oidc: None,
+            dav_push: DavPushConfig::default(),
+            nextcloud_login: NextcloudLoginConfig::default(),
+            scheduling: SchedulingConfig::default(),
+            subscriptions: SubscriptionsConfig::default(),
+            registration: RegistrationConfig::default(),
+            maintenance: MaintenanceConfig::default(),
+        }
+    }
+
+    /// The SQLite file this config points at, or `None` for an in-memory
+    /// database. `db_url` may be a `sqlite://` URL with options, so it is
+    /// parsed the same way the server parses it rather than string-matched.
+    #[must_use]
+    pub fn sqlite_db_path(&self) -> Option<std::path::PathBuf> {
+        let DataStoreConfig::Sqlite(SqliteDataStoreConfig { db_url, .. }) = &self.data_store;
+        let options: sqlx::sqlite::SqliteConnectOptions = db_url.parse().ok()?;
+        let path = options.get_filename().to_path_buf();
+        (!path.as_os_str().is_empty()).then_some(path)
+    }
+}

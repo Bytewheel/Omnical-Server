@@ -78,6 +78,8 @@ pub enum Command {
     Backup(commands::BackupArgs),
     #[command(about = "Restore a backup archive, verifying it first (§8.4)")]
     Restore(commands::RestoreArgs),
+    #[command(about = "Interactive first-run setup wizard (PLAN_DEPLOYMENTS.md §8.2)")]
+    Setup(commands::SetupArgs),
 }
 
 #[allow(clippy::missing_errors_doc)]

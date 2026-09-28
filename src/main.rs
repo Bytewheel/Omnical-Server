@@ -7,7 +7,7 @@ use rustical::config::Config;
 use rustical::{Args, Command};
 use rustical::{
     cmd_backup, cmd_gen_config, cmd_guest_shares, cmd_health, cmd_invites, cmd_principals,
-    cmd_restore, cmd_serve, cmd_subscriptions,
+    cmd_restore, cmd_serve, cmd_setup, cmd_subscriptions,
 };
 use std::path::PathBuf;
 use tracing::warn;
@@ -45,6 +45,9 @@ async fn main() -> Result<()> {
             .await
             .map(|_| ()),
         Command::Restore(restore_args) => cmd_restore(restore_args, parse_config()?).await,
+        // The wizard builds the config itself, so it is not parsed here — that
+        // is the point: an operator without a config file is the normal case.
+        Command::Setup(setup_args) => cmd_setup(setup_args, &config_file).await,
         Command::Health(health_args) => {
             let config: Config = parse_config()?;
             cmd_health(config.http, health_args).await
