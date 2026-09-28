@@ -4,7 +4,7 @@ use crate::register::{RegistrationContext, register_router};
 use crate::rsvp::rsvp_router;
 use axum::Router;
 use axum::body::{Body, HttpBody};
-use axum::extract::{DefaultBodyLimit, Request};
+use axum::extract::{DefaultBodyLimit, Extension, Request};
 use axum::middleware::Next;
 use axum::response::{Redirect, Response};
 use axum::routing::{any, options};
@@ -20,6 +20,7 @@ use rustical_frontend::{FrontendConfig, frontend_router};
 use rustical_oidc::OidcConfig;
 use rustical_scheduling::Scheduler;
 use rustical_store::SubscriptionStore;
+use rustical_store::Tenant;
 use rustical_store::auth::AuthenticationProvider;
 use rustical_store::{
     AddressbookStore, CalendarSourceStore, CalendarStore, CombinedCalendarStore,
@@ -92,6 +93,25 @@ pub struct AppStores<AS, CS, DP, AP> {
     pub password_reset_store: Arc<dyn rustical_store::PasswordResetStore>,
 }
 
+/// Hand the tenant to every handler in `router`, as an `Extension`.
+///
+/// This is what makes the tenant parameter useful rather than decorative.
+/// Exactly one thing consumes it today, and that consumer is the point: the
+/// `export_`, `rsvp_` and `register_` routers are mounted **outside** the
+/// `AuthenticationLayer` (§6.4) and resolve ownership from a *token* rather than
+/// a principal, which makes them the only three routes where a tenant check can
+/// be silently absent. Rows 26-28 are what enforce it; this is what they assert
+/// against.
+///
+/// **Call it last.** axum's `Router::layer` wraps only the routes registered
+/// before the call, so an extension installed before the DAV routers or the
+/// public token routers would leave them without it — and a missing extension is
+/// a `500` in a handler that expected one, which is exactly the kind of failure
+/// that only appears under a second tenant.
+pub fn with_tenant(router: Router, tenant: Tenant) -> Router {
+    router.layer(Extension(tenant))
+}
+
 /// The single-tenant entry point, and the **unchanged** public signature of
 /// this module since before the tenancy work.
 ///
@@ -134,6 +154,11 @@ pub fn make_app<
     smtp_accounts: Vec<rustical_scheduling::SmtpAccount>,
 ) -> Router<()> {
     make_app_for(
+        // `None` is the N=1 case and must stay indistinguishable from today:
+        // §3.6 requires `enabled = false` to produce the same router, and the
+        // 98-test baseline is the proof. No dispatch layer, no tenant extension,
+        // nothing a handler can observe.
+        None,
         AppConfig {
             frontend: frontend_config,
             oidc: oidc_config,
@@ -178,6 +203,7 @@ pub fn make_app<
     clippy::missing_panics_doc
 )]
 pub fn make_app_for<AS, CS, DP, AP>(
+    tenant: Option<Tenant>,
     config: AppConfig,
     stores: AppStores<AS, CS, DP, AP>,
 ) -> Router<()>
@@ -349,6 +375,27 @@ where
         router = router.merge(rustical_dav_push::subscription_service(dav_push_store));
     }
 
+    // Every span this router creates is attributable to its tenant. Under
+    // tenancy the process is shared, so without this a log line cannot be
+    // answered with "whose calendar is erroring" — which is the question §7.4's
+    // OTel work exists to make answerable.
+    //
+    // `Arc<str>`, not `String`: the `TraceLayer` closures are `'static`, so the
+    // label has to be *owned* by them, and a `String` would mean an allocation
+    // per request. Cloning an `Arc` is a refcount bump.
+    //
+    // Taken *before* the tenant is moved into the extension below.
+    let tenant_label: Option<Arc<str>> = tenant.as_ref().map(|t| Arc::from(t.slug.as_str()));
+
+    // MUST be the last thing applied to `router`: axum's `Router::layer` covers
+    // only the routes registered *before* it, so an extension installed any
+    // earlier would miss the DAV routers and the three public token routers.
+    // See `with_tenant`.
+    router = match tenant {
+        Some(tenant) => with_tenant(router, tenant),
+        None => router,
+    };
+
     router
         .layer(
             SessionManagerLayer::new(session_store)
@@ -376,11 +423,18 @@ where
                             request.uri()
                         )),
                         ua = tracing::field::Empty,
+                        // `Empty` in a single-tenant install: the field is
+                        // absent rather than empty, so a filter on it cannot
+                        // accidentally match the N=1 case.
+                        tenant = tracing::field::Empty,
                     )
                 })
-                .on_request(|req: &Request, span: &Span| {
+                .on_request(move |req: &Request, span: &Span| {
                     span.record("method", display(req.method()));
                     span.record("path", display(req.uri()));
+                    if let Some(label) = &tenant_label {
+                        span.record("tenant", display(label.as_ref()));
+                    }
                     if let Some(ua) = req.headers().typed_get::<UserAgent>() {
                         span.record("ua", display(ua));
                     }
