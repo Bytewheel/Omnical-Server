@@ -49,6 +49,7 @@ pub mod rsvp;
 mod setup_tracing;
 pub mod store_bundle;
 pub mod tenancy;
+pub mod tenant_overrides;
 // Shared with the frontend crate so the portal prints byte-identical
 // export URLs to the CLI (PLAN.md §17.8.4).
 pub use rustical_frontend::url_builder;

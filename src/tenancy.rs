@@ -159,11 +159,59 @@ fn tenant_builder(
                 .await
                 .map_err(|e| format!("tenant {} stores: {e}", tenant.slug))?;
 
-            // `config_json` is **not** merged here. That is item 10, and until it
-            // lands a tenant's per-tenant overrides are stored but inert — which
-            // is the safe direction, because a missing override falls back to
-            // the global value rather than to nothing.
-            let app_config = app_config_for(&config);
+            // §3.6's merge: the tenant's `config_json` over the global config.
+            //
+            // This is what mounts the three public routers at all. Before it,
+            // `scheduler` and `subscriptions` were `None`, so `/export/{token}.ics`
+            // and `/rsvp/{token}` returned 404 for *every* tenant including its
+            // own — rows 26 and 27 were not reachable, because there was nothing
+            // to scope. See `tenant_overrides` for why the merge cannot be
+            // deferred to item 10.
+            // §3.6's merge: the tenant's `config_json` over the global config.
+            //
+            // This is what mounts the three public routers at all. Before it,
+            // `scheduler` and `subscriptions` were `None`, so `/export/{token}.ics`
+            // and `/rsvp/{token}` returned 404 for *every* tenant including its
+            // own — rows 26 and 27 were unreachable, because there was nothing to
+            // scope. `tenant_overrides` explains why the merge cannot be deferred
+            // to item 10.
+            let overrides = crate::tenant_overrides::Overrides::parse(&tenant.config_json);
+            let scheduling = overrides.scheduling(&config.scheduling);
+            let subscriptions_config = overrides.subscriptions(&config.subscriptions);
+            let registration_config = overrides.registration(&config.registration);
+
+            // §3.6: every tenant's subscribe links point at its own host. Falls
+            // back to the base domain, so a hosted deployment with no explicit
+            // public URL still generates tenant-correct links rather than links
+            // to the bare apex.
+            let public_base = subscriptions_config.public_url.clone().unwrap_or_else(|| {
+                if config.tenancy.base_domain.is_empty() {
+                    format!("http://{}", config.http.bind.clone().unwrap_or_default())
+                } else {
+                    format!("https://{}", config.tenancy.base_domain)
+                }
+            });
+
+            // The extensions, built over **this tenant's** stores. The scheduler
+            // is what holds the RSVP secret, so a per-tenant secret here is the
+            // whole of row 27.
+            let (scheduler, subscriptions, registration) = crate::build_extensions(
+                &scheduling,
+                &subscriptions_config,
+                &registration_config,
+                Arc::new(rustical_store_sqlite::SqliteSchedulingStore::new(
+                    (*bundle.cal_store).clone(),
+                )),
+                bundle.subscription_store.clone(),
+                bundle.invite_store.clone(),
+            );
+
+            let mut app_config = app_config_for(&config);
+            app_config.scheduler = scheduler;
+            app_config.subscriptions = subscriptions;
+            app_config.registration = registration;
+            app_config.subscriptions_public_url = public_base;
+            app_config.smtp_accounts.clone_from(&scheduling.smtp);
 
             let mut bundle = bundle;
             let router = crate::app::make_app_for(Some(tenant), app_config, bundle.app_stores());
