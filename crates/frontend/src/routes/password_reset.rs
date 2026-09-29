@@ -29,6 +29,7 @@
 //! - Both POST endpoints share a sliding-window rate limiter (per client IP
 //!   plus a global bucket), mirroring the registration flow.
 
+use crate::client_ip::{IpNet, PeerAddr, client_ip, warn_once_if_header_ignored};
 use crate::{FrontendConfig, pages::DefaultLayoutData};
 use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
 use askama::Template;
@@ -221,6 +222,12 @@ pub async fn route_post_forgot_password<AP: AuthenticationProvider>(
     Extension(smtp_accounts): Extension<Vec<SmtpAccount>>,
     Extension(public_url): Extension<String>,
     Extension(limiter): Extension<Arc<ResetRateLimiter>>,
+    // C5, §7.3.4: the immediate peer, so the limiter's key is the real client
+    // address rather than whatever the request's `X-Forwarded-For` claims.
+    // Behind a reverse proxy the old code was limited by an attacker-chosen
+    // header, which turned this endpoint into a way to hammer SMTP for free.
+    PeerAddr(peer): PeerAddr,
+    Extension(trusted_proxies): Extension<Vec<IpNet>>,
     headers: HeaderMap,
     session: Session,
     Form(form): Form<ForgotPasswordForm>,
@@ -228,7 +235,8 @@ pub async fn route_post_forgot_password<AP: AuthenticationProvider>(
     if !reset_available(&config, &smtp_accounts, &public_url) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if !limiter.check_and_record(&client_ip(&headers), Instant::now()) {
+    warn_once_if_header_ignored(&headers, peer, &trusted_proxies);
+    if !limiter.check_and_record(&client_ip(peer, &headers, &trusted_proxies), Instant::now()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
 
@@ -386,6 +394,12 @@ pub async fn route_post_reset_password<AP: AuthenticationProvider>(
     Extension(config): Extension<FrontendConfig>,
     Extension(reset_store): Extension<Arc<dyn PasswordResetStore>>,
     Extension(limiter): Extension<Arc<ResetRateLimiter>>,
+    // The second consumer of `client_ip` in this file, and the one C5's note
+    // about "the rate limiter" did not name: this endpoint shares the limiter
+    // with `route_post_forgot_password`, so leaving it reading the header
+    // unconditionally would have left a bypass on one of the two.
+    PeerAddr(peer): PeerAddr,
+    Extension(trusted_proxies): Extension<Vec<IpNet>>,
     headers: HeaderMap,
     session: Session,
     Form(form): Form<ResetPasswordForm>,
@@ -393,7 +407,8 @@ pub async fn route_post_reset_password<AP: AuthenticationProvider>(
     if !config.allow_password_login {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
-    if !limiter.check_and_record(&client_ip(&headers), Instant::now()) {
+    warn_once_if_header_ignored(&headers, peer, &trusted_proxies);
+    if !limiter.check_and_record(&client_ip(peer, &headers, &trusted_proxies), Instant::now()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
 
@@ -490,19 +505,6 @@ async fn rotate_csrf(session: &Session) -> String {
         warn!("password reset: could not persist CSRF token");
     }
     csrf
-}
-
-/// Client IP for the rate limiter: first hop of `X-Forwarded-For` (set by
-/// the TLS tunnel in front of production), "<global>" otherwise.
-fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("<global>")
-        .to_owned()
 }
 
 fn random_token() -> String {

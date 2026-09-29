@@ -339,6 +339,12 @@ where
     // self-service registration, mounted OUTSIDE the DAV `AuthenticationLayer`
     // like the export router. Only present while `[registration] enabled`, so
     // a disabled config has zero registration footprint.
+    // One binding, read by both the portal and the registration router, so the
+    // two limiters cannot end up with different trust lists.
+    let frontend_trusted_proxies = frontend_config.trusted_proxies.clone();
+    // (and `frontend_config` itself is only needed for its `.enabled` check
+    // below, so the clone above is the last use of the proxy list)
+
     if let Some(registration) = registration {
         let auth: Arc<dyn AuthenticationProvider> = auth_provider.clone();
         router = router.merge(register_router(
@@ -346,6 +352,10 @@ where
             combined_cal_store.clone(),
             auth,
             registration,
+            // Read off the same `FrontendConfig` the portal uses, so the
+            // registration and password-reset limiters cannot end up with
+            // different trust lists.
+            frontend_trusted_proxies,
         ));
     }
 

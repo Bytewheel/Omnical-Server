@@ -23,6 +23,7 @@ use std::sync::Arc;
 use url::Url;
 
 mod assets;
+pub mod client_ip;
 mod config;
 pub mod nextcloud_login;
 mod oidc_user_store;
@@ -91,6 +92,9 @@ pub fn frontend_router<
     // Shared sliding-window limiter for the public password-reset POSTs
     // (per client IP plus a global bucket, like the registration flow).
     let reset_limiter = Arc::new(ResetRateLimiter::new());
+    // Read once: `frontend_config` is moved into its own `Extension` a few
+    // layers down, and this list is needed for a second one.
+    let frontend_trusted_proxies = frontend_config.trusted_proxies.clone();
 
     let user_router = Router::new()
         .route("/", get(route_get_home))
@@ -263,6 +267,7 @@ pub fn frontend_router<
         .layer(Extension(share_store))
         .layer(Extension(password_reset_store))
         .layer(Extension(reset_limiter))
+        .layer(Extension(frontend_trusted_proxies))
         .layer(Extension(smtp_accounts));
 
     Router::new()

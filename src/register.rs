@@ -81,6 +81,9 @@ pub struct RegisterState<AS, CS> {
     cal_store: Arc<CS>,
     auth_provider: Arc<dyn AuthenticationProvider>,
     limiter: Arc<RateLimiter>,
+    /// `[tenancy] trusted_proxies`, parsed (C5, §7.3.4). Empty means no peer's
+    /// `X-Forwarded-For` is believed.
+    trusted_proxies: Vec<rustical_frontend::client_ip::IpNet>,
 }
 
 // Manual `Clone` without store bounds, mirroring `ExportState`.
@@ -92,6 +95,13 @@ impl<AS, CS> Clone for RegisterState<AS, CS> {
             cal_store: Arc::clone(&self.cal_store),
             auth_provider: Arc::clone(&self.auth_provider),
             limiter: Arc::clone(&self.limiter),
+            // A `Vec` of four-ish `IpNet`s, cloned per router clone. A
+            // `TenancyAwareApp` is cloned per request on the single-tenant path,
+            // so this is the cost of doing it here instead of in an
+            // `Arc<[...]>` — and an `Arc` would be a second indirection to
+            // avoid a four-element copy that a lock-free read of a shared
+            // list would not avoid anyway.
+            trusted_proxies: self.trusted_proxies.clone(),
         }
     }
 }
@@ -154,6 +164,11 @@ pub fn register_router<AS: AddressbookStore, CS: CalendarStore>(
     cal_store: Arc<CS>,
     auth_provider: Arc<dyn AuthenticationProvider>,
     context: Arc<RegistrationContext>,
+    // C5, §7.3.4. In the **state**, next to the limiter it keys, rather than as
+    // a separate `Extension`: a limiter and the list of peers that decides what
+    // "per-IP" means are one fact, and splitting them across two injectors is a
+    // way for a future change to wire one without the other.
+    trusted_proxies: Vec<rustical_frontend::client_ip::IpNet>,
 ) -> Router {
     let limiter = Arc::new(RateLimiter::new(context.config.rate_limit_per_hour));
     Router::new()
@@ -167,6 +182,7 @@ pub fn register_router<AS: AddressbookStore, CS: CalendarStore>(
             cal_store,
             auth_provider,
             limiter,
+            trusted_proxies,
         })
 }
 
@@ -236,17 +252,26 @@ async fn route_post_register<AS: AddressbookStore, CS: CalendarStore>(
     State(state): State<RegisterState<AS, CS>>,
     session: Session,
     TypedHeader(host): TypedHeader<Host>,
+    // C5, §7.3.4: the immediate peer, and the proxy trust list.
+    rustical_frontend::client_ip::PeerAddr(peer): rustical_frontend::client_ip::PeerAddr,
     headers: HeaderMap,
     Form(form): Form<RegisterForm>,
 ) -> Response {
-    let client_ip = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("<global>");
-    if !state.limiter.check_and_record(client_ip, Instant::now()) {
+    // C5, §7.3.4. The old code took the **first** hop of `X-Forwarded-For`
+    // unconditionally, which meant that behind a reverse proxy a client could
+    // pick a fresh address per request and walk straight through the
+    // per-IP limit — and this endpoint mints accounts.
+    //
+    // Now the header is believed only if the immediate peer is in
+    // `[tenancy] trusted_proxies`, and even then only up to the first hop that
+    // is not itself one of ours.
+    rustical_frontend::client_ip::warn_once_if_header_ignored(
+        &headers,
+        peer,
+        &state.trusted_proxies,
+    );
+    let client_ip = rustical_frontend::client_ip::client_ip(peer, &headers, &state.trusted_proxies);
+    if !state.limiter.check_and_record(&client_ip, Instant::now()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
 
@@ -977,6 +1002,11 @@ mod tests {
                 cal_store.clone(),
                 principal_store.clone(),
                 context,
+                // The in-tree test is not behind a proxy, so it passes the
+                // fail-closed default. That is also the honest thing for a test
+                // to do: it is testing registration, not the trust list, and
+                // `tests/trusted_proxies.rs` covers that.
+                Vec::new(),
             )
             .layer(
                 SessionManagerLayer::new(MemoryStore::default())

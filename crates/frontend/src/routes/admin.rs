@@ -55,9 +55,11 @@
 //! username oracle.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::client_ip::{IpNet, PeerAddr, client_ip, warn_once_if_header_ignored};
 use askama::Template;
 use askama_web::WebTemplate;
 use axum::Router;
@@ -300,6 +302,10 @@ pub struct AdminPanel {
     /// a collision cannot be *introduced* through the panel either — the CLI's
     /// refusal and this are the same rule at two doors.
     admin_host: String,
+    /// `[tenancy] trusted_proxies`, parsed (C5, §7.3.4). Empty means no peer's
+    /// `X-Forwarded-For` is believed, which is the fail-closed default and the
+    /// whole security property of this rate limiter.
+    trusted_proxies: Vec<IpNet>,
     limiter: Arc<AdminRateLimiter>,
 }
 
@@ -319,12 +325,14 @@ impl AdminPanel {
         admins: Arc<dyn AdminCredentialStore>,
         allowlist: Vec<String>,
         admin_host: &str,
+        trusted_proxies: Vec<IpNet>,
     ) -> Self {
         Self {
             store,
             admins,
             allowlist,
             admin_host: normalise_host(admin_host),
+            trusted_proxies,
             limiter: Arc::new(AdminRateLimiter::new()),
         }
     }
@@ -369,6 +377,20 @@ impl AdminPanel {
                         tower_sessions::cookie::time::Duration::hours(2),
                     )),
             )
+    }
+
+    /// The address this login is rate-limited by (C5, §7.3.4).
+    ///
+    /// Delegates to [`client_ip`] with this panel's own `trusted_proxies`, and
+    /// emits the once-per-process warning when a forwarded header arrived from a
+    /// peer that is not configured. The warning matters more here than at the
+    /// other two call sites: a self-hosted panel behind a reverse proxy with no
+    /// `trusted_proxies` is rate-limiting **every** admin login attempt as one
+    /// address, which is a much tighter bucket than an operator would expect
+    /// from a 10/hour per-name limit.
+    fn client_ip(&self, peer: Option<SocketAddr>, headers: &HeaderMap) -> String {
+        warn_once_if_header_ignored(headers, peer, &self.trusted_proxies);
+        client_ip(peer, headers, &self.trusted_proxies)
     }
 
     /// The authenticated admin's name, or `None`.
@@ -435,6 +457,7 @@ struct LoginForm {
 #[instrument(skip_all)]
 async fn login_submit(
     State(panel): State<Arc<AdminPanel>>,
+    PeerAddr(peer): PeerAddr,
     headers: HeaderMap,
     session: Session,
     Form(form): Form<LoginForm>,
@@ -453,7 +476,7 @@ async fn login_submit(
     }
 
     let name = form.name.trim().to_owned();
-    let source = client_ip(&headers);
+    let source = panel.client_ip(peer, &headers);
     if !panel
         .limiter
         .check_and_record(&name, &source, Instant::now())
@@ -842,26 +865,6 @@ async fn check_csrf(session: &Session, submitted: Option<&str>) -> Result<(), ()
         return Err(());
     }
     Ok(())
-}
-
-/// The client IP for the rate limiter: first hop of `X-Forwarded-For`, else
-/// `<global>`.
-///
-/// `password_reset.rs`'s rule verbatim, **including its weakness**: this trusts
-/// `X-Forwarded-For`, which §7.3.4's `trusted_proxies` does not yet gate. §6.6.10
-/// says the panel is not a second reason to defer that fix, and it is not — the
-/// panel inherits the same exposure as every other route until then, so the
-/// defect is not widened by this module. It is *recorded* here so that the day
-/// `trusted_proxies` lands, this is on the list of places to change.
-fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("<global>")
-        .to_owned()
 }
 
 /// Reduce a `Host`-shaped string to the form hosts are compared in:

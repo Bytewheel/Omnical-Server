@@ -28,6 +28,7 @@ use rustical_store_sqlite::{
 };
 use setup_tracing::setup_tracing;
 use std::fs;
+use std::net::SocketAddr;
 use std::os::unix::fs::FileTypeExt;
 use std::sync::Arc;
 use store_bundle::StoreBundle;
@@ -306,6 +307,16 @@ pub async fn cmd_serve(
     }
 
     // §3.6's "enabled = false behaves exactly as today", enforced here rather
+    let parsed_trusted_proxies = config
+        .tenancy
+        .parsed_trusted_proxies()
+        .map_err(anyhow::Error::msg)?;
+    // Carried on `FrontendConfig` as a `serde(skip)` runtime field, so the
+    // operator-facing key stays `[tenancy] trusted_proxies` and there is no
+    // second spelling in the config file.
+    let mut frontend_config = config.frontend.clone();
+    frontend_config.trusted_proxies = parsed_trusted_proxies.clone();
+
     // than by convention: the `false` arm below builds the *same* `make_app`
     // call with the *same* arguments and puts no dispatch layer in front of it.
     // There is no third path in which tenancy is on but not routing.
@@ -314,7 +325,7 @@ pub async fn cmd_serve(
         cal_store.clone(),
         dav_push_store.clone(),
         principal_store.clone(),
-        config.frontend.clone(),
+        frontend_config,
         config.oidc.clone(),
         config.caldav,
         scheduler,
@@ -341,9 +352,24 @@ pub async fn cmd_serve(
         TenancyAwareApp::Single(app)
     };
 
-    let app = ServiceExt::<Request>::into_make_service(
-        NormalizePathLayer::trim_trailing_slash().layer(app),
-    );
+    // C5, §7.3.4: the *router* is built once and the make-service is built per
+    // arm, because only the TCP arm can carry connect info.
+    //
+    // With it, a handler can see the **immediate peer** and decide whether that
+    // peer's `X-Forwarded-For` is worth believing. Without it there is no way to
+    // implement a proxy trust list at all, and the three rate limiters in this
+    // tree (registration, password reset, admin login) are limited by an
+    // attacker-chosen address behind a load balancer.
+    //
+    // A Unix socket has no peer *address*, so the Unix arm keeps the plain
+    // make-service and its handlers see `ConnectInfo` as absent — for which
+    // `client_ip` returns `<local>`, the honest answer, since no proxy can be in
+    // the path of a Unix socket.
+    //
+    // `SocketAddr` and not something more permissive, because `axum` requires a
+    // concrete `FromConnectInfo` and anything looser would be another place a
+    // peer address could be forged.
+    let app = NormalizePathLayer::trim_trailing_slash().layer(app);
 
     let mut provided_listeners = ProvidedListeners::from_env()?;
     if let Some(trash_retention_days) = config.maintenance.trash_retention_days {
@@ -366,7 +392,9 @@ pub async fn cmd_serve(
                 if let Some(start_notifier) = start_notifier {
                     start_notifier.notify_waiters();
                 }
-                axum::serve(listener, app)
+                let make =
+                    ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(app);
+                axum::serve(listener, make)
                     .with_graceful_shutdown(shutdown_signal())
                     .await
                     .unwrap();
@@ -398,7 +426,11 @@ pub async fn cmd_serve(
                 if let Some(start_notifier) = start_notifier {
                     start_notifier.notify_waiters();
                 }
-                axum::serve(listener, app)
+                // **No** connect info: a Unix socket has no peer address, and
+                // `SocketAddr: Connected<UnixStream>` does not exist. The
+                // handlers here see no peer, and `client_ip` answers `<local>`.
+                let make = ServiceExt::<Request>::into_make_service(app);
+                axum::serve(listener, make)
                     .with_graceful_shutdown(shutdown_signal())
                     .await
                     .unwrap();

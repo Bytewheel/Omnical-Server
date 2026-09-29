@@ -111,6 +111,16 @@ pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> 
                 admins,
                 config.tenancy.platform_admins.clone(),
                 &admin_host,
+                // Already validated by `TenancyConfig::validate`, called at the
+                // top of this function, so this cannot fail. Propagated rather
+                // than `expect`ed because a `.expect` here would be a panic on a
+                // path that a malformed config should have refused earlier —
+                // and quietly substituting an empty list would turn that config
+                // bug into a security control that silently does nothing.
+                config
+                    .tenancy
+                    .parsed_trusted_proxies()
+                    .map_err(anyhow::Error::msg)?,
             ))
             .router(),
         )
@@ -232,7 +242,8 @@ fn tenant_builder(
                 bundle.invite_store.clone(),
             );
 
-            let mut app_config = app_config_for(&config);
+            let mut app_config =
+                app_config_for(&config).map_err(|e| format!("the tenant router config: {e}"))?;
             app_config.scheduler = scheduler;
             app_config.subscriptions = subscriptions;
             app_config.registration = registration;
@@ -258,14 +269,34 @@ fn tenant_builder(
 /// commit would not touch. The cost is that the two lists must be kept in step,
 /// and the mitigation is that both call `make_app_for` with the same
 /// [`AppConfig`] type, so a field added to one is a compile error in the other.
-fn app_config_for(config: &Config) -> AppConfig {
+fn app_config_for(config: &Config) -> Result<AppConfig, String> {
     let public_base = config
         .subscriptions
         .public_url
         .clone()
         .unwrap_or_else(|| "http://localhost".to_owned());
-    AppConfig {
-        frontend: config.frontend.clone(),
+
+    // C5, §7.3.4: the parsed proxy trust list is put on the `FrontendConfig`
+    // copy here, so **every** tenant's router is built from the same one and
+    // neither the registration limiter nor the two password-reset limiters can
+    // end up with a different view of who is allowed to set
+    // `X-Forwarded-For`.
+    //
+    // Parsed per tenant rather than once at startup because this is the only
+    // place a tenant's `AppConfig` is built, and the cost is a handful of
+    // address comparisons per *tenant build* — not per request. A first draft
+    // forgot this entirely, which left the whole feature inert on the tenancy
+    // path; the fail-closed default hid it, and only the *second* direction of
+    // the row-34 test ("a configured proxy gets real per-client buckets") caught
+    // it. A missing capability that fails safe is still a missing capability.
+    let mut frontend = config.frontend.clone();
+    frontend.trusted_proxies = config
+        .tenancy
+        .parsed_trusted_proxies()
+        .map_err(|e| format!("trusted_proxies: {e}"))?;
+
+    Ok(AppConfig {
+        frontend,
         oidc: config.oidc.clone(),
         caldav: config.caldav.clone(),
         scheduler: None,
@@ -277,5 +308,5 @@ fn app_config_for(config: &Config) -> AppConfig {
         payload_limit_mb: config.http.payload_limit_mb,
         subscriptions_public_url: public_base,
         smtp_accounts: config.scheduling.smtp.clone(),
-    }
+    })
 }

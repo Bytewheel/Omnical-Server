@@ -466,6 +466,56 @@ impl Fixture {
         path
     }
 
+    /// Rewrite `config.toml` as a **server** config with the admin surface and a
+    /// `trusted_proxies` list, keeping the same `data_root` and control plane as
+    /// every other helper here.
+    ///
+    /// Separate from [`Self::admin_server_config`] because that one is a
+    /// *different* install (its own port, no frontend, no tenants) and this one
+    /// has to be the fixture's own config, so that a server started with
+    /// [`Self::start`] sees the seeded tenants.
+    pub fn write_server_config(
+        &self,
+        admin_host: &str,
+        admins: &[&str],
+        ack: bool,
+        trusted_proxies: &[&str],
+    ) {
+        let list = |items: &[&str]| {
+            items
+                .iter()
+                .map(|i| format!("\"{i}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let body = format!(
+            "[http]\nbind = \"127.0.0.1:{port}\"\n\n\
+             [data_store.sqlite]\ndb_url = \"sqlite://{db}\"\nrun_repairs = false\n\
+             skip_broken = false\n\n\
+             [frontend]\nenabled = true\nallow_password_login = true\n\n\
+             [registration]\nenabled = true\n\n\
+             [[scheduling.smtp]]\n\
+             identity = \"no-reply@t3.gg\"\nhost = \"localhost\"\nport = 25\n\
+             username = \"no-reply\"\npassword = \"unused-in-tests\"\n\n\
+             [tenancy]\nenabled = true\n\
+             control_db_url = \"sqlite://{control}\"\n\
+             base_domain = \"{base}\"\ndata_root = \"{root}\"\n\
+             max_cached_tenants = 8\n\
+             trusted_proxies = [{proxies}]\n\
+             admin_host = \"{admin_host}\"\n\
+             platform_admins = [{admins}]\n\
+             admin_single_instance_acknowledged = {ack}\n",
+            port = self.port,
+            db = self.path("data").join("db.sqlite3").display(),
+            control = self.path("control.sqlite3").display(),
+            root = self.path("data").display(),
+            base = "t3.gg",
+            proxies = list(trusted_proxies),
+            admins = list(admins),
+        );
+        std::fs::write(self.path("config.toml"), body).expect("the server config");
+    }
+
     /// Boot `rustical serve` on `config`, wait for it to **exit**, and return
     /// what it printed.
     ///

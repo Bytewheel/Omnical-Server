@@ -342,11 +342,11 @@ impl Default for RegistrationConfig {
 /// ignored is worse than a missing one, because the operator has no way to tell
 /// which they are looking at:
 ///
-/// - **`trusted_proxies`** (C5, §7.3.4) is the `X-Forwarded-Host` / `X-Forwarded-For`
-///   trust list. It is a *security* knob, and the code that honours it does not
-///   exist yet. An operator who set it would get a rate-limit bypass while their
-///   config claimed otherwise. It arrives with §7.3.4, and §3.6's "MUST be set
-///   for hosted" is about that commit, not this one.
+/// - **`trusted_proxies`** (C5, §7.3.4) *was* in this list, as a key that
+///   parsed and did nothing. It is honoured now, and it is **fail-closed**: an
+///   empty list means no peer may set `X-Forwarded-For`. See
+///   [`TenancyConfig::trusted_proxies`] for the trade and the one-line warning
+///   that makes the coarse case visible.
 /// - **`[tenancy.sessions]`** (C4, §3.7) selects a `SessionStore`. The
 ///   `session-redis` cargo feature does not exist in this tree, so
 ///   `store = "redis"` would be a literal that deserialises and is then never
@@ -396,6 +396,38 @@ pub struct TenancyConfig {
     /// stops anyone who can write the control plane — the file holding every
     /// tenant's SMTP password (§3.6) — from promoting themselves.
     pub platform_admins: Vec<String>,
+    /// Peers whose `X-Forwarded-For` header this server will believe (C5,
+    /// §7.3.4).
+    ///
+    /// Each entry is an address or a CIDR block: `"10.0.0.0/8"`,
+    /// `"203.0.113.7"`, `"[::1]:8443"`. A malformed entry is a **startup
+    /// refusal** rather than a warning, because a `trusted_proxies` that
+    /// silently dropped its one bad line would leave a deployment looking
+    /// configured and being unprotected.
+    ///
+    /// ## Empty means trust nobody, and that is the security property
+    ///
+    /// Three rate limiters in this tree read `X-Forwarded-For`: registration,
+    /// password reset, and the admin panel's login. Before this key existed all
+    /// three read it unconditionally, so behind a load balancer anyone could put
+    /// a fresh address in the header on every request and walk through a per-IP
+    /// limit — including the admin login limit, which guards the one credential
+    /// that crosses every tenant boundary.
+    ///
+    /// The alternative default — honour the header unless told otherwise — *is*
+    /// the vulnerability, so it is not the default. An install with no
+    /// `trusted_proxies` behind a reverse proxy therefore rate-limits every
+    /// client as one address. That is coarse but **safe**, and it is not silent:
+    /// a request carrying the header from an unlisted peer logs one warning per
+    /// process naming this key, because a rate limiter that logged per request
+    /// would be its own denial of service.
+    ///
+    /// Not gated on [`Self::enabled`]. A single-tenant self-hosted install
+    /// behind nginx needs this exactly as much as a hosted one, and
+    /// `validate()` returns early when tenancy is off — so gating the *code* on
+    /// `enabled` would leave the most common self-hosting shape unprotected.
+    pub trusted_proxies: Vec<String>,
+
     /// The operator's assertion that this deployment is single-instance
     /// (§6.6.4).
     ///
@@ -550,6 +582,16 @@ impl TenancyConfig {
     /// # Errors
     /// A message naming the offending key.
     pub fn validate(&self) -> Result<(), String> {
+        // **Before** the `!enabled` early return, deliberately.
+        //
+        // `trusted_proxies` is honoured whether or not tenancy is on (a
+        // single-tenant install behind nginx is the common case), so its
+        // validity has to be checked on the same footing. A malformed entry that
+        // is only caught when tenancy is enabled is a config that boots in one
+        // mode and refuses in another, which is the kind of difference nobody
+        // discovers until it matters.
+        self.parsed_trusted_proxies()?;
+
         if !self.enabled {
             // Every other key is inert while tenancy is off, and an operator who
             // set `base_domain` and left `enabled = false` has almost certainly
@@ -667,6 +709,25 @@ impl TenancyConfig {
             ));
         }
         Ok(())
+    }
+
+    /// `[tenancy] trusted_proxies` parsed into blocks (C5, §7.3.4).
+    ///
+    /// Parsed on demand rather than cached, because a `Config` is cloned per
+    /// tenant (§3.6) and a cache would have to be either shared-and-locked or
+    /// recomputed anyway. The list is a handful of entries, read once per
+    /// request that needs it, and parsing four IP addresses is not a cost worth
+    /// designing around.
+    ///
+    /// # Errors
+    /// The first entry that does not parse, naming its index. Called from
+    /// [`Self::validate`], so this is a **startup refusal** — a proxy list that
+    /// quietly dropped a line would leave a deployment looking configured and
+    /// being unprotected, which is the failure mode C5 is about.
+    pub fn parsed_trusted_proxies(
+        &self,
+    ) -> Result<Vec<rustical_frontend::client_ip::IpNet>, String> {
+        rustical_frontend::client_ip::IpNet::parse_list(&self.trusted_proxies)
     }
 
     /// `admin_host` reduced to the form the router matches on: lowercased, with
