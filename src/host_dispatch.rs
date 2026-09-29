@@ -100,6 +100,14 @@ type HttpResponse = axum::http::Response<axum::body::Body>;
 /// tenant-scoped like everything else.
 pub const HEALTH_PATH: &str = "/healthz";
 
+/// Readiness, which answers a different question and is a different endpoint.
+///
+/// §7.4: *"Add `/readyz` that checks the control plane + the tenant pool, so the
+/// LB does not route to a process that cannot serve."* See
+/// [`crate::readiness`] for why the two must not be merged, and for what this one
+/// deliberately does not check.
+pub const READY_PATH: &str = "/readyz";
+
 /// The liveness router. Deliberately a separate `Router` rather than a special
 /// case inside the dispatch loop, so it cannot be reached by a path that
 /// dispatch also handles and the two can never disagree about which is which.
@@ -216,7 +224,12 @@ impl HostDispatch {
     /// Every branch filters on `status = 'active'` inside SQL (see
     /// `TenantStore`), so a suspended tenant returns `None` at every step and
     /// cannot be reached by a later, more permissive rule.
-    async fn resolve(&self, host: &str) -> Result<Option<Tenant>, String> {
+    /// Which §3.3 match rule fired, or `None` for "no active tenant".
+    ///
+    /// Returned rather than logged-and-forgotten because the rule is the first
+    /// thing anyone debugging a misrouted host wants, and a `debug!` line only
+    /// says `resolved`.
+    async fn resolve(&self, host: &str) -> Result<Option<(Tenant, &'static str)>, String> {
         // 1. An explicit claim, which is the only one an operator set on purpose.
         if let Some(tenant) = self
             .control_plane
@@ -225,7 +238,7 @@ impl HostDispatch {
             .map_err(|e| format!("control plane lookup by host failed: {e}"))?
         {
             debug!(host, tenant = %tenant.slug, "resolved by explicit host claim");
-            return Ok(Some(tenant));
+            return Ok(Some((tenant, "explicit-host")));
         }
 
         // **A claimed host is owned.** If the host has a claim but no *active*
@@ -266,7 +279,7 @@ impl HostDispatch {
                 .map_err(|e| format!("control plane lookup by slug failed: {e}"))?
             {
                 debug!(host, tenant = %tenant.slug, "resolved by base_domain");
-                return Ok(Some(tenant));
+                return Ok(Some((tenant, "base-domain")));
             }
             // The same fall-through hazard as above, one rule later: if that
             // slug exists but is suspended, stop rather than trying `default_tenant`.
@@ -291,7 +304,7 @@ impl HostDispatch {
                 .map_err(|e| format!("control plane lookup by slug failed: {e}"))?
             {
                 debug!(host, tenant = %tenant.slug, "resolved by host-as-slug");
-                return Ok(Some(tenant));
+                return Ok(Some((tenant, "host-as-slug")));
             }
             if self
                 .control_plane
@@ -320,7 +333,7 @@ impl HostDispatch {
                 .map_err(|e| format!("control plane lookup of default_tenant failed: {e}"))?
             {
                 debug!(host, tenant = %tenant.slug, "resolved by default_tenant");
-                return Ok(Some(tenant));
+                return Ok(Some((tenant, "default-tenant")));
             }
             // A *suspended* default tenant is an operator error, and the useful
             // behaviour is a 404 for every request plus a loud log — not a
@@ -395,7 +408,15 @@ impl HostDispatch {
         };
 
         let tenant = match self.resolve(&host).await {
-            Ok(Some(tenant)) => tenant,
+            Ok(Some((tenant, rule))) => {
+                // `let _ =` deliberately: these are side-effecting span
+                // recorders that warn on their own if no span declared the
+                // fields, and a `must_use` on the return would only add a second
+                // way to be ignored.
+                let _ = crate::tenant_telemetry::tag_dispatch(rule);
+                let _ = crate::tenant_telemetry::tag_span(&tenant);
+                tenant
+            }
             Ok(None) => {
                 // Unknown host, suspended tenant, and unclaimed host all land
                 // here identically — deliberately.
@@ -530,6 +551,11 @@ pub enum TenancyAwareApp {
 /// disagree with the one that built the panel.
 pub struct Tenancy {
     dispatch: Arc<HostDispatch>,
+    /// Built in `serve_dispatch` and carried here so the readiness route can be
+    /// served from the same place `/healthz` is, ahead of tenant resolution.
+    /// `None` only if a caller constructs `Tenancy` by hand without one, in
+    /// which case `/readyz` answers 503 rather than pretending to be ready.
+    readiness: Option<Arc<crate::readiness::ReadinessProbe>>,
     /// `None` means **there is no panel** — not a panel on a default path, and
     /// not a panel on every host. §6.6.2: absence has to mean absence, or a
     /// self-hosted install acquires a cross-tenant control surface by upgrading
@@ -552,6 +578,22 @@ impl Tenancy {
             dispatch,
             panel,
             admin_host: normalise_host(admin_host),
+            readiness: None,
+        }
+    }
+
+    /// The same, with a readiness probe. [`TenancyAwareApp::build`] uses it;
+    /// [`Self::new`] stays for the tests that only exercise dispatch.
+    #[must_use]
+    pub fn with_readiness(
+        dispatch: Arc<HostDispatch>,
+        panel: Option<Router>,
+        admin_host: &str,
+        readiness: Arc<crate::readiness::ReadinessProbe>,
+    ) -> Self {
+        Self {
+            readiness: Some(readiness),
+            ..Self::new(dispatch, panel, admin_host)
         }
     }
 
@@ -632,6 +674,27 @@ impl Service<HttpRequest> for TenancyAwareApp {
                 if request.uri().path() == HEALTH_PATH {
                     let mut health = health_router();
                     return Box::pin(async move { health.call(request).await });
+                }
+                // `/readyz` is served here for the same structural reason as
+                // `/healthz` — it is a question about the *process*, so it must
+                // not be tenant-scoped — but with the opposite dependency rule.
+                // §7.4: the LB must not route to a process that cannot serve.
+                if request.uri().path() == READY_PATH {
+                    let Some(probe) = &tenancy.readiness else {
+                        return Box::pin(async move {
+                            Ok(axum::http::Response::builder()
+                                .status(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                                .header(axum::http::header::CONTENT_TYPE, "text/plain")
+                                .body(axum::body::Body::from(
+                                    "not ready\nreadiness: not configured\n",
+                                ))
+                                .expect("a static response"))
+                        });
+                    };
+                    let probe = Arc::clone(probe);
+                    return Box::pin(async move {
+                        Ok(crate::readiness::readyz(axum::extract::State(probe)).await)
+                    });
                 }
                 if let Some(panel) = &tenancy.panel
                     && !tenancy.admin_host.is_empty()

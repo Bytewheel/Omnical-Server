@@ -437,6 +437,13 @@ where
                         // absent rather than empty, so a filter on it cannot
                         // accidentally match the N=1 case.
                         tenant = tracing::field::Empty,
+                        // §7.4 (item 18): the stable id, alongside the slug
+                        // above. `tag_span` records both, and a field that is not
+                        // *declared* here is silently dropped by `Span::record`
+                        // — so a rename that misses this list makes the tag
+                        // disappear with no error.
+                        omnical.tenant_id = tracing::field::Empty,
+                        omnical.dispatch = tracing::field::Empty,
                     )
                 })
                 .on_request(move |req: &Request, span: &Span| {

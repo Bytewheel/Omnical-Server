@@ -111,6 +111,27 @@ pub struct BackupArgs {
     pub include_config: bool,
 }
 
+/// `rustical backup --all-tenants` (§7.4, item 18).
+///
+/// Kept off [`BackupArgs`] on purpose: `--all-tenants` and `--db` are mutually
+/// exclusive, and putting both on one struct invites a call that passes a
+/// specific database *and* asks for every tenant, where "every tenant" would win
+/// silently. Two structs, one command.
+#[derive(Debug, Default, Parser)]
+pub struct BackupAllArgs {
+    /// Directory to write the archives into. Defaults to `<data root>/backups`.
+    #[arg(long, value_name = "DIR")]
+    pub out_dir: Option<PathBuf>,
+    /// Include suspended tenants. Off by default: a suspended customer's data is
+    /// still data, but backing it up on a schedule they are not paying for is a
+    /// question the operator should answer, not the default.
+    #[arg(long)]
+    pub include_suspended: bool,
+    /// Gzip each archive. Off by default, for the same reason as `backup`.
+    #[arg(long)]
+    pub gzip: bool,
+}
+
 #[derive(Debug, Parser)]
 pub struct RestoreArgs {
     /// Archive written by `rustical backup`.

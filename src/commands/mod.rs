@@ -3,6 +3,7 @@ use clap::Parser;
 
 pub mod app_token;
 pub mod backup;
+pub mod backup_all;
 pub mod guest_shares;
 mod health;
 pub mod invites;

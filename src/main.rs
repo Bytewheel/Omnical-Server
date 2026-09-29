@@ -45,6 +45,35 @@ async fn main() -> Result<()> {
                 .map(|_| ())
         }
         Command::Restore(restore_args) => cmd_restore(restore_args, parse_config().await?).await,
+        // §7.4 (item 18). The control plane is opened here rather than inside the
+        // job, so "the control plane is unreadable" is one error instead of a
+        // loop that silently backs up nothing.
+        Command::BackupAll(all_args) => {
+            let config = parse_config().await?;
+            let data_root = config
+                .tenancy
+                .data_root(&config.data_store)
+                .map_err(anyhow::Error::msg)?;
+            let out_dir = all_args
+                .out_dir
+                .clone()
+                .unwrap_or_else(|| data_root.join("backups"));
+            let control = rustical::tenancy::open_control_plane(&format!(
+                "sqlite://{}",
+                config.tenancy.control_db_url.trim_start_matches("file:")
+            ))
+            .await?;
+            let report = rustical::commands::backup_all::back_up_all_tenants(
+                &control,
+                &config,
+                &config_file,
+                &out_dir,
+                all_args.include_suspended,
+                all_args.gzip,
+            )
+            .await?;
+            rustical::commands::backup_all::summarise(&report)
+        }
         // The wizard builds the config itself, so it is not parsed here — that
         // is the point: an operator without a config file is the normal case.
         Command::Setup(setup_args) => cmd_setup(setup_args, &config_file).await,

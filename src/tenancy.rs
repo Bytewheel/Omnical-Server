@@ -78,7 +78,7 @@ pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> 
     let builder = tenant_builder(config, &control_plane, &cache);
     let dispatch = Arc::new(HostDispatch::new(
         control_plane.clone(),
-        cache,
+        Arc::clone(&cache),
         builder,
         config.tenancy.clone(),
     ));
@@ -126,16 +126,30 @@ pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> 
         )
     };
 
-    Ok(TenancyAwareApp::Hosted(Arc::new(Tenancy::new(
+    // §7.4 (item 18): the readiness probe, over the same two things a request
+    // needs — the control plane and the tenant pool. Built here because this is
+    // the only place that has all three (the control plane Arc, the cache, and
+    // the resolved data root).
+    let readiness = Arc::new(crate::readiness::ReadinessProbe::new(
+        Arc::new(control_plane.clone()),
+        Arc::clone(&cache),
+        config
+            .tenancy
+            .data_root(&config.data_store)
+            .map_err(anyhow::Error::msg)?,
+    ));
+
+    Ok(TenancyAwareApp::Hosted(Arc::new(Tenancy::with_readiness(
         dispatch,
         panel,
         &admin_host,
+        readiness,
     ))))
 }
 
 /// Open and migrate the control plane — a **different file** from any tenant
 /// store (§3.4).
-pub(crate) async fn open_control_plane(url: &str) -> anyhow::Result<SqliteTenantStore> {
+pub async fn open_control_plane(url: &str) -> anyhow::Result<SqliteTenantStore> {
     let pool = create_control_plane_pool(url, true)
         .await
         .map_err(|e| anyhow::anyhow!("could not open the control plane at {url}: {e}"))?;

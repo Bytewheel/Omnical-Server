@@ -46,6 +46,7 @@ pub use commands::*;
 pub mod config;
 pub mod export;
 pub mod host_dispatch;
+pub mod readiness;
 pub mod register;
 pub mod rsvp;
 pub mod setup_mode;
@@ -53,6 +54,7 @@ mod setup_tracing;
 pub mod store_bundle;
 pub mod tenancy;
 pub mod tenant_overrides;
+pub mod tenant_telemetry;
 // Shared with the frontend crate so the portal prints byte-identical
 // export URLs to the CLI (PLAN.md §17.8.4).
 pub use rustical_frontend::url_builder;
@@ -85,6 +87,8 @@ pub enum Command {
     GuestShare(GuestSharesArgs),
     #[command(about = "Write a verified backup archive of the database (PLAN_DEPLOYMENTS.md §8.4)")]
     Backup(commands::BackupArgs),
+    /// §7.4: one archive per tenant, the payoff of C7.
+    BackupAll(commands::backup::BackupAllArgs),
     #[command(about = "Restore a backup archive, verifying it first (§8.4)")]
     Restore(commands::RestoreArgs),
     #[command(about = "Interactive first-run setup wizard (PLAN_DEPLOYMENTS.md §8.2)")]
