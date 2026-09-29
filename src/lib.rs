@@ -38,7 +38,7 @@ use tower_http::normalize_path::NormalizePathLayer;
 use tracing::{info, warn};
 
 pub mod app;
-mod commands;
+pub mod commands;
 mod tasks;
 pub use commands::*;
 pub mod config;
@@ -86,6 +86,8 @@ pub enum Command {
     Restore(commands::RestoreArgs),
     #[command(about = "Interactive first-run setup wizard (PLAN_DEPLOYMENTS.md §8.2)")]
     Setup(commands::SetupArgs),
+    #[command(about = "Create, inspect, suspend and delete tenants (PLAN_DEPLOYMENTS.md §6.5)")]
+    Tenant(commands::tenants::TenantArgs),
 }
 
 /// The twelve stores, as a named [`StoreBundle`].

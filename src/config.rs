@@ -425,6 +425,57 @@ impl TenancyConfig {
             .into_owned()
     }
 
+    /// Where tenant store files live: `[tenancy] data_root`, else the directory
+    /// of the configured `db_url` (§3.4).
+    ///
+    /// **One definition, two callers.** The server's per-tenant build
+    /// (`crate::tenancy`) and `rustical tenant create` (`crate::commands::tenants`)
+    /// both need it, and if they ever disagreed the failure would be silent and
+    /// confusing in a specific way: `tenant create` would prepare one path, the
+    /// server would open another, and the tenant would appear to exist while
+    /// every request to it failed. The default is also what keeps the N=1 case
+    /// on exactly today's path — no migration, no surprise.
+    ///
+    /// # Errors
+    /// If `data_root` is unset and the data store is not SQLite, since a
+    /// per-tenant path cannot be derived from it. The message names the setting
+    /// to add rather than only reporting that derivation failed.
+    pub fn data_root(&self, data_store: &DataStoreConfig) -> Result<std::path::PathBuf, String> {
+        if !self.data_root.is_empty() {
+            return Ok(std::path::PathBuf::from(&self.data_root));
+        }
+        // A `match` rather than a `let ... else`, because the fallback arm is
+        // unreachable while `DataStoreConfig` has one variant and it is kept on
+        // purpose: if a Postgres variant is added (§7 wave 3) this turns a wrong
+        // store path into a startup error naming the missing setting.
+        let sqlite = match data_store {
+            DataStoreConfig::Sqlite(sqlite) => sqlite,
+            #[allow(
+                unreachable_patterns,
+                reason = "kept for when DataStoreConfig grows a variant"
+            )]
+            other => {
+                return Err(format!(
+                    "[tenancy] data_root is unset and the data store is {other:?}, so a \
+                     per-tenant store path cannot be derived. Set [tenancy] data_root."
+                ));
+            }
+        };
+        // Strip the SQLx scheme and any query, so a `db_url` of
+        // `sqlite:///var/lib/omnical/db.sqlite3?mode=rwc` yields `/var/lib/omnical`
+        // rather than a directory literally containing `?mode=rwc`.
+        let path = sqlite
+            .db_url
+            .split('?')
+            .next()
+            .unwrap_or(sqlite.db_url.as_str())
+            .trim_start_matches("sqlite://");
+        std::path::Path::new(path).parent().map_or_else(
+            || Err(format!("could not derive a tenant data_root from {path}")),
+            |parent| Ok(parent.to_path_buf()),
+        )
+    }
+
     /// Create a tenant's store directory and return the path to its database.
     ///
     /// §3.4 writes the convention as `<data_root>/tenants/<tenant_id>/db.sqlite3`,

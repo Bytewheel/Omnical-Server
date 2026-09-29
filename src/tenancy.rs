@@ -26,7 +26,6 @@
 //!   to boot, from [`TenancyConfig::validate`], not a 404 on every request.
 
 use rustical_store_sqlite::{SqliteTenantStore, create_control_plane_pool};
-use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
 
@@ -42,8 +41,8 @@ use crate::store_bundle::StoreBundleCache;
 /// rejects, plus a failure to open or migrate the control plane. Both are
 /// startup failures: a server that boots and then 404s everybody is worse than
 /// one that refuses to start and says why.
-pub async fn serve_dispatch(config: &Config) -> Result<TenancyAwareApp, String> {
-    config.tenancy.validate()?;
+pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> {
+    config.tenancy.validate().map_err(anyhow::Error::msg)?;
 
     let control_plane = open_control_plane(&config.tenancy.control_db_url).await?;
     let cache = Arc::new(StoreBundleCache::new(config.tenancy.max_cached_tenants));
@@ -67,49 +66,11 @@ pub async fn serve_dispatch(config: &Config) -> Result<TenancyAwareApp, String> 
 
 /// Open and migrate the control plane — a **different file** from any tenant
 /// store (§3.4).
-async fn open_control_plane(url: &str) -> Result<SqliteTenantStore, String> {
+async fn open_control_plane(url: &str) -> anyhow::Result<SqliteTenantStore> {
     let pool = create_control_plane_pool(url, true)
         .await
-        .map_err(|e| format!("could not open the control plane at {url}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("could not open the control plane at {url}: {e}"))?;
     Ok(SqliteTenantStore::new(pool))
-}
-
-/// Where tenant store files go: `[tenancy] data_root`, or the directory of the
-/// configured `db_url`.
-///
-/// The fallback is what keeps the N=1 case on exactly today's path (§3.4) — no
-/// migration, no surprise. The directory is taken from the store URL, so the
-/// scheme and the query string are stripped rather than treated as part of a
-/// path.
-fn data_root(config: &Config) -> Result<std::path::PathBuf, String> {
-    if !config.tenancy.data_root.is_empty() {
-        return Ok(Path::new(&config.tenancy.data_root).to_path_buf());
-    }
-    // A `match` rather than a `let ... else`, because the fallback arm is
-    // unreachable while `DataStoreConfig` has one variant and it is being kept on
-    // purpose: if a Postgres variant is added (§7 wave 3) this turns a wrong
-    // store path into a startup error naming the missing setting, instead of a
-    // panic or a silent mis-derivation. `match` says the same thing without a
-    // lint suppression.
-    let sqlite = match &config.data_store {
-        crate::config::DataStoreConfig::Sqlite(sqlite) => sqlite,
-        #[allow(
-            unreachable_patterns,
-            reason = "kept for when DataStoreConfig grows a variant"
-        )]
-        other => {
-            return Err(format!(
-                "[tenancy] data_root is unset and the data store is {other:?}, so a per-tenant \
-                 `store path` cannot be derived"
-            ));
-        }
-    };
-    let path = sqlite.db_url.trim_start_matches("sqlite://");
-    let path = path.split('?').next().unwrap_or(path);
-    Path::new(path).parent().map_or_else(
-        || Err(format!("could not derive a tenant data_root from {path}")),
-        |parent| Ok(parent.to_path_buf()),
-    )
 }
 
 /// The closure that turns one tenant into `(stores, router)`.
@@ -125,7 +86,13 @@ fn tenant_builder(
     Arc::new(move |tenant| {
         let config = config.clone();
         Box::pin(async move {
-            let root = data_root(&config)?;
+            // This closure's error type is `String` (it is boxed into a
+            // `TenantBuilder`), so the anyhow error is flattened back to a
+            // message here rather than converted.
+            let root = config
+                .tenancy
+                .data_root(&config.data_store)
+                .map_err(|e: String| e)?;
 
             // The store directory, created before SQLite is asked for the file:
             // `create_if_missing(true)` creates a *file*, not the two

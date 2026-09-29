@@ -324,6 +324,88 @@ impl Fixture {
         out
     }
 
+    /// A config the **control-plane** commands can use: the server config, with
+    /// `[tenancy] enabled` and a `data_root`.
+    ///
+    /// The server's own config is not usable for `rustical tenant …` because its
+    /// `[data_store]` points at the *single-tenant* store. A config the control
+    /// plane accepts and a tenant store path derived from the same `data_root` is
+    /// what makes the CLI and the server agree, which is the point of
+    /// `TenancyConfig::data_root` being one function.
+    pub fn control_config(&self) -> PathBuf {
+        let path = self.path("control-cli.toml");
+        let body = format!(
+            "[data_store.sqlite]\ndb_url = \"sqlite://{db}\"\nrun_repairs = false\n\
+             skip_broken = false\n\n\
+             [tenancy]\nenabled = true\ncontrol_db_url = \"sqlite://{control}\"\n\
+             data_root = \"{root}\"\nmax_cached_tenants = 8\n",
+            db = self.path("data").join("db.sqlite3").display(),
+            control = self.path("control.sqlite3").display(),
+            root = self.path("data").display(),
+        );
+        std::fs::write(&path, body).expect("the control config");
+        path
+    }
+
+    /// Run a subcommand against an arbitrary config file.
+    pub fn cli_raw(&self, config: &PathBuf, args: &[&str]) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_rustical"))
+            .arg("--config-file")
+            .arg(config)
+            .args(args)
+            .output()
+            .expect("the CLI runs");
+        assert!(
+            out.status.success(),
+            "`{args:?}` failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// Run a subcommand, returning stdout **and** stderr together.
+    ///
+    /// For the destructive commands, whose notices go to stderr on purpose — an
+    /// operator reading only stdout must not be able to miss that a data
+    /// directory was removed.
+    pub fn cli_raw_combined(&self, config: &PathBuf, args: &[&str]) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_rustical"))
+            .arg("--config-file")
+            .arg(config)
+            .args(args)
+            .output()
+            .expect("the CLI runs");
+        assert!(
+            out.status.success(),
+            "`{args:?}` failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+
+    /// Run a subcommand expecting **failure**.
+    pub fn cli_fail(&self, config: &PathBuf, args: &[&str]) -> std::process::Output {
+        let out = Command::new(env!("CARGO_BIN_EXE_rustical"))
+            .arg("--config-file")
+            .arg(config)
+            .args(args)
+            .output()
+            .expect("the CLI runs");
+        assert!(
+            !out.status.success(),
+            "`{args:?}` unexpectedly succeeded: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    }
+
     /// Run a CLI subcommand against one tenant's data, returning its stdout.
     pub fn cli(&self, slug: &str, args: &[&str]) -> String {
         let id = self.tenant_id_any(slug);

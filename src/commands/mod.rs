@@ -10,6 +10,7 @@ pub mod membership;
 pub mod principals;
 pub mod setup;
 pub mod subscriptions;
+pub mod tenants;
 
 pub use backup::{
     ArchiveEntry, BackupArgs, BackupManifest, CONFIG_ENTRY, DB_ENTRY, MANIFEST_ENTRY,

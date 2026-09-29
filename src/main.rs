@@ -4,7 +4,7 @@ use clap::Parser;
 use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use rustical::config::Config;
-use rustical::{Args, Command};
+use rustical::{Args, Command, commands::tenants::cmd_tenants};
 use rustical::{
     cmd_backup, cmd_gen_config, cmd_guest_shares, cmd_health, cmd_invites, cmd_principals,
     cmd_restore, cmd_serve, cmd_setup, cmd_subscriptions,
@@ -38,6 +38,7 @@ async fn main() -> Result<()> {
         Command::GuestShare(guest_share_args) => {
             cmd_guest_shares(guest_share_args, parse_config().await?).await
         }
+        Command::Tenant(tenant_args) => cmd_tenants(tenant_args, parse_config().await?).await,
         Command::Backup(backup_args) => {
             cmd_backup(backup_args, parse_config().await?, &config_file)
                 .await
