@@ -358,6 +358,102 @@ impl Fixture {
         path
     }
 
+    /// A **server** config with the admin surface configured (§6.6.2).
+    ///
+    /// Separate from [`Self::control_config`] because that one is a CLI config —
+    /// its `[data_store]` points at the single-tenant store. This one is a real
+    /// serve config, so it can be booted to prove a startup refusal, which is
+    /// the only way to gate "refuses to start".
+    ///
+    /// The parameters exist so a test can express the *bad* combinations without
+    /// hand-writing TOML: `admin_host = ""` (no panel), `ack = false` (set but
+    /// unacknowledged), and an empty `admins` list.
+    pub fn admin_server_config(
+        &self,
+        admin_host: &str,
+        admins: &[&str],
+        ack: bool,
+        port: u16,
+    ) -> PathBuf {
+        let path = self.path(&format!("admin-server-{port}.toml"));
+        let body = format!(
+            "[http]\nbind = \"127.0.0.1:{port}\"\n\n\
+             [data_store.sqlite]\ndb_url = \"sqlite://{db}\"\nrun_repairs = false\n\
+             skip_broken = false\n\n\
+             [frontend]\nenabled = true\n\n\
+             [tenancy]\nenabled = true\n\
+             control_db_url = \"sqlite://{control}\"\n\
+             base_domain = \"t3.gg\"\n\
+             data_root = \"{root}\"\nmax_cached_tenants = 8\n\
+             admin_host = \"{admin_host}\"\n\
+             platform_admins = [{admins}]\n\
+             admin_single_instance_acknowledged = {ack}\n",
+            db = self.path("data").join("db.sqlite3").display(),
+            control = self.path("control.sqlite3").display(),
+            root = self.path("data").display(),
+            admins = admins
+                .iter()
+                .map(|a| format!("\"{a}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        std::fs::write(&path, body).expect("the admin server config");
+        path
+    }
+
+    /// Boot `rustical serve` on `config`, wait for it to **exit**, and return
+    /// what it printed.
+    ///
+    /// Panics if the process was still running after the deadline, because
+    /// "refuses to start" and "hangs" are different failures and a test that
+    /// conflates them passes on the second one. It also panics if the server
+    /// *succeeded*, so a refusal that stops firing is a failure rather than a
+    /// silent pass.
+    ///
+    /// The log is returned rather than left on disk so a test asserting on the
+    /// refusal's **message** does not have to guess the log file's name — which
+    /// is the kind of coupling that makes a test fail for the wrong reason the
+    /// first time a fixture is renamed.
+    #[must_use]
+    pub fn serve_expecting_refusal(&self, config: &PathBuf) -> String {
+        let log_path = self.path(&format!(
+            "serve-{}.log",
+            config.file_stem().expect("a config stem").display()
+        ));
+        let log = std::fs::File::create(&log_path).expect("a log file");
+        let err = log.try_clone().expect("a second handle");
+        // `--config-file` is a *global* arg and must precede the subcommand.
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rustical"))
+            .arg("--config-file")
+            .arg(config)
+            .arg("serve")
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(err))
+            .spawn()
+            .expect("the server starts");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait().expect("a wait status") {
+                let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+                assert!(
+                    !status.success(),
+                    "serve on {} exited successfully; the startup refusal never fired.\n\
+                     --- log ---\n{log}",
+                    config.display()
+                );
+                return log;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "serve on {} was still running after 30s; it did not refuse to start.\n\
+                 --- log ---\n{}",
+                config.display(),
+                std::fs::read_to_string(&log_path).unwrap_or_default()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     /// Run a subcommand against an arbitrary config file.
     pub fn cli_raw(&self, config: &PathBuf, args: &[&str]) -> String {
         let out = Command::new(env!("CARGO_BIN_EXE_rustical"))

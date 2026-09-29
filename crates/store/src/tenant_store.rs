@@ -192,6 +192,22 @@ pub trait TenantStore: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Look up a tenant by host **including suspended ones**.
+    ///
+    /// The same distinction as [`TenantStore::get_any_tenant_by_slug`], for
+    /// hosts: `get_tenant_by_host` is right for *resolution* and wrong for
+    /// *ownership*. Item 17 needs ownership — §6.6.2 refuses to start when a
+    /// tenant claims `admin_host`, and a **suspended** tenant that still owns a
+    /// hostname is a live claim: taking that host for the panel would strand a
+    /// customer, and refusing with "<unknown>" instead of naming the tenant
+    /// would make the refusal unactionable.
+    ///
+    /// # Errors
+    /// - [`Error::Other`] on a store failure.
+    async fn get_any_tenant_by_host(&self, _host: &str) -> Result<Option<Tenant>, Error> {
+        Ok(None)
+    }
+
     /// List tenants, newest first, optionally including suspended ones.
     ///
     /// The one getter that does not filter on `status`, because an admin view

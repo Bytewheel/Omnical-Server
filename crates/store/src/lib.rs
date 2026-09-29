@@ -6,6 +6,7 @@ pub mod calendar_store;
 pub mod error;
 pub use error::Error;
 pub mod actor;
+pub mod admin_store;
 pub mod auth;
 mod calendar;
 mod collection_share_store;
@@ -24,6 +25,7 @@ pub mod tests;
 
 pub use actor::Actor;
 pub use addressbook_store::*;
+pub use admin_store::{AdminCredential, AdminStanding};
 pub use calendar_source_store::*;
 pub use calendar_store::*;
 pub use collection_share_store::*;

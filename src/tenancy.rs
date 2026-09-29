@@ -45,6 +45,22 @@ pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> 
     config.tenancy.validate().map_err(anyhow::Error::msg)?;
 
     let control_plane = open_control_plane(&config.tenancy.control_db_url).await?;
+
+    // §6.6.2: `admin_host` is a **reserved** name, checked before anything is
+    // served. The panel is selected ahead of `HostDispatch`, so a collision does
+    // not error at the point of collision — it makes the tenant silently
+    // unreachable, which is why this is a startup refusal and not a 404.
+    //
+    // It needs the control plane, which is why it lives here and not in
+    // `TenancyConfig::validate`: the derivable-collision half of the question is
+    // "does a tenant with this slug exist", and that is a database read.
+    crate::admin::assert_admin_host_unclaimed(&control_plane, &config.tenancy).await?;
+
+    // A warning rather than a refusal — see the function's doc comment. An
+    // allowlist that leads the table is how bootstrap works, so this reports
+    // the gap and names the command that closes it.
+    crate::admin::warn_about_allowlist_gaps(&control_plane, &config.tenancy).await;
+
     let cache = Arc::new(StoreBundleCache::new(config.tenancy.max_cached_tenants));
 
     info!(
@@ -52,6 +68,7 @@ pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> 
         base_domain = %config.tenancy.base_domain,
         default_tenant = %config.tenancy.default_tenant,
         max_cached_tenants = config.tenancy.max_cached_tenants,
+        admin_host = %config.tenancy.normalised_admin_host(),
         "tenancy enabled: requests will be dispatched by Host"
     );
 

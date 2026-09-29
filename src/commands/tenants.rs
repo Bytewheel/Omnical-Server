@@ -36,6 +36,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use rustical_store::Actor;
+use rustical_store::admin_store::AdminCredentialStore;
+use rustical_store::admin_store::AdminStanding;
 use rustical_store::tenant::{Tenant, TenantId, TenantStatus};
 use rustical_store::tenant_store::{NewTenant, TenantQuota, TenantStore};
 use rustical_store_sqlite::{SqliteTenantStore, create_control_plane_pool};
@@ -66,6 +68,8 @@ pub enum TenantCommand {
     ///
     /// **Does not delete the tenant's data** — see [`DeleteArgs`].
     Delete(DeleteArgs),
+    /// Manage platform-admin credentials (§6.6.3).
+    Admin(AdminArgs),
 }
 
 /// `--status` for `tenant list`, mirroring [`TenantStatus`].
@@ -175,6 +179,60 @@ pub struct ConfigSetArgs {
 #[derive(Debug, Parser)]
 pub struct ConfigShowArgs {
     pub slug: String,
+}
+
+/// `rustical tenant admin …` — the bootstrap path for the panel's credentials.
+///
+/// **Names live in config, hashes live in the control plane** (§6.6.3), so
+/// these subcommands cannot add an admin on their own: `add` refuses any name
+/// `[tenancy] platform_admins` does not list. That refusal is the entire
+/// security property, and it is why this group is not a shortcut around config.
+#[derive(Debug, Parser)]
+pub struct AdminArgs {
+    #[command(subcommand)]
+    pub command: AdminCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AdminCommand {
+    /// Create or rotate one admin's credential.
+    Add(AdminAddArgs),
+    /// Delete one admin's credential row.
+    Remove(AdminNameArgs),
+    /// Show every name's standing across config and the control plane.
+    List(AdminListArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct AdminAddArgs {
+    /// The admin name. Must appear in `[tenancy] platform_admins`.
+    pub name: String,
+    /// Who is making this change. Defaults to `$OMNICAL_ACTOR`, then
+    /// `$SUDO_USER`, then `$USER`; refuses if none is set.
+    #[arg(long)]
+    pub actor: Option<String>,
+    /// Read the password from this instead of prompting.
+    ///
+    /// Environment-only is the point: an admin password is the one credential
+    /// in this tree that crosses every tenant boundary, and a command-line flag
+    /// for it would put it in `ps` output and shell history on a shared host.
+    /// The variable is named so that a mistyped `OMNICAL_ADMIN_PASSWORD` is
+    /// visible in the process environment rather than in the process table.
+    #[arg(long, env = "OMNICAL_ADMIN_PASSWORD", hide_env_values = true)]
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+pub struct AdminNameArgs {
+    /// The admin name.
+    pub name: String,
+}
+
+#[derive(Debug, Parser)]
+pub struct AdminListArgs {
+    /// Machine-readable output.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -297,6 +355,16 @@ pub async fn cmd_tenants(args: TenantArgs, config: crate::config::Config) -> Res
             // fails before it has created a row.
             let actor = resolve_actor(actor.as_deref())?;
             let slug_id = parse_slug(&slug)?;
+
+            // §6.6.2: `admin_host` is reserved, refused **here** so the
+            // collision cannot be introduced at all. The authoritative check
+            // still runs at startup — this is the config's view, and a start-up
+            // check is what catches a row written by something else. Two checks
+            // because they fail at different times for different reasons, not
+            // because either is uncertain.
+            for host in &hosts {
+                crate::admin::refuse_reserved_admin_host(&config.tenancy, host)?;
+            }
             let blob = match config_json {
                 Some(raw) => {
                     let text = if let Some(path) = raw.strip_prefix('@') {
@@ -522,6 +590,9 @@ pub async fn cmd_tenants(args: TenantArgs, config: crate::config::Config) -> Res
             }
         },
 
+        TenantCommand::Admin(AdminArgs { command }) => {
+            cmd_tenant_admin(command, &store, &config).await
+        }
         TenantCommand::Delete(DeleteArgs {
             slug,
             actor,
@@ -636,6 +707,202 @@ fn warn_unknown_keys(json: &str) {
             }
         }
     }
+}
+
+/// `rustical tenant admin …` (§6.6.3).
+///
+/// Separate from [`cmd_tenants`] because the two halves have opposite failure
+/// postures: a tenant command writes a row about *one* tenant, while these
+/// write or remove the credential that crosses *every* tenant boundary, and
+/// `add`'s refusal below is the reason config is authoritative.
+async fn cmd_tenant_admin(
+    command: AdminCommand,
+    store: &SqliteTenantStore,
+    config: &crate::config::Config,
+) -> Result<()> {
+    match command {
+        AdminCommand::Add(args) => admin_add(args, store, config).await,
+        AdminCommand::Remove(args) => admin_remove(args, store, config).await,
+        AdminCommand::List(args) => admin_list(args, store, config).await,
+    }
+}
+
+/// `tenant admin add` — the bootstrap path, and §6.6.3's refusal.
+async fn admin_add(
+    args: AdminAddArgs,
+    store: &SqliteTenantStore,
+    config: &crate::config::Config,
+) -> Result<()> {
+    let AdminAddArgs {
+        name,
+        actor,
+        password,
+    } = args;
+
+    // Resolved before the store is touched, so an unattributable change
+    // fails before it has written anything — the same rule as every
+    // other mutating command in this CLI.
+    let _actor = resolve_actor(actor.as_deref())?;
+
+    // §6.6.3's rule, and the reason config is authoritative. A row the
+    // config will never honour is a credential that looks live and is
+    // not: it is in the table, it is in `tenant admin list`, and it can
+    // never authenticate. Refusing here is the only place that mistake
+    // can still be caught cheaply.
+    if !config.tenancy.platform_admins.iter().any(|n| n == &name) {
+        anyhow::bail!(
+            "{name:?} is not in [tenancy] platform_admins, so a credential for it could \
+                     never authenticate — config is authoritative (§6.6.3). Add the name to the \
+                     config first, then re-run:\n\n    [tenancy]\n    platform_admins = [{name:?}]\n\n\
+                     Nothing has been changed."
+        );
+    }
+
+    let password = match password {
+        Some(p) => p,
+        None => super::principals::prompt_password_or_read_stdio()?,
+    };
+    if password.len() < MIN_ADMIN_PASSWORD {
+        anyhow::bail!(
+            "an admin password must be at least {MIN_ADMIN_PASSWORD} characters (got \
+                     {}). This is the one credential in the tree that reaches every tenant, so \
+                     it does not get a shorter floor than the first administrator's.",
+            password.len()
+        );
+    }
+
+    let hash = hash_admin_password(&password);
+    store
+        .set_admin_credential(&name, &hash, &rustical_store_sqlite::admin_now())
+        .await?;
+    eprintln!(
+        "Set the credential for {name:?}. The name must also stay in [tenancy] \
+                 platform_admins for it to be able to authenticate."
+    );
+    Ok(())
+}
+
+/// `tenant admin remove` — a revocation, and the half of it config cannot do.
+async fn admin_remove(
+    args: AdminNameArgs,
+    store: &SqliteTenantStore,
+    config: &crate::config::Config,
+) -> Result<()> {
+    let AdminNameArgs { name } = args;
+
+    // No `--confirm` and no actor. This is a revocation, it is reversible
+    // (re-`add`), and requiring an actor would be theatre: the meaningful
+    // half of a revocation is the config edit, which this cannot make.
+    let removed = store.remove_admin_credential(&name).await?;
+    if removed {
+        eprintln!("Removed the credential row for {name:?}.");
+    } else {
+        eprintln!("No credential row for {name:?}; nothing to remove.");
+    }
+    if config.tenancy.platform_admins.iter().any(|n| n == &name) {
+        eprintln!(
+            "Warning: {name:?} is still in [tenancy] platform_admins. It cannot \
+                     authenticate without a row, but remove the name from the config too, or a \
+                     later `tenant admin add` would re-arm it."
+        );
+    }
+    Ok(())
+}
+
+/// `tenant admin list` — config and control plane, reconciled.
+async fn admin_list(
+    args: AdminListArgs,
+    store: &SqliteTenantStore,
+    config: &crate::config::Config,
+) -> Result<()> {
+    let AdminListArgs { json } = args;
+
+    // The union of both halves, deliberately. A listing built from the
+    // table alone would show a not-allowlisted row as an ordinary admin,
+    // which is the one row an operator most needs to see.
+    let entries = store
+        .allowlist_gaps(&config.tenancy.platform_admins)
+        .await?;
+    if json {
+        let view: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|(name, standing)| {
+                let (state, detail) = match standing {
+                    AdminStanding::Ready { credential } => (
+                        "ready",
+                        serde_json::json!({
+                            "created_at": credential.created_at,
+                            "last_login_at": credential.last_login_at,
+                            "failed_attempts": credential.failed_attempts,
+                            "locked_until": credential.locked_until,
+                        }),
+                    ),
+                    AdminStanding::NoCredential => ("no-credential", serde_json::Value::Null),
+                    AdminStanding::NotAllowlisted { credential } => (
+                        "not-allowlisted",
+                        serde_json::json!({
+                            "created_at": credential.created_at,
+                            "last_login_at": credential.last_login_at,
+                            "failed_attempts": credential.failed_attempts,
+                            "locked_until": credential.locked_until,
+                        }),
+                    ),
+                    AdminStanding::Absent => ("absent", serde_json::Value::Null),
+                };
+                serde_json::json!({ "name": name, "state": state, "detail": detail })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else if entries.is_empty() {
+        eprintln!(
+            "no platform admins: [tenancy] platform_admins is empty and the control plane \
+                     has no credential rows"
+        );
+    } else {
+        for (name, standing) in &entries {
+            let suffix = match standing {
+                AdminStanding::Ready { credential } => format!(
+                    "\tenabled\tlast login {}",
+                    credential.last_login_at.as_deref().unwrap_or("never")
+                ),
+                AdminStanding::NoCredential => {
+                    "\tNO CREDENTIAL — run: rustical tenant admin add".to_owned()
+                }
+                AdminStanding::NotAllowlisted { credential } => format!(
+                    "\tNOT ALLOWLISTED — cannot authenticate ({} failed, locked until {})",
+                    credential.failed_attempts,
+                    credential.locked_until.as_deref().unwrap_or("—")
+                ),
+                AdminStanding::Absent => "\tabsent".to_owned(),
+            };
+            println!("{name}\t{suffix}");
+        }
+    }
+    Ok(())
+}
+
+/// The floor for a platform-admin password, matching `setup.rs`'s
+/// `MIN_ADMIN_PASSWORD`.
+///
+/// **Not** read from `[registration] min_password_length`: a config that lowered
+/// that for tenant users must not get to lower the floor on the credential that
+/// crosses every tenant boundary, and the wizard's constant is already a
+/// deliberate hard floor for the same reason.
+const MIN_ADMIN_PASSWORD: usize = 12;
+
+/// argon2 with a fresh salt, the same primitive and parameters `principals` and
+/// `password_reset.rs` use.
+///
+/// `expect` is sound here for the same reason it is there: `Argon2::default()`
+/// with a valid `SaltString` cannot fail, and there is no caller-supplied
+/// parameter that could make it.
+fn hash_admin_password(password: &str) -> String {
+    use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+    let salt = SaltString::generate(OsRng);
+    argon2::Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .expect("argon2 hashing cannot fail for valid parameters")
+        .to_string()
 }
 
 #[cfg(test)]

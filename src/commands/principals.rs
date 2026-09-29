@@ -15,7 +15,13 @@ use rustical_store::{
     auth::{AuthenticationProvider, Principal, PrincipalType},
 };
 
-fn prompt_password_or_read_stdio() -> anyhow::Result<String> {
+/// Read a password from the terminal (masked), or from stdin when piped.
+///
+/// `pub(crate)` because `tenant admin add` needs the identical behaviour and a
+/// second copy would be free to drift — in particular free to stop checking that
+/// the result is non-empty, which is the check that stops a piped `echo ""` from
+/// silently creating a credential that cannot be typed again.
+pub(crate) fn prompt_password_or_read_stdio() -> anyhow::Result<String> {
     let stdin = std::io::stdin();
     let password = if stdin.is_terminal() {
         rpassword::prompt_password_with_config(

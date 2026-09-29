@@ -37,6 +37,7 @@ use tower::Layer;
 use tower_http::normalize_path::NormalizePathLayer;
 use tracing::{info, warn};
 
+pub mod admin;
 pub mod app;
 pub mod commands;
 mod tasks;

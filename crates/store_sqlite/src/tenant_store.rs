@@ -30,7 +30,6 @@
 //! runtime error, so it is caught by the test suite rather than by the
 //! compiler.
 
-use chrono::Utc;
 use rustical_store::actor::Actor;
 use rustical_store::tenant::{Tenant, TenantId, TenantStatus};
 use rustical_store::tenant_store::AuditRow;
@@ -38,8 +37,8 @@ use rustical_store::tenant_store::{NewTenant, TenantQuota, TenantStore};
 use sqlx::{AssertSqlSafe, Row, SqlitePool};
 use tracing::{instrument, warn};
 
-use crate::BEGIN_IMMEDIATE;
 use crate::error::Error;
+use crate::{BEGIN_IMMEDIATE, now_iso};
 
 /// The columns every `Tenant` read selects, in one place.
 ///
@@ -48,18 +47,6 @@ use crate::error::Error;
 /// next time a column is added to the table.
 const TENANT_COLUMNS: &str = "id, slug, display_name, status, plan, config_json, \
                               suspended_at, created_at";
-
-/// ISO 8601 UTC, matching the format the rest of the fork writes timestamps in.
-///
-/// **Not** SQLite's `CURRENT_TIMESTAMP`, which yields `YYYY-MM-DD HH:MM:SS` —
-/// a space, no `Z`, and UTC-without-saying-so. The invites table already
-/// stores `YYYY-MM-DDTHH:MM:SSZ`, and a control plane whose timestamps are
-/// sorted against invite timestamps as *strings* would order `2026-09-28
-/// 12:00:00` after `2026-09-28T11:00:00Z` — silently, because `T` sorts after
-/// a space.
-fn now_iso() -> String {
-    Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
-}
 
 /// A control-plane row that does not satisfy its own schema.
 ///
@@ -334,6 +321,32 @@ impl TenantStore for SqliteTenantStore {
     }
 
     #[instrument(skip(self))]
+    async fn get_any_tenant_by_host(
+        &self,
+        host: &str,
+    ) -> Result<Option<Tenant>, rustical_store::Error> {
+        // `get_tenant_by_host` without the `status = 'active'` filter. The
+        // query is written out rather than parameterised over the filter so that
+        // neither version has a boolean flag deciding whether a claim counts —
+        // §6.6.2's whole argument is that a suspended tenant's host is still
+        // claimed.
+        const JOINED_COLUMNS: &str = "t.id, t.slug, t.display_name, t.status, t.plan, \
+                                        t.config_json, t.suspended_at, t.created_at";
+        let query = format!(
+            "SELECT {JOINED_COLUMNS} FROM tenants t \
+             JOIN tenant_hosts h ON h.tenant = t.id \
+             WHERE h.host = ?"
+        );
+        let row = sqlx::query(AssertSqlSafe(query.as_str()))
+            .bind(host)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Error::from)?;
+        row.map_or(Ok(None), |r| {
+            row_to_tenant(&r).map_err(Into::into).map(Some)
+        })
+    }
+
     async fn get_any_tenant_by_slug(
         &self,
         slug: &str,

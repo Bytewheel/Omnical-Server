@@ -1,6 +1,7 @@
 use core::num::NonZeroU32;
 use std::{path::PathBuf, str::FromStr};
 
+use crate::host_dispatch::normalise_host;
 use anyhow::anyhow;
 use reqwest::Url;
 use rustical_caldav::CalDavConfig;
@@ -380,6 +381,36 @@ pub struct TenancyConfig {
     /// The control plane's own database — a **different file** from any tenant
     /// store, on purpose (§3.4).
     pub control_db_url: String,
+    /// The one host the admin panel answers on (§6.6.2). **Empty means there is
+    /// no panel** — not a panel on every host, and not a panel on a default
+    /// path. Absence has to mean absence, or a self-hosted install acquires a
+    /// cross-tenant control surface by upgrading and nothing announces it.
+    pub admin_host: String,
+    /// Platform-admin **names**, and nothing else: no hash, no secret, so this
+    /// list is reviewable in version control and a rename is a one-line deploy
+    /// (§6.6.3).
+    ///
+    /// This list is **authoritative**. A name with a valid credential row in
+    /// `control.sqlite3` that is absent here can never authenticate, which is
+    /// the whole reason the two halves live in different places: it is what
+    /// stops anyone who can write the control plane — the file holding every
+    /// tenant's SMTP password (§3.6) — from promoting themselves.
+    pub platform_admins: Vec<String>,
+    /// The operator's assertion that this deployment is single-instance
+    /// (§6.6.4).
+    ///
+    /// **This is a claim, not a check, and the distinction is the point.**
+    /// Nothing in this tree can count how many copies of the server are
+    /// running, or tell whether `data_root` is on shared storage — so the only
+    /// honest implementation of "refuse to serve a panel unless single-instance"
+    /// is to require the operator to say so. It is set by hand and reviewed
+    /// like any other config change.
+    ///
+    /// A guessed check ("is this a local filesystem?") would look like a
+    /// guarantee and be wrong in exactly the cases that matter. When the
+    /// control plane becomes shared (§7, C7) this key becomes a real check and
+    /// goes away.
+    pub admin_single_instance_acknowledged: bool,
 }
 
 impl Config {
@@ -548,7 +579,114 @@ impl TenancyConfig {
                     .to_owned(),
             );
         }
+        self.validate_admin()?;
         Ok(())
+    }
+
+    /// The `admin_host` rules (§6.6.2, §6.6.4).
+    ///
+    /// Split out from [`Self::validate`] because it is the one part that is about
+    /// a *security* boundary rather than about making dispatch work, and the
+    /// error messages have to justify themselves on different grounds.
+    ///
+    /// Two of these are startup refusals on purpose. A panel that is configured
+    /// but unacknowledged, or acknowledged but unreachable, is a cross-tenant
+    /// control surface in a state nobody chose.
+    fn validate_admin(&self) -> Result<(), String> {
+        // The whole block is inert without a host, and that has to be the way
+        // every other key behaves here: an operator mid-migration may have set
+        // `platform_admins` before deciding on a host, and that is a normal
+        // order of operations rather than a mistake.
+        if self.admin_host.is_empty() {
+            return Ok(());
+        }
+
+        if !self.admin_single_instance_acknowledged {
+            return Err(format!(
+                "[tenancy] admin_host = {:?} is set but admin_single_instance_acknowledged is \
+                 not. The admin panel's credential and session stores are per-process and its \
+                 control plane is a per-instance SQLite file, so with more than one instance a \
+                 tenant created on one does not resolve on another and an admin's session is lost \
+                 whenever the load balancer routes them elsewhere. Nothing in this program can \
+                 count its own instances or tell whether data_root is on shared storage, so this \
+                 key is your assertion, not a probe. Set \
+                 admin_single_instance_acknowledged = true if this deployment really is \
+                 single-instance; if it is not, the panel must stay off until the control plane \
+                 and sessions are shared (§7).",
+                self.admin_host
+            ));
+        }
+
+        if self.platform_admins.is_empty() {
+            // Not a cosmetic check. `tenant admin add` refuses any name that is
+            // not in `platform_admins`, so with an empty list there is no way to
+            // create the first credential: the panel would be reserved, healthy,
+            // and permanently unauthenticatable, with no error at any point
+            // after boot.
+            return Err(format!(
+                "[tenancy] admin_host = {:?} is set but platform_admins is empty. Names live in \
+                 this list and hashes live in the control plane, and the list is authoritative, \
+                 so an empty one means no admin can ever authenticate. Add at least one name to \
+                 [tenancy] platform_admins.",
+                self.admin_host
+            ));
+        }
+
+        if self
+            .platform_admins
+            .iter()
+            .any(|name| name.trim().is_empty())
+        {
+            return Err(
+                "[tenancy] platform_admins contains an empty name. Every entry is an exact, \
+                 case-sensitive match against a credential row and an --actor string, so a \
+                 blank one can never authenticate and only hides a typo."
+                    .to_owned(),
+            );
+        }
+
+        // Compared normalised, because this is how the panel router will match it
+        // (§6.6.1's `ADMIN.EXAMPLE.COM:8443`). Catching the mismatch at boot is
+        // the difference between an obvious refusal and an operator staring at
+        // a 404 wondering which side of the split is misconfigured.
+        if self.normalised_admin_host().is_empty() {
+            return Err(format!(
+                "[tenancy] admin_host = {:?} normalises to nothing, so it can never match a Host \
+                 header.",
+                self.admin_host
+            ));
+        }
+        if !self.base_domain.is_empty()
+            && self.normalised_admin_host() == normalise_host(&self.base_domain)
+        {
+            return Err(format!(
+                "[tenancy] admin_host = {:?} is also base_domain. Every tenant resolves under \
+                 base_domain, so serving the panel from the apex would put a cross-tenant control \
+                 surface one hostname away from every customer.",
+                self.admin_host
+            ));
+        }
+        Ok(())
+    }
+
+    /// `admin_host` reduced to the form the router matches on: lowercased, with
+    /// any port and a single trailing dot removed.
+    ///
+    /// The same reduction [`normalise_host`](crate::host_dispatch::normalise_host)
+    /// applies to a request's `Host`, so that `ADMIN.EXAMPLE.COM:8443` from a
+    /// client still reaches the panel (§6.6.1).
+    #[must_use]
+    pub fn normalised_admin_host(&self) -> String {
+        normalise_host(&self.admin_host)
+    }
+
+    /// Is `host` the admin host? An empty `admin_host` matches nothing, so
+    /// "unset" and "set to something no request carries" behave identically —
+    /// which is what makes absence mean absence.
+    #[must_use]
+    pub fn is_admin_host(&self, host: &str) -> bool {
+        let admin = self.normalised_admin_host();
+        !admin.is_empty() && admin == normalise_host(host)
     }
 }
 

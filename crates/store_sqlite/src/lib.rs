@@ -5,6 +5,8 @@ use serde::Serialize;
 use sqlx::pool::PoolOptions;
 use sqlx::{Pool, Sqlite, SqlitePool, sqlite::SqliteConnectOptions};
 use tracing::info;
+mod admin_store;
+pub use admin_store::{admin_lockout_until, admin_now};
 mod addressbook_store;
 pub use addressbook_store::SqliteAddressbookStore;
 mod calendar_store;
@@ -31,6 +33,23 @@ pub use tenant_store::{SqliteTenantStore, new_tenant, new_tenant_id};
 
 // Begin statement for write transactions
 pub const BEGIN_IMMEDIATE: &str = "BEGIN IMMEDIATE";
+
+/// ISO 8601 UTC, matching the format the rest of the fork writes timestamps in.
+///
+/// **Not** SQLite's `CURRENT_TIMESTAMP`, which yields `YYYY-MM-DD HH:MM:SS` —
+/// a space, no `Z`, and UTC-without-saying-so. The invites table already
+/// stores `YYYY-MM-DDTHH:MM:SSZ`, and a control plane whose timestamps are
+/// sorted against invite timestamps as *strings* would order `2026-09-28
+/// 12:00:00` after `2026-09-28T11:00:00Z` — silently, because `T` sorts after
+/// a space.
+///
+/// Shared rather than repeated because the admin lockout compares a stored
+/// `locked_until` against a freshly written `now` **as strings**; two
+/// identically-formatted copies of this function in the same crate is one
+/// careless edit away from a lockout that is either eternal or void.
+pub(crate) fn now_iso() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
 
 #[cfg(any(test, feature = "test"))]
 pub mod tests;
