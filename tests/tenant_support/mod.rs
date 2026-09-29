@@ -42,6 +42,26 @@ pub struct Fixture {
     pub port: u16,
     pub child: Option<Child>,
     pub tenancy: bool,
+    /// The listener that reserved [`Self::port`], held from `new()` until
+    /// `start()`.
+    ///
+    /// **This exists because of a CI failure, not a theory.** The first version
+    /// bound port 0, read the number off it, and dropped the listener
+    /// immediately — so the port was unreserved for the whole of setup (writing
+    /// the config, seeding tenants, provisioning principals) and only claimed
+    /// when the child spawned. Linux reuses ephemeral ports, so a second
+    /// `Fixture` created in that window could take the same one. The symptom was
+    /// a **401** on an authenticated MKCALENDAR in `public_routes.rs`: the
+    /// request reached the *other* fixture's server, whose store had no such
+    /// principal. Nothing in the failure said "port collision", and the test
+    /// passed locally every time.
+    ///
+    /// Holding the listener shrinks the window from the whole of setup to the
+    /// microseconds between dropping it and the child's `bind`. A residual
+    /// collision now shows up as the child failing to bind, which
+    /// [`Self::wait_ready`] reports with the child's own log instead of as a
+    /// mysterious 401 somewhere else.
+    port_reservation: Option<std::net::TcpListener>,
 }
 
 impl Fixture {
@@ -59,10 +79,9 @@ impl Fixture {
         let dir = tempfile::tempdir().expect("a temp dir");
         // SQLite creates a *file* but not the directory above it.
         std::fs::create_dir_all(dir.path().join("data")).expect("the data directory");
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
-            l.local_addr().expect("an address").port()
-        };
+        // Kept alive in the struct, not a temporary.
+        let port_reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+        let port = port_reservation.local_addr().expect("an address").port();
 
         let mut config = format!(
             "[http]\nbind = \"127.0.0.1:{port}\"\n\n\
@@ -94,6 +113,7 @@ impl Fixture {
             port,
             child: None,
             tenancy: tenancy.is_some(),
+            port_reservation: Some(port_reservation),
         }
     }
 
@@ -864,6 +884,10 @@ impl Fixture {
     pub fn start(&mut self) {
         let log = std::fs::File::create(self.path("server.log")).expect("a log file");
         let err = log.try_clone().expect("a second handle");
+        // Released here, and only here: the child binds it on the next line, so
+        // the port is unreserved for as short a time as possible. Dropping it
+        // any earlier re-opens the window this field exists to close.
+        drop(self.port_reservation.take());
         // `--config-file` is a *global* arg and must precede the subcommand.
         self.child = Some(
             Command::new(env!("CARGO_BIN_EXE_rustical"))
@@ -885,7 +909,7 @@ impl Fixture {
     }
 
     /// Wait until the health path answers, or fail with the server's own log.
-    pub fn wait_ready(&self, probe: &str) {
+    pub fn wait_ready(&mut self, probe: &str) {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
@@ -901,6 +925,23 @@ impl Fixture {
             });
             if ok {
                 return;
+            }
+            // A child that has *exited* will never become ready, and on a
+            // collision it exits immediately. Polling to the 60s deadline would
+            // report "never became ready" for a server that died in
+            // milliseconds with the reason in its log.
+            if let Some(child) = self.child.as_mut()
+                && let Ok(Some(status)) = child.try_wait()
+            {
+                panic!(
+                    "the server exited with {status} before becoming ready on {probe}.\n\
+                     This is usually a port collision: another fixture took 127.0.0.1:{}\
+                     between this one reserving it and spawning.\n\
+                     --- config ---\n{}\n--- log ---\n{}",
+                    self.port,
+                    self.config_text(),
+                    self.log()
+                );
             }
             std::thread::sleep(Duration::from_millis(200));
         }
