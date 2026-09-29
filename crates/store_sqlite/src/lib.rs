@@ -5,9 +5,10 @@ use serde::Serialize;
 use sqlx::pool::PoolOptions;
 use sqlx::{Pool, Sqlite, SqlitePool, sqlite::SqliteConnectOptions};
 use tracing::info;
-mod admin_store;
-pub use admin_store::{admin_lockout_until, admin_now};
+// The admin credential store. The clock helpers live in `rustical_store`
+// beside the `is_locked` comparison that defines their format.
 mod addressbook_store;
+mod admin_store;
 pub use addressbook_store::SqliteAddressbookStore;
 mod calendar_store;
 pub use calendar_store::SqliteCalendarStore;

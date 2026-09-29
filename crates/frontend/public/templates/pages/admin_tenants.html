@@ -1,0 +1,94 @@
+{% extends "layouts/admin.html" %}
+
+{#
+  Tenant **metadata** only (§6.6.6). Every value here comes from the control
+  plane's `tenants` table. Nothing on this page is read from a tenant's store,
+  and there is no link from it into a tenant's portal, DAV namespace or export
+  feed — the panel never opens a tenant's database, so there is no code path
+  from here to customer content even if one were added by mistake.
+
+  There is deliberately **no delete button** (§6.6.1). A browser form is the
+  only irreversible, easily-misclicked route to a customer's data; `rustical
+  tenant delete --confirm` keeps that behind a shell.
+#}
+
+{% block title %}Omnical administration — tenants{% endblock %}
+
+{% block header_right %}
+<form method="POST" action="/frontend/admin/logout" class="logout_form">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit">Log out {{ admin }}</button>
+</form>
+{% endblock %}
+
+{% block content %}
+
+<h1>Tenants</h1>
+
+{% if let Some(message) = message %}
+<p>{{ message }}</p>
+{% endif %}
+{% if let Some(error) = error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+{% if tenants.is_empty() %}
+<p>No tenants.</p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Slug</th><th>Name</th><th>Status</th><th>Plan</th><th>Hosts</th><th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for t in tenants %}
+    <tr>
+      <td><a href="/frontend/admin/tenants/{{ t.id }}">{{ t.slug }}</a></td>
+      <td>{{ t.display_name }}</td>
+      <td>{{ t.status }}</td>
+      <td>{{ t.plan }}</td>
+      <td>{{ t.hosts.join(", ") }}</td>
+      <td>
+        <form method="POST" action="/frontend/admin/tenants/{{ t.id }}/{{ t.status_action }}" style="display:inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit">{% if t.is_suspended %}Resume{% else %}Suspend{% endif %}</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Create a tenant</h2>
+<form action="/frontend/admin/tenants" method="post" id="form_admin_create_tenant">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div>
+    <label>
+      Slug
+      <input type="text" name="slug" required pattern="[a-z0-9-]{1,63}" placeholder="acme">
+    </label>
+  </div>
+  <div>
+    <label>
+      Display name
+      <input type="text" name="display_name">
+    </label>
+  </div>
+  <div>
+    <label>
+      Plan
+      <input type="text" name="plan" value="free">
+    </label>
+  </div>
+  <div>
+    <label>
+      Extra host (optional)
+      <input type="text" name="host">
+    </label>
+  </div>
+  <button type="submit" class="margin-top-m">Create</button>
+</form>
+
+{% endblock %}

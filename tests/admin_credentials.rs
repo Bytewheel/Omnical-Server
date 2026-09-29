@@ -496,7 +496,7 @@ fn a_credential_stores_the_hash_and_keeps_its_creation_time() {
 fn repeated_failures_lock_the_admin_out() {
     let fixture = Fixture::new(Some(("t3.gg", "")));
     let store = fixture.control_plane();
-    let until = rustical_store_sqlite::admin_lockout_until(T0);
+    let until = rustical_store::admin_lockout_until(T0);
 
     rt().block_on(async {
         store
@@ -547,9 +547,9 @@ fn repeated_failures_lock_the_admin_out() {
 fn more_failures_cannot_shorten_a_lockout() {
     let fixture = Fixture::new(Some(("t3.gg", "")));
     let store = fixture.control_plane();
-    let until = rustical_store_sqlite::admin_lockout_until(T0);
+    let until = rustical_store::admin_lockout_until(T0);
     // A *later* deadline than the one the row already carries.
-    let later = rustical_store_sqlite::admin_lockout_until(&at(T0, 600));
+    let later = rustical_store::admin_lockout_until(&at(T0, 600));
 
     rt().block_on(async {
         store
@@ -585,7 +585,7 @@ fn more_failures_cannot_shorten_a_lockout() {
 fn a_successful_login_clears_the_lockout_state() {
     let fixture = Fixture::new(Some(("t3.gg", "")));
     let store = fixture.control_plane();
-    let until = rustical_store_sqlite::admin_lockout_until(T0);
+    let until = rustical_store::admin_lockout_until(T0);
     rt().block_on(async {
         store
             .set_admin_credential("ops", "h", T0)
@@ -618,7 +618,7 @@ fn a_successful_login_clears_the_lockout_state() {
 fn re_adding_a_credential_clears_its_lockout() {
     let fixture = Fixture::new(Some(("t3.gg", "")));
     let store = fixture.control_plane();
-    let until = rustical_store_sqlite::admin_lockout_until(T0);
+    let until = rustical_store::admin_lockout_until(T0);
     rt().block_on(async {
         store
             .set_admin_credential("ops", "h", T0)

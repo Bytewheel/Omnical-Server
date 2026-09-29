@@ -321,6 +321,21 @@ impl TenantStore for SqliteTenantStore {
     }
 
     #[instrument(skip(self))]
+    async fn list_tenant_hosts(&self, id: &TenantId) -> Result<Vec<String>, rustical_store::Error> {
+        // `ORDER BY host` so the panel's listing is stable between renders: two
+        // requests for an unchanged tenant produce the same page, which is what
+        // makes a diff of "what the operator saw" meaningful.
+        let rows = sqlx::query("SELECT host FROM tenant_hosts WHERE tenant = ? ORDER BY host")
+            .bind(id.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Error::from)?;
+        rows.iter()
+            .map(|r| r.try_get::<String, _>("host").map_err(Error::from))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     async fn get_any_tenant_by_host(
         &self,
         host: &str,

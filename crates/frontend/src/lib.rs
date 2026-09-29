@@ -32,6 +32,9 @@ pub mod url_builder;
 
 pub use config::FrontendConfig;
 use oidc_user_store::OidcUserStore;
+pub use routes::admin::{
+    ADMIN_SESSION_COOKIE, AdminPanel, AdminRateLimiter, normalise_host as admin_normalise_host,
+};
 
 use crate::routes::{
     addressbook::{route_addressbook, route_addressbook_restore},

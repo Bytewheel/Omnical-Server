@@ -1,0 +1,55 @@
+{% extends "layouts/admin.html" %}
+
+{#
+  One tenant, and its quota **limits** — never its usage.
+
+  §6.6.6 draws that line explicitly: showing usage means counting rows in a
+  tenant's store, which would be the first thing in the whole design to read
+  across the tenant boundary. A deferred `rustical tenant usage` job writes a
+  snapshot to the control plane, and this page reads that; the panel itself
+  never opens a tenant's database.
+#}
+
+{% block title %}Omnical administration — {{ tenant.slug }}{% endblock %}
+
+{% block header_right %}
+<form method="POST" action="/frontend/admin/logout" class="logout_form">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit">Log out {{ admin }}</button>
+</form>
+{% endblock %}
+
+{% block content %}
+
+<p><a href="/frontend/admin/tenants">&larr; All tenants</a></p>
+
+<h1>{{ tenant.display_name }}</h1>
+{% if let Some(error) = error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+<table>
+  <tbody>
+    <tr><th>Slug</th><td>{{ tenant.slug }}</td></tr>
+    <tr><th>Status</th><td>{{ tenant.status }}</td></tr>
+    <tr><th>Plan</th><td>{{ tenant.plan }}</td></tr>
+    <tr><th>Hosts</th><td>{{ tenant.hosts.join(", ") }}</td></tr>
+    <tr><th>Created</th><td>{{ tenant.created_at }}</td></tr>
+    <tr><th>Suspended</th><td>{{ tenant.suspended_at }}</td></tr>
+  </tbody>
+</table>
+
+<h2>Quota limits</h2>
+<p>
+  Limits only. Usage is deliberately not shown: measuring it would mean reading
+  a tenant's own database, and the admin panel never opens one.
+</p>
+<table>
+  <tbody>
+  {% for (label, value) in quota %}
+    <tr><th>{{ label }}</th><td>{{ value }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% endblock %}

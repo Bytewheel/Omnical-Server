@@ -130,6 +130,51 @@ impl Fixture {
         SqliteTenantStore::new(pool)
     }
 
+    /// [`Self::control_plane`], for a test that is **already** inside a runtime.
+    ///
+    /// The sync version builds its own runtime, and nesting one inside
+    /// `#[tokio::test]` panics with "Cannot start a runtime from within a
+    /// runtime" — which is a confusing way to learn that a fixture decided
+    /// which executor the test would use. `host_dispatch.rs` sets the precedent
+    /// of async fixture methods for exactly this reason.
+    pub async fn control_plane_async(&self) -> SqliteTenantStore {
+        let url = format!("sqlite://{}", self.path("control.sqlite3").display());
+        let pool = create_control_plane_pool(&url, true)
+            .await
+            .expect("the control plane migrates");
+        SqliteTenantStore::new(pool)
+    }
+
+    /// [`Self::tenant_id_any`], for a test already inside a runtime. Suspended
+    /// tenants included, so it is the "any" variant and not the active-only one.
+    pub async fn tenant_id_async(&self, slug: &str) -> TenantId {
+        self.control_plane_async()
+            .await
+            .get_any_tenant_by_slug(slug)
+            .await
+            .expect("a lookup")
+            .unwrap_or_else(|| panic!("{slug} was seeded"))
+            .id
+    }
+
+    /// [`Self::seed_tenants`], for a test already inside a runtime.
+    ///
+    /// The sync version builds its own runtime, and nesting one inside
+    /// `#[tokio::test]` panics with "Cannot start a runtime from within a
+    /// runtime". `admin_panel.rs` needs this because its tests are async (the
+    /// panel is driven by awaiting its own `Service`), and every fixture call in
+    /// them has to agree about the executor.
+    pub async fn seed_tenants_async(&self, slugs: &[&str]) {
+        let store = self.control_plane_async().await;
+        for slug in slugs {
+            let new: NewTenant = new_tenant(&(*slug).parse().expect("a valid slug"), None);
+            store
+                .create_tenant(&new, &test_actor())
+                .await
+                .unwrap_or_else(|e| panic!("seeding {slug} failed: {e}"));
+        }
+    }
+
     /// Seed tenants with optional per-tenant `config_json`.
     ///
     /// `config_json` is where §3.6's per-tenant overrides live, and `rsvp_secret`

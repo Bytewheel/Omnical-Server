@@ -25,13 +25,16 @@
 //! - A **missing `default_tenant` on an appliance-style install** is a refusal
 //!   to boot, from [`TenancyConfig::validate`], not a 404 on every request.
 
+use rustical_frontend::AdminPanel;
+use rustical_store::admin_store::AdminCredentialStore;
+use rustical_store::tenant_store::TenantStore;
 use rustical_store_sqlite::{SqliteTenantStore, create_control_plane_pool};
 use std::sync::Arc;
 use tracing::info;
 
 use crate::app::AppConfig;
 use crate::config::Config;
-use crate::host_dispatch::{HostDispatch, TenancyAwareApp, TenantBuilder};
+use crate::host_dispatch::{HostDispatch, Tenancy, TenancyAwareApp, TenantBuilder};
 use crate::store_bundle::StoreBundleCache;
 
 /// Build the serving app for a tenancy-enabled install.
@@ -73,11 +76,50 @@ pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> 
     );
 
     let builder = tenant_builder(config, &control_plane, &cache);
-    Ok(TenancyAwareApp::Hosted(Arc::new(HostDispatch::new(
-        control_plane,
+    let dispatch = Arc::new(HostDispatch::new(
+        control_plane.clone(),
         cache,
         builder,
         config.tenancy.clone(),
+    ));
+
+    // §6.6.1: the panel is mounted **in front of** `HostDispatch`, on exactly
+    // one host. `None` when `admin_host` is unset, and `None` means *absent*:
+    // no panel on a default path, no panel on every host.
+    //
+    // It is built from the same `control_plane` Arc the dispatcher holds, so
+    // the panel and the CLI audit into the same database — and it is the only
+    // thing in the process that can be handed the panel's stores, which is how
+    // "the panel never opens a tenant's database" stays true: `AdminPanel`
+    // holds two control-plane trait objects and has no path to a `StoreBundle`.
+    let admin_host = config.tenancy.normalised_admin_host();
+    let panel = if admin_host.is_empty() {
+        info!("no admin_host configured, so there is no admin panel");
+        None
+    } else {
+        // A **clone of the same store**, not a second `open_control_plane`. The
+        // pool inside is refcounted, so a clone is the same two connections
+        // under a different `Arc` — a second call would open a second pool
+        // against the same file, which is the exact thing
+        // `store_sqlite`'s module doc argues against for the tenant stores and
+        // which the control plane's own two-connection cap depends on.
+        let panel: Arc<dyn TenantStore> = Arc::new(control_plane.clone());
+        let admins: Arc<dyn AdminCredentialStore> = Arc::new(control_plane.clone());
+        Some(
+            Arc::new(AdminPanel::new(
+                panel,
+                admins,
+                config.tenancy.platform_admins.clone(),
+                &admin_host,
+            ))
+            .router(),
+        )
+    };
+
+    Ok(TenancyAwareApp::Hosted(Arc::new(Tenancy::new(
+        dispatch,
+        panel,
+        &admin_host,
     ))))
 }
 

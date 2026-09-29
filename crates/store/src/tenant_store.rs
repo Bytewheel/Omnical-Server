@@ -208,6 +208,26 @@ pub trait TenantStore: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Every host this tenant has claimed explicitly.
+    ///
+    /// Added for §6.6.6's tenant listing. The panel needs a tenant's hosts to
+    /// show alongside it, and the alternative was to resolve hosts *one at a
+    /// time* through [`TenantStore::get_any_tenant_by_host`] — which needs the
+    /// host first, and there is no way to enumerate hosts. So the panel could
+    /// have shown either nothing or nothing.
+    ///
+    /// **Explicit claims only.** A tenant also answers for
+    /// `{slug}.{base_domain}` derivably (§3.3 match 2), and that is computed by
+    /// the caller from `base_domain`; this returns the rows, not the resolved
+    /// set. Folding the derivation in here would need `base_domain`, which is
+    /// config — and this is a store trait.
+    ///
+    /// # Errors
+    /// - [`Error::Other`] on a store failure.
+    async fn list_tenant_hosts(&self, _id: &TenantId) -> Result<Vec<String>, Error> {
+        Ok(Vec::new())
+    }
+
     /// List tenants, newest first, optionally including suspended ones.
     ///
     /// The one getter that does not filter on `status`, because an admin view

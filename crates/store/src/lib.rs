@@ -25,7 +25,10 @@ pub mod tests;
 
 pub use actor::Actor;
 pub use addressbook_store::*;
-pub use admin_store::{AdminCredential, AdminStanding};
+pub use admin_store::{
+    AdminAuthOutcome, AdminCredential, AdminStanding, admin_lockout_until, admin_now,
+    verify_admin_password,
+};
 pub use calendar_source_store::*;
 pub use calendar_store::*;
 pub use collection_share_store::*;

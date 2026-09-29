@@ -1,0 +1,35 @@
+{% extends "layouts/admin.html" %}
+
+{#
+  The only page in the tree that reveals a panel exists. §6.6.1: that is
+  acceptable *because* it is reachable only on `admin_host`, and it is served
+  with a 404 rather than a login form on every other host.
+#}
+
+{% block content %}
+
+<div class="login_window">
+  <h1>Omnical administration</h1>
+  <p>Sign in with a platform-admin name.</p>
+  {% if let Some(error) = error %}
+  <p class="error">{{ error }}</p>
+  {% endif %}
+  <form action="/frontend/admin/login" method="post" id="form_admin_login">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div>
+      <label>
+        Name
+        <input type="text" name="name" required autocomplete="username" autofocus>
+      </label>
+    </div>
+    <div>
+      <label>
+        Password
+        <input type="password" name="password" required autocomplete="current-password">
+      </label>
+    </div>
+    <button type="submit" class="margin-top-m">Sign in</button>
+  </form>
+</div>
+
+{% endblock %}

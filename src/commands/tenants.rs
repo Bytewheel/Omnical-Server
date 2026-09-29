@@ -773,7 +773,7 @@ async fn admin_add(
 
     let hash = hash_admin_password(&password);
     store
-        .set_admin_credential(&name, &hash, &rustical_store_sqlite::admin_now())
+        .set_admin_credential(&name, &hash, &rustical_store::admin_now())
         .await?;
     eprintln!(
         "Set the credential for {name:?}. The name must also stay in [tenancy] \

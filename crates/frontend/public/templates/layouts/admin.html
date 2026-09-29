@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+
+{#
+  The admin panel's own layout, deliberately **not** extending
+  `layouts/default.html`.
+
+  That layout is the *tenant portal's* chrome: its logo links to
+  `/frontend/user`, its logout form posts to `/frontend/logout`, and its user
+  menu is built from a tenant `Principal`. None of those are correct here — an
+  admin is not a principal in any tenant's database, and the panel must never
+  emit a link into a tenant's router, because the panel's whole argument is that
+  there is no path from an admin session to tenant content.
+
+  So this is standalone: no `extends`, no `get_user()`, no portal links. It
+  reuses the stylesheet so the panel is not unstyled, and nothing else.
+#}
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  {# `noindex` as well as a dedicated host: the panel is a control surface, and
+     a search engine indexing it is a disclosure nobody chose. #}
+  <meta name="robots" content="noindex, nofollow">
+  <title>{% block title %}Omnical administration{% endblock %}</title>
+  <link rel="stylesheet" href="/frontend/assets/style.css" />
+</head>
+
+<body>
+  <header>
+      <span class="logo">Omnical administration</span>
+      {% block header_right %}{% endblock %}
+  </header>
+  <div class="content-pane">
+    <main>
+      {% block content %}<p>Placeholder</p>{% endblock %}
+    </main>
+    <footer>
+      Omnical {{ env!("CARGO_PKG_VERSION") }}
+    </footer>
+  </div>
+</body>
+
+</html>

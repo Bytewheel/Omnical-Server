@@ -509,14 +509,89 @@ pub fn normalise_host(raw: &str) -> String {
 /// path with no dispatch layer in front of it.
 pub enum TenancyAwareApp {
     Single(Router),
-    Hosted(Arc<HostDispatch>),
+    Hosted(Arc<Tenancy>),
+}
+
+/// A tenancy-enabled install: the tenant dispatcher, plus the admin panel
+/// mounted **in front of it** (§6.6.1).
+///
+/// The ordering is the whole design, so it lives in one struct rather than
+/// being spread across call sites:
+///
+/// ```text
+/// TenancyAwareApp::call(request):
+///     host == admin_host  ->  panel router   (zero tenant content, ever)
+///     path == /healthz    ->  health
+///     otherwise           ->  HostDispatch   (unchanged)
+/// ```
+///
+/// `panel` is `None` when `admin_host` is unset, and `admin_host` is the
+/// **normalised** form the panel was matched on, so the comparison here cannot
+/// disagree with the one that built the panel.
+pub struct Tenancy {
+    dispatch: Arc<HostDispatch>,
+    /// `None` means **there is no panel** — not a panel on a default path, and
+    /// not a panel on every host. §6.6.2: absence has to mean absence, or a
+    /// self-hosted install acquires a cross-tenant control surface by upgrading
+    /// and nothing announces it.
+    panel: Option<Router>,
+    admin_host: String,
+}
+
+impl Tenancy {
+    /// The dispatcher plus an optional panel.
+    ///
+    /// # Panics
+    /// Never. Takes the admin host already normalised so that this decision and
+    /// the one that selected the panel use the same string; a mismatch would
+    /// mean a panel nothing can reach, which §6.6.2 makes a startup refusal's
+    /// job to prevent rather than a panic's.
+    #[must_use]
+    pub fn new(dispatch: Arc<HostDispatch>, panel: Option<Router>, admin_host: &str) -> Self {
+        Self {
+            dispatch,
+            panel,
+            admin_host: normalise_host(admin_host),
+        }
+    }
+
+    /// The tenant dispatcher, for tests and for the builder's own use.
+    #[must_use]
+    pub const fn dispatch(&self) -> &Arc<HostDispatch> {
+        &self.dispatch
+    }
+
+    /// Is there a panel at all? `admin_host` unset, so no.
+    #[must_use]
+    pub const fn has_panel(&self) -> bool {
+        self.panel.is_some()
+    }
+}
+
+impl TenancyAwareApp {
+    /// Is an admin panel configured? `false` for a single-tenant install and for
+    /// a tenancy install with no `admin_host`.
+    ///
+    /// Exists because the "no panel" state is guarded in **two** places —
+    /// `serve_dispatch` does not build one, and `call` refuses to use one — and
+    /// without this the redundancy is untestable: mutating either guard alone
+    /// changes no observable behaviour, because the other one covers for it.
+    /// A diagnostic that can ask the question is also the thing a confused
+    /// operator should be able to ask.
+    #[must_use]
+    pub fn has_admin_panel(&self) -> bool {
+        match self {
+            Self::Single(_) => false,
+            Self::Hosted(tenancy) => tenancy.has_panel(),
+        }
+    }
 }
 
 impl Clone for TenancyAwareApp {
     fn clone(&self) -> Self {
         match self {
             Self::Single(r) => Self::Single(r.clone()),
-            Self::Hosted(d) => Self::Hosted(d.clone()),
+            Self::Hosted(t) => Self::Hosted(t.clone()),
         }
     }
 }
@@ -536,13 +611,42 @@ impl Service<HttpRequest> for TenancyAwareApp {
                 let mut router = router.clone();
                 Box::pin(async move { router.call(request).await })
             }
-            Self::Hosted(dispatch) => {
-                // Ahead of dispatch, deliberately. See [`HEALTH_PATH`].
+            Self::Hosted(tenancy) => {
+                // ── Ahead of dispatch, deliberately ──
+                //
+                // Two things are checked before a request can reach a tenant
+                // router, and the order between them is chosen rather than
+                // incidental:
+                //
+                // 1. **`/healthz` first.** It answers on *every* host, admin
+                //    included, because a health check that 404s on one hostname
+                //    is a load balancer that marks a healthy node down.
+                // 2. **Then the panel.** It is selected by normalised host, so a
+                //    `Host: ADMIN.EXAMPLE.COM:8443` claim still reaches it
+                //    (§6.6.1).
+                //
+                // A panel request is *answered* here and never forwarded down. No
+                // `fallback` to the dispatcher, no pass-through: there is no
+                // path from an admin session to tenant content, by
+                // construction rather than by review.
                 if request.uri().path() == HEALTH_PATH {
                     let mut health = health_router();
                     return Box::pin(async move { health.call(request).await });
                 }
-                let dispatch = Arc::clone(dispatch);
+                if let Some(panel) = &tenancy.panel
+                    && !tenancy.admin_host.is_empty()
+                {
+                    let host = request
+                        .headers()
+                        .get(axum::http::header::HOST)
+                        .and_then(|h| h.to_str().ok())
+                        .unwrap_or_default();
+                    if normalise_host(host) == tenancy.admin_host {
+                        let mut panel = panel.clone();
+                        return Box::pin(async move { panel.call(request).await });
+                    }
+                }
+                let dispatch = Arc::clone(&tenancy.dispatch);
                 Box::pin(async move { Ok(dispatch.handle(request).await) })
             }
         }

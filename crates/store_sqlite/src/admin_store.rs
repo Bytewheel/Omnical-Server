@@ -33,13 +33,13 @@
 //! inherited by using the same type rather than by being needed.
 
 use rustical_store::admin_store::{
-    ADMIN_LOCKOUT_SECS, ADMIN_MAX_FAILED_ATTEMPTS, AdminCredential, AdminCredentialStore,
-    AdminStanding,
+    ADMIN_MAX_FAILED_ATTEMPTS, AdminAuthOutcome, AdminCredential, AdminCredentialStore,
+    AdminStanding, verify_admin_password,
 };
 use sqlx::{AssertSqlSafe, Row};
 
+use crate::SqliteTenantStore;
 use crate::error::Error;
-use crate::{SqliteTenantStore, now_iso};
 
 /// The columns every admin read selects, in one place — same reasoning as
 /// `TENANT_COLUMNS` in `tenant_store.rs`: a `SELECT *` would silently widen the
@@ -202,6 +202,45 @@ impl AdminCredentialStore for SqliteTenantStore {
         Ok(())
     }
 
+    async fn authenticate_admin(
+        &self,
+        name: &str,
+        password: &str,
+        now: &str,
+        lockout_until: &str,
+    ) -> Result<AdminAuthOutcome, rustical_store::Error> {
+        // Order is load-bearing, and observably so: a locked name given a wrong
+        // password returns `Locked` and does **not** increment
+        // `failed_attempts`. Verified first it would return `Refused` and
+        // increment — telling a client its password is wrong for a name that is
+        // locked, and letting a flood of guesses keep moving the counter that
+        // would have released the lock.
+        //
+        // It also avoids running argon2 at all for a locked name. That part is
+        // **not** tested by a timing assertion: it has no observable outcome,
+        // and a wall-clock test in CI is a flake generator. The actual bound on
+        // that cost is the panel's rate limiter (10/h per name, 30/h per source),
+        // which is applied before the store is reached.
+        let Some(credential) = self.get_admin_credential(name).await? else {
+            // No row: nothing to record a failure against, and **no argon2**,
+            // which is the timing half of username enumeration. A real row with
+            // a wrong password costs a hash; this costs a lookup. §6.6.5's rate
+            // limiter bounds the rest.
+            return Ok(AdminAuthOutcome::Refused);
+        };
+        if credential.is_locked(now) {
+            return Ok(AdminAuthOutcome::Locked);
+        }
+
+        if !verify_admin_password(password, &credential.password_hash) {
+            self.record_login_failure(name, now, lockout_until).await?;
+            return Ok(AdminAuthOutcome::Refused);
+        }
+
+        self.record_login_success(name, now).await?;
+        Ok(AdminAuthOutcome::Ok)
+    }
+
     async fn allowlist_gaps(
         &self,
         allowlist: &[String],
@@ -230,33 +269,4 @@ impl AdminCredentialStore for SqliteTenantStore {
         out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
     }
-}
-
-/// The current time, in the format the credential columns are written in.
-///
-/// Public because the CLI writes `created_at`/`last_login_at` from outside the
-/// crate, and a caller that formatted the timestamp itself would eventually
-/// disagree with `is_locked`'s string comparison by one character.
-#[must_use]
-pub fn admin_now() -> String {
-    now_iso()
-}
-
-/// The lockout deadline for a failure recorded at `now`.
-///
-/// Exposed so the login handler computes the **same** string it would have
-/// stored, rather than depending on the SQL `CASE` alone: a test asserting
-/// "still locked one second before the deadline, free after it" needs the
-/// deadline without reaching into a row, and phase 3's login handler needs it
-/// to decide whether to even run the password comparison.
-///
-/// Never fails. An unparseable `now` falls back to the real clock, because a
-/// malformed timestamp should not be a panic on a login path, and the real
-/// clock is the only timestamp in reach that is certainly valid.
-#[must_use]
-pub fn admin_lockout_until(now: &str) -> String {
-    let deadline = chrono::DateTime::parse_from_rfc3339(now)
-        .unwrap_or_else(|_| chrono::Utc::now().fixed_offset())
-        + chrono::Duration::seconds(ADMIN_LOCKOUT_SECS);
-    deadline.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }

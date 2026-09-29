@@ -95,6 +95,65 @@ pub enum AdminStanding {
     Absent,
 }
 
+/// The outcome of an admin login attempt.
+///
+/// Deliberately **coarse**: `Unknown` and `WrongPassword` are different variants
+/// so the *store* can decide whether to record a failure, and are rendered
+/// identically by every caller, because telling an attacker which of the two
+/// they hit is the difference between a rate limit and a username oracle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminAuthOutcome {
+    /// Authenticated, and the login was recorded.
+    Ok,
+    /// No such credential row, **or** the password did not match. One variant on
+    /// purpose — see above.
+    Refused,
+    /// The name exists and is locked out. The caller may say so: the attacker
+    /// already knows the name is real, because they are being rate limited
+    /// against it.
+    Locked,
+}
+
+/// The current time, in the format the credential columns are written in.
+///
+/// `chrono` is already a dependency of this crate. The format is a property of
+/// the **trait's** contract — [`AdminCredential::is_locked`] compares these as
+/// strings — so the two functions that produce them belong beside it rather
+/// than in whichever store crate happens to be the SQLite one this month.
+#[must_use]
+pub fn admin_now() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// The lockout deadline for a failure recorded at `now`.
+///
+/// Computed in Rust, **not** in SQL, because SQLite's date functions return
+/// `YYYY-MM-DD HH:MM:SS` — a space and no `Z` — and [`AdminCredential::is_locked`]
+/// compares these as strings. A deadline written by SQLite and compared against
+/// a `now` from Rust would sort wrong for every timestamp, which is to say it
+/// would expire immediately.
+///
+/// Never fails: an unparseable `now` falls back to the real clock, because a
+/// malformed timestamp should not panic on a login path.
+#[must_use]
+pub fn admin_lockout_until(now: &str) -> String {
+    let deadline = chrono::DateTime::parse_from_rfc3339(now)
+        .unwrap_or_else(|_| chrono::Utc::now().fixed_offset())
+        + chrono::Duration::seconds(ADMIN_LOCKOUT_SECS);
+    deadline.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// Verify a password against an admin's stored argon2 hash.
+///
+/// In this crate, and not in the caller, for two reasons: the hash format is the
+/// store's business, and the panel should not be able to skip the verification
+/// and read `password_hash` directly. `password-auth` is already a dependency
+/// here (it is what `principals` uses), so nothing new is pulled in.
+#[must_use]
+pub fn verify_admin_password(password: &str, hash: &str) -> bool {
+    password_auth::verify_password(password, hash).is_ok()
+}
+
 /// Platform-admin credentials in the control plane (§6.6.3).
 ///
 /// Deliberately **not** a method on [`TenantStore`](crate::tenant_store::TenantStore):
@@ -181,6 +240,40 @@ pub trait AdminCredentialStore: Send + Sync + 'static {
     /// Any store error.
     async fn record_login_success(&self, _name: &str, _now: &str) -> Result<(), Error> {
         Err(Error::ReadOnly)
+    }
+
+    /// Authenticate one admin, and record the attempt.
+    ///
+    /// The whole sequence — lookup, lockout check, verify, record — lives in one
+    /// trait method for two reasons that both came from bugs this design avoids:
+    ///
+    /// 1. **The order is load-bearing.** A caller that checked the lockout
+    ///    *after* verifying the password would still burn argon2 on every
+    ///    attempt against a locked name, which is a free denial-of-service.
+    /// 2. **The record is not optional.** A caller that verifies and forgets to
+    ///    call [`Self::record_login_failure`] gets a lockout that silently does
+    ///    not lock, and nothing in the type system would say so.
+    ///
+    /// The allowlist is **not** consulted here, because this layer cannot see
+    /// config. Every caller must check `name` against the allowlist *first*
+    /// (§6.6.3) — `Ok(Refused)` for an unlisted name is the right answer, but
+    /// the caller is what enforces it, and the panel is where that check has to
+    /// be visible.
+    ///
+    /// `now` and `lockout_until` are supplied rather than read from the clock
+    /// here so a caller can compute the deadline in the same format it is
+    /// compared in, and so a test can drive time without sleeping.
+    ///
+    /// # Errors
+    /// Any store error.
+    async fn authenticate_admin(
+        &self,
+        _name: &str,
+        _password: &str,
+        _now: &str,
+        _lockout_until: &str,
+    ) -> Result<AdminAuthOutcome, Error> {
+        Ok(AdminAuthOutcome::Refused)
     }
 
     /// Reconcile `allowlist` (from config) against the credential table.
