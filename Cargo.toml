@@ -175,6 +175,9 @@ reqwest = { workspace = true, features = ["cookies", "form"] }
 figment = { version = "0.10", features = ["env", "toml", "test"] }
 
 [dependencies]
+# setup mode signals its own supervisor to restart (§9.3). Already in the
+# lock via tokio; explicit because we call it directly.
+libc = "0.2"
 lru.workspace = true
 rustical_ical.workspace = true
 rustical_store.workspace = true

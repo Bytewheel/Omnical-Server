@@ -48,6 +48,7 @@ pub mod export;
 pub mod host_dispatch;
 pub mod register;
 pub mod rsvp;
+pub mod setup_mode;
 mod setup_tracing;
 pub mod store_bundle;
 pub mod tenancy;

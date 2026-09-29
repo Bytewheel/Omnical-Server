@@ -4352,6 +4352,7 @@ dependencies = [
  "hex",
  "http",
  "insta",
+ "libc",
  "lru",
  "opentelemetry",
  "opentelemetry-otlp",

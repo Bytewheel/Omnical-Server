@@ -45,7 +45,7 @@ const DEFAULT_ADMIN: &str = "admin@localhost";
 /// The floor for the administrator's password, mirroring
 /// `[registration] min_password_length`'s default. A config that lowered that
 /// value does not get to lower the admin password with it.
-const MIN_ADMIN_PASSWORD: usize = 12;
+pub(crate) const MIN_ADMIN_PASSWORD: usize = 12;
 /// How many times a prompt re-asks before giving up on unusable input. Stops a
 /// typo in an unattended run from turning into an infinite loop.
 const MAX_PROMPT_ATTEMPTS: usize = 5;
@@ -734,7 +734,7 @@ async fn ensure_administrator(
     Ok((admin, true))
 }
 
-fn load_existing_config(config_file: &Path) -> Result<Option<Config>> {
+pub(crate) fn load_existing_config(config_file: &Path) -> Result<Option<Config>> {
     if !config_file.is_file() {
         return Ok(None);
     }
@@ -753,7 +753,7 @@ fn load_existing_config(config_file: &Path) -> Result<Option<Config>> {
 /// Write the config atomically at 0600. It holds the SMTP and IMAP passwords
 /// in cleartext, so the mode is part of the contract — the same protection
 /// class as the TLS key (§8.6).
-fn write_config(config_file: &Path, config: &Config) -> Result<()> {
+pub(crate) fn write_config(config_file: &Path, config: &Config) -> Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     if let Some(parent) = config_file.parent()
         && !parent.as_os_str().is_empty()
@@ -789,7 +789,7 @@ fn write_config(config_file: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn create_data_dir(data_dir: &Path) -> Result<()> {
+pub(crate) fn create_data_dir(data_dir: &Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -804,13 +804,13 @@ fn create_data_dir(data_dir: &Path) -> Result<()> {
         })
 }
 
-fn generate_rsvp_secret() -> String {
+pub(crate) fn generate_rsvp_secret() -> String {
     let mut bytes = [0_u8; 32];
     rand::rng().fill(&mut bytes);
     hex::encode(bytes)
 }
 
-fn hash_password(password: &str) -> rustical_store::Secret<String> {
+pub(crate) fn hash_password(password: &str) -> rustical_store::Secret<String> {
     use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
     let salt = SaltString::generate(OsRng);
     rustical_store::Secret::from(
@@ -934,7 +934,7 @@ fn preanswered(
     Ok(Some(answer.trim().to_owned()))
 }
 
-fn validate_email(answer: &str) -> Result<()> {
+pub(crate) fn validate_email(answer: &str) -> Result<()> {
     if answer.contains('@') && answer.len() > 3 {
         Ok(())
     } else {
@@ -942,7 +942,7 @@ fn validate_email(answer: &str) -> Result<()> {
     }
 }
 
-fn validate_url(what: &str, answer: &str) -> Result<String> {
+pub(crate) fn validate_url(what: &str, answer: &str) -> Result<String> {
     url::Url::parse(answer)
         .map(|_| answer.to_owned())
         .map_err(|e| anyhow!("{what}: {e}"))

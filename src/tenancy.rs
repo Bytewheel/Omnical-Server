@@ -135,7 +135,7 @@ pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> 
 
 /// Open and migrate the control plane — a **different file** from any tenant
 /// store (§3.4).
-async fn open_control_plane(url: &str) -> anyhow::Result<SqliteTenantStore> {
+pub(crate) async fn open_control_plane(url: &str) -> anyhow::Result<SqliteTenantStore> {
     let pool = create_control_plane_pool(url, true)
         .await
         .map_err(|e| anyhow::anyhow!("could not open the control plane at {url}: {e}"))?;

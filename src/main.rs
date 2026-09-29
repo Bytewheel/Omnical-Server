@@ -53,8 +53,20 @@ async fn main() -> Result<()> {
             cmd_health(config.http, health_args).await
         }
         Command::Serve => {
-            let config = parse_config().await?;
-            cmd_serve(args, config, None, true).await
+            // §9.3 setup mode, checked BEFORE the config is parsed — an
+            // appliance's first boot has no config file, so parsing first would
+            // fail with a parse error and never reach the wizard. `main` is the
+            // only place both the config path and the subcommand are in scope.
+            if rustical::setup_mode::should_enter_setup_mode(&config_file) {
+                let bind: std::net::SocketAddr = std::env::var("OMNICAL_SETUP_BIND")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(([192, 168, 0, 1], 8080).into());
+                rustical::setup_mode::serve_setup_mode(&config_file, bind).await
+            } else {
+                let config = parse_config().await?;
+                cmd_serve(args, config, None, true).await
+            }
         }
     }
 }
