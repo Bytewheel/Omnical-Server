@@ -161,11 +161,34 @@ impl Fixture {
         self.seed_tenants_with(&pairs);
     }
 
+    /// A tenant's id, from the **active-only** lookup.
+    ///
+    /// Panics for a suspended tenant, which is the store's own semantics and not
+    /// a test convenience: a suspended tenant does not resolve. Use
+    /// [`Self::tenant_id_any`] to reach a suspended tenant's *data*.
     pub fn tenant_id(&self, slug: &str) -> TenantId {
         let store = self.control_plane();
         rt().block_on(async {
             store
                 .get_tenant_by_slug(slug)
+                .await
+                .expect("a lookup")
+                .unwrap_or_else(|| panic!("{slug} was seeded and is active"))
+                .id
+        })
+    }
+
+    /// A tenant's id, active or not.
+    ///
+    /// Needed by anything that addresses a tenant's *store* — an admin still has
+    /// to be able to reach a suspended tenant's data, and a fixture that used the
+    /// active-only lookup would make "refuse to select a suspended tenant"
+    /// untestable, because the fixture could not even name the tenant.
+    pub fn tenant_id_any(&self, slug: &str) -> TenantId {
+        let store = self.control_plane();
+        rt().block_on(async {
+            store
+                .get_any_tenant_by_slug(slug)
                 .await
                 .expect("a lookup")
                 .unwrap_or_else(|| panic!("{slug} was seeded"))
@@ -225,20 +248,85 @@ impl Fixture {
 
     /// A config file pointing at one tenant's own data, for the CLI.
     ///
-    /// This is the shape `rustical tenant` (item 11) will replace.
+    /// Two things in it matter and are easy to miss:
+    ///
+    /// - **`[tenancy] enabled = true`.** `OMNICAL_TENANT` is a no-op on a
+    ///   config with tenancy off, by design — a single-tenant install has no
+    ///   per-tenant overrides to apply, and silently reading them would be
+    ///   surprising. So the config an admin uses to operate on one tenant's data
+    ///   has to name the control plane as well as the store. This is the shape
+    ///   `rustical tenant` (item 11) will replace with an explicit subcommand.
+    /// - **`[subscriptions] enabled = true`.** `subscriptions add` refuses to
+    ///   mint a feed whose routes are not mounted.
     pub fn tenant_config(&self, id: &TenantId) -> PathBuf {
         let path = self.path(&format!("tenant-{}.toml", id.as_str()));
         let body = format!(
-            "[data_store.sqlite]\ndb_url = \"{db}\"\nrun_repairs = false\nskip_broken = false\n",
-            db = self.tenant_db(id).display()
+            "[data_store.sqlite]\ndb_url = \"{db}\"\nrun_repairs = false\nskip_broken = false\n\n\
+             [subscriptions]\nenabled = true\npublic_url = \"https://global.example\"\n\n\
+             [tenancy]\nenabled = true\ncontrol_db_url = \"sqlite://{control}\"\n\
+             data_root = \"{root}\"\n",
+            db = self.tenant_db(id).display(),
+            control = self.path("control.sqlite3").display(),
+            root = self.path("data").display(),
         );
         std::fs::write(&path, body).expect("the tenant config");
         path
     }
 
+    /// Run a CLI subcommand against one tenant's data **as a selected tenant**.
+    ///
+    /// `OMNICAL_TENANT=slug` is what makes the command merge that tenant's
+    /// `config_json` over the global config — §6.3 rows 30-31, which are about
+    /// commands rather than about the server.
+    pub fn cli_as(&self, slug: &str, as_tenant: &str, args: &[&str]) -> String {
+        let id = self.tenant_id(slug);
+        let config = self.tenant_config(&id);
+        let out = Command::new(env!("CARGO_BIN_EXE_rustical"))
+            .arg("--config-file")
+            .arg(&config)
+            .args(args)
+            .env("OMNICAL_TENANT", as_tenant)
+            .output()
+            .expect("the CLI runs");
+        assert!(
+            out.status.success(),
+            "`{args:?}` as {as_tenant} failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// Run a CLI subcommand expecting **failure**, returning the full output.
+    ///
+    /// Used by the gates that assert a refusal, so a command which starts
+    /// succeeding is a test failure rather than a silent pass.
+    pub fn cli_expect_failure(
+        &self,
+        slug: &str,
+        as_tenant: &str,
+        args: &[&str],
+    ) -> std::process::Output {
+        let id = self.tenant_id_any(slug);
+        let config = self.tenant_config(&id);
+        let out = Command::new(env!("CARGO_BIN_EXE_rustical"))
+            .arg("--config-file")
+            .arg(&config)
+            .args(args)
+            .env("OMNICAL_TENANT", as_tenant)
+            .output()
+            .expect("the CLI runs");
+        assert!(
+            !out.status.success(),
+            "`{args:?}` as {as_tenant} unexpectedly succeeded: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        out
+    }
+
     /// Run a CLI subcommand against one tenant's data, returning its stdout.
     pub fn cli(&self, slug: &str, args: &[&str]) -> String {
-        let id = self.tenant_id(slug);
+        let id = self.tenant_id_any(slug);
         let config = self.tenant_config(&id);
         let out = Command::new(env!("CARGO_BIN_EXE_rustical"))
             .arg("--config-file")

@@ -382,6 +382,32 @@ pub struct TenancyConfig {
     pub control_db_url: String,
 }
 
+impl Config {
+    /// This config with a tenant's `config_json` merged over it (§3.6).
+    ///
+    /// The direction is global ← tenant: the tenant's keys override, and
+    /// anything absent inherits. That is what makes a tenant's blob sparse — a
+    /// tenant who overrides nothing has `{}` and behaves exactly like the
+    /// single-tenant install.
+    ///
+    /// Deliberately **not** on `TenancyConfig`: the merge reaches into
+    /// `scheduling`, `subscriptions` and `registration`, which are the caller's
+    /// business, and a method on the tenancy section that rewrote three other
+    /// sections would be a pleasant surprise.
+    ///
+    /// `runtimes` note: this is pure data manipulation, so it is callable from
+    /// anywhere including a CLI that has no async context.
+    #[must_use]
+    pub fn with_tenant_overrides(&self, tenant: &rustical_store::Tenant) -> Self {
+        let overrides = crate::tenant_overrides::Overrides::parse(&tenant.config_json);
+        let mut out = self.clone();
+        out.scheduling = overrides.scheduling(&self.scheduling);
+        out.subscriptions = overrides.subscriptions(&self.subscriptions);
+        out.registration = overrides.registration(&self.registration);
+        out
+    }
+}
+
 impl TenancyConfig {
     /// The store path for a tenant: `<data_root>/tenants/<tenant_id>/db.sqlite3`
     /// (§3.4).

@@ -63,6 +63,52 @@ pub async fn create_control_plane_pool(
 ) -> Result<Pool<Sqlite>, sqlx::Error> {
     let options: SqliteConnectOptions = db_url.parse()?;
 
+    // The control plane file holds SMTP passwords: §3.6 puts per-tenant
+    // `scheduling.smtp` identities in `tenants.config_json`, and §6.3 calls that
+    // out as "critical" for exactly this reason. A SQLite file is created 0644
+    // by default, i.e. world-readable, so a self-hoster's tenant passwords would
+    // be readable by every account on the machine — on a shared host, by every
+    // other tenant of the host.
+    //
+    // Created here with `mode(0o600)` before SQLx opens it. The alternative,
+    // `set_permissions` after the fact, has a window in which the file exists
+    // world-readable; `OpenOptions` with a mode has none.
+    //
+    // `O_CREAT` without `O_TRUNC`: an existing control plane keeps its contents
+    // and its mode, so restarting does not reset an operator's deliberate
+    // `0o640` for a group-readable service account.
+    if let Some(path) = sqlite_path(db_url)
+        && !std::path::Path::new(&path).exists()
+    {
+        if let Some(parent) = std::path::Path::new(&path).parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                sqlx::Error::Configuration(
+                    format!(
+                        "could not create {}/ for the control plane: {e}",
+                        parent.display()
+                    )
+                    .into(),
+                )
+            })?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true);
+        // `mode` applies only to a file *this* call creates, which is
+        // exactly the case being handled. Unix-only: this file is a
+        // credential whose protection class is a POSIX mode, and the
+        // appliance target is aarch64-linux.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(&path).map_err(|e| {
+            sqlx::Error::Io(std::io::Error::other(format!(
+                "could not create the control plane at {path}: {e}"
+            )))
+        })?;
+    }
+
     let db = PoolOptions::<Sqlite>::new()
         .max_connections(2)
         .connect_with(
@@ -76,6 +122,28 @@ pub async fn create_control_plane_pool(
         sqlx::migrate!("./control_migrations").run(&db).await?;
     }
     Ok(db)
+}
+
+/// The filesystem path a sqlite URL points at, or `None` for an in-memory
+/// database.
+///
+/// The `SQLx` driver accepts the sqlite scheme with or without slashes, the file
+/// scheme, and bare paths, all for the same thing — and the in-memory form is not a
+/// path at all. Getting this wrong would mean creating a stray file named after it
+/// in the working directory, so every
+/// form is enumerated rather than pattern-matched.
+fn sqlite_path(db_url: &str) -> Option<String> {
+    let rest = db_url
+        .strip_prefix("sqlite://")
+        .or_else(|| db_url.strip_prefix("sqlite:"))
+        .or_else(|| db_url.strip_prefix("file:"))
+        .unwrap_or(db_url);
+    // Drop any `?mode=rwc`-style query; it is not part of the path.
+    let rest = rest.split('?').next().unwrap_or(rest);
+    if rest.is_empty() || rest == ":memory:" {
+        return None;
+    }
+    Some(rest.to_owned())
 }
 
 pub async fn create_db_pool(db_url: &str, migrate: bool) -> Result<Pool<Sqlite>, sqlx::Error> {
