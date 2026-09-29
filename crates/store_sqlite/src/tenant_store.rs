@@ -31,11 +31,14 @@
 //! compiler.
 
 use chrono::Utc;
+use rustical_store::actor::Actor;
 use rustical_store::tenant::{Tenant, TenantId, TenantStatus};
+use rustical_store::tenant_store::AuditRow;
 use rustical_store::tenant_store::{NewTenant, TenantQuota, TenantStore};
 use sqlx::{AssertSqlSafe, Row, SqlitePool};
 use tracing::{instrument, warn};
 
+use crate::BEGIN_IMMEDIATE;
 use crate::error::Error;
 
 /// The columns every `Tenant` read selects, in one place.
@@ -172,10 +175,42 @@ impl SqliteTenantStore {
     }
 }
 
+/// Append one audit row, inside the caller's transaction.
+///
+/// Takes `&mut Transaction` deliberately. The borrow is the point: an audit
+/// write that cannot join the caller's transaction is an audit write that can be
+/// lost, and §6.6.7 is explicit that the mutation and its record are one
+/// transaction or the control does not exist.
+async fn audit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    actor: &Actor,
+    action: &str,
+    tenant: Option<&TenantId>,
+    detail: Option<&str>,
+) -> Result<(), rustical_store::Error> {
+    sqlx::query(
+        "INSERT INTO control_admin_audit (actor, action, tenant, at, detail) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(actor.as_str())
+    .bind(action)
+    .bind(tenant.map(TenantId::as_str))
+    .bind(now_iso())
+    .bind(detail)
+    .execute(&mut **tx)
+    .await
+    .map_err(Error::from)?;
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl TenantStore for SqliteTenantStore {
     #[instrument(skip(self, new_tenant))]
-    async fn create_tenant(&self, new_tenant: &NewTenant) -> Result<(), rustical_store::Error> {
+    async fn create_tenant(
+        &self,
+        new_tenant: &NewTenant,
+        actor: &Actor,
+    ) -> Result<(), rustical_store::Error> {
         let tenant = &new_tenant.tenant;
         if !tenant.is_active() {
             // Creating a tenant already suspended is almost always a bug in a
@@ -188,6 +223,12 @@ impl TenantStore for SqliteTenantStore {
                  so that the transition is recorded"
             )));
         }
+
+        let mut tx = self
+            .pool
+            .begin_with(BEGIN_IMMEDIATE)
+            .await
+            .map_err(Error::from)?;
 
         // A unique violation on `slug` is mapped to `AlreadyExists` by
         // `crate::Error`'s sqlx conversion, which is the error §3.4 wants: the
@@ -204,19 +245,30 @@ impl TenantStore for SqliteTenantStore {
         .bind(&tenant.plan)
         .bind(&tenant.config_json)
         .bind(now_iso())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(Error::from)?;
 
-        if !new_tenant.hosts.is_empty() {
-            // Not in a transaction with the insert above, and that is
-            // deliberate: a tenant with no hosts yet is reachable by slug
-            // (§3.3 match 3) and by `default_tenant`, so a partial failure here
-            // leaves a usable tenant rather than an orphan row. The retry is
-            // idempotent — `set_tenant_hosts` upserts — so a caller that gets
-            // `AlreadyExists` for a host has not corrupted anything.
-            self.set_tenant_hosts(&tenant.id, &new_tenant.hosts).await?;
+        for host in &new_tenant.hosts {
+            sqlx::query("INSERT INTO tenant_hosts (host, tenant) VALUES (?, ?)")
+                .bind(host.trim().trim_end_matches('.').to_ascii_lowercase())
+                .bind(tenant.id.as_str())
+                .execute(&mut *tx)
+                .await
+                .map_err(Error::from)?;
         }
+
+        // Inside the transaction: a tenant that exists without a record of who
+        // created it is exactly the state the audit trail rules out.
+        audit(
+            &mut tx,
+            actor,
+            "create_tenant",
+            Some(&tenant.id),
+            Some(&format!("{{\"slug\":{}}}", tenant.slug)),
+        )
+        .await?;
+        tx.commit().await.map_err(Error::from)?;
         Ok(())
     }
 
@@ -321,6 +373,7 @@ impl TenantStore for SqliteTenantStore {
         &self,
         id: &TenantId,
         status: TenantStatus,
+        actor: &Actor,
     ) -> Result<(), rustical_store::Error> {
         // `suspended_at` is written in the same statement as `status` so the
         // two can never disagree — there is no window in which a tenant is
@@ -331,16 +384,30 @@ impl TenantStore for SqliteTenantStore {
             TenantStatus::Active => None,
             TenantStatus::Suspended => Some(now_iso()),
         };
+        let mut tx = self
+            .pool
+            .begin_with(BEGIN_IMMEDIATE)
+            .await
+            .map_err(Error::from)?;
         let result = sqlx::query("UPDATE tenants SET status = ?, suspended_at = ? WHERE id = ?")
             .bind(status.as_str())
             .bind(suspended_at)
             .bind(id.as_str())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(Error::from)?;
         if result.rows_affected() == 0 {
             return Err(rustical_store::Error::NotFound);
         }
+        audit(
+            &mut tx,
+            actor,
+            "update_tenant_status",
+            Some(id),
+            Some(&format!(r#"{{"status":"{status}"}}"#)),
+        )
+        .await?;
+        tx.commit().await.map_err(Error::from)?;
         Ok(())
     }
 
@@ -349,7 +416,13 @@ impl TenantStore for SqliteTenantStore {
         &self,
         id: &TenantId,
         quota: TenantQuota,
+        actor: &Actor,
     ) -> Result<(), rustical_store::Error> {
+        let mut tx = self
+            .pool
+            .begin_with(BEGIN_IMMEDIATE)
+            .await
+            .map_err(Error::from)?;
         let result = sqlx::query(
             "UPDATE tenants SET quota_principals = ?, quota_calendars = ?, \
              quota_megabytes = ? WHERE id = ?",
@@ -358,12 +431,24 @@ impl TenantStore for SqliteTenantStore {
         .bind(quota.calendars)
         .bind(quota.megabytes)
         .bind(id.as_str())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(Error::from)?;
         if result.rows_affected() == 0 {
             return Err(rustical_store::Error::NotFound);
         }
+        audit(
+            &mut tx,
+            actor,
+            "set_quota",
+            Some(id),
+            Some(&format!(
+                "{{\"principals\":{:?},\"calendars\":{:?},\"megabytes\":{:?}}}",
+                quota.principals, quota.calendars, quota.megabytes
+            )),
+        )
+        .await?;
+        tx.commit().await.map_err(Error::from)?;
         Ok(())
     }
 
@@ -396,111 +481,202 @@ impl TenantStore for SqliteTenantStore {
         &self,
         id: &TenantId,
         hosts: &[String],
+        actor: &Actor,
     ) -> Result<(), rustical_store::Error> {
-        // A host is a key into every request in the system, so hosts are
-        // normalised here rather than trusted: `HostDispatch` will have
-        // lowercased and stripped the port, and a host stored with different
-        // capitalisation than a request carries would simply never match.
-        let mut normalised = Vec::with_capacity(hosts.len());
-        for host in hosts {
-            let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
-            if !host.is_empty() {
-                normalised.push(host);
-            }
-        }
-        if normalised.len() != hosts.len() {
-            warn!(
-                requested = hosts.len(),
-                kept = normalised.len(),
-                "dropped blank host entries; a blank host would shadow every tenant"
-            );
-        }
+        let mut tx = self
+            .pool
+            .begin_with(BEGIN_IMMEDIATE)
+            .await
+            .map_err(Error::from)?;
 
-        // Verify the tenant exists before writing anything. Without this, the
-        // host INSERT trips the `tenant_hosts -> tenants` foreign key and comes
-        // back as a raw SQL constraint error rather than the `NotFound` the
-        // trait documents — and a caller cannot tell "no such tenant" from
-        // "the database is broken". The check costs one indexed lookup on an
-        // admin-only path.
+        // The tenant must exist. Inside the transaction, because this is the
+        // check that turns a foreign-key violation on `tenant_hosts` into the
+        // `NotFound` the trait documents — and an existing test caught its
+        // absence when this method was first rewritten to use a transaction
+        // without carrying the guard over with it.
         if self.find_any("id = ?", id.as_str()).await?.is_none() {
             return Err(rustical_store::Error::NotFound);
         }
 
-        // Every host is checked before a single row is written, so a rejected
-        // host leaves the tenant's existing claims intact rather than
-        // half-replaced.
+        // A host is a key into every request in the system, so hosts are
+        // normalised here rather than trusted: `HostDispatch` lowercases and
+        // strips the port before looking up, and a host stored with different
+        // capitalisation than a request carries would simply never match.
+        let normalised: Vec<String> = hosts
+            .iter()
+            .map(|host| host.trim().trim_end_matches('.').to_ascii_lowercase())
+            .filter(|host| !host.is_empty())
+            .collect();
+
         for host in &normalised {
-            // Refuse to steal a host from another tenant rather than moving
-            // it. A typo has to fail loudly; silently relocating a customer's
+            // Refuse to steal a host from another tenant rather than moving it.
+            // A typo has to fail loudly; silently relocating a customer's
             // hostname is how one tenant ends up serving another's traffic.
             let owner: Option<String> =
                 sqlx::query("SELECT tenant FROM tenant_hosts WHERE host = ?")
                     .bind(host)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(&mut *tx)
                     .await
                     .map_err(Error::from)?
                     .map(|r| r.get("tenant"));
-            match owner {
-                Some(owner) if owner != id.as_str() => {
-                    warn!(
-                        tenant = %id,
-                        host,
-                        claimed_by = %owner,
-                        "refusing to move a host claimed by another tenant"
-                    );
-                    return Err(rustical_store::Error::AlreadyExists);
-                }
-                // Already claimed by this tenant — nothing to do.
-                Some(_) => {}
-                None => {
-                    sqlx::query("INSERT INTO tenant_hosts (host, tenant) VALUES (?, ?)")
-                        .bind(host)
-                        .bind(id.as_str())
-                        .execute(&self.pool)
-                        .await
-                        .map_err(Error::from)?;
-                }
+            // A host claimed by somebody else is refused, not moved: a typo
+            // must fail loudly rather than silently relocate a customer's
+            // hostname.
+            if let Some(owner) = owner
+                && owner != id.as_str()
+            {
+                warn!(
+                    tenant = %id,
+                    host,
+                    claimed_by = %owner,
+                    "refusing to move a host claimed by another tenant"
+                );
+                return Err(rustical_store::Error::AlreadyExists);
             }
         }
 
-        // Claims not in the new set are withdrawn. This is what makes
-        // `set_tenant_hosts(&id, &[])` the documented way to stop answering for
-        // a hostname while keeping the tenant itself.
-        //
-        // The re-insert below looks redundant next to the one in the loop
-        // above. It is not: the DELETE runs between them, and deleting a host
-        // this tenant still wants is only correct because it is put back
-        // immediately.
+        // Withdrawn claims: `set_tenant_hosts(&id, &[])` is the documented way
+        // to stop answering for a hostname while keeping the tenant itself.
         sqlx::query("DELETE FROM tenant_hosts WHERE tenant = ?")
             .bind(id.as_str())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(Error::from)?;
         for host in &normalised {
             sqlx::query("INSERT OR REPLACE INTO tenant_hosts (host, tenant) VALUES (?, ?)")
                 .bind(host)
                 .bind(id.as_str())
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(Error::from)?;
         }
+
+        audit(
+            &mut tx,
+            actor,
+            "set_tenant_hosts",
+            Some(id),
+            Some(&format!("{{\"hosts\":{normalised:?}}}")),
+        )
+        .await?;
+        tx.commit().await.map_err(Error::from)?;
         Ok(())
     }
 
     #[instrument(skip(self))]
-    async fn delete_tenant(&self, id: &TenantId) -> Result<(), rustical_store::Error> {
+    async fn delete_tenant(
+        &self,
+        id: &TenantId,
+        actor: &Actor,
+    ) -> Result<(), rustical_store::Error> {
+        let mut tx = self
+            .pool
+            .begin_with(BEGIN_IMMEDIATE)
+            .await
+            .map_err(Error::from)?;
         // `tenant_hosts` rows go with it via ON DELETE CASCADE. The tenant's
         // *data* is a different database and is not touched — see
         // `TenantStore::delete_tenant`.
         let result = sqlx::query("DELETE FROM tenants WHERE id = ?")
             .bind(id.as_str())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(Error::from)?;
         if result.rows_affected() == 0 {
             return Err(rustical_store::Error::NotFound);
         }
+        // Recorded **after** the delete and inside the same transaction, so the
+        // row survives: `control_admin_audit` has no cascade from `tenants`
+        // precisely so that deleting a tenant cannot erase the record of who
+        // deleted it.
+        audit(&mut tx, actor, "delete_tenant", Some(id), None).await?;
+        tx.commit().await.map_err(Error::from)?;
         Ok(())
+    }
+    #[instrument(skip(self, config_json))]
+    async fn set_config_json(
+        &self,
+        id: &TenantId,
+        config_json: &str,
+        actor: &Actor,
+    ) -> Result<(), rustical_store::Error> {
+        let mut tx = self
+            .pool
+            .begin_with(BEGIN_IMMEDIATE)
+            .await
+            .map_err(Error::from)?;
+        let result = sqlx::query("UPDATE tenants SET config_json = ? WHERE id = ?")
+            .bind(config_json)
+            .bind(id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(Error::from)?;
+        if result.rows_affected() == 0 {
+            return Err(rustical_store::Error::NotFound);
+        }
+        // The detail records **that** the blob changed, never the blob: it holds
+        // SMTP passwords and the RSVP HMAC key, and `detail` is rendered by the
+        // panel.
+        audit(
+            &mut tx,
+            actor,
+            "set_config_json",
+            Some(id),
+            Some(&format!(r#"{{"bytes":{}}}"#, config_json.len())),
+        )
+        .await?;
+        tx.commit().await.map_err(Error::from)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn list_audit(
+        &self,
+        tenant: Option<&TenantId>,
+        limit: usize,
+    ) -> Result<Vec<AuditRow>, rustical_store::Error> {
+        // Newest first, because an incident reads backwards. Bounded by the
+        // caller: this is the one table in the control plane whose growth is
+        // unbounded, and an unbounded read of it is a way to exhaust memory.
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        // `map_or` with a closure carrying the whole tuple, rather than a
+        // `format!` over a conditional fragment: the bind list differs too, and a
+        // query assembled at runtime is exactly the shape sqlx refuses to run
+        // without an assertion.
+        let (sql, bind): (&str, Option<&str>) = tenant.map_or(
+            (
+                "SELECT id, actor, action, tenant, at, detail FROM control_admin_audit ORDER BY at DESC, id DESC LIMIT ?",
+                None,
+            ),
+            |id| {
+                (
+                    "SELECT id, actor, action, tenant, at, detail FROM control_admin_audit WHERE tenant = ? ORDER BY at DESC, id DESC LIMIT ?",
+                    Some(id.as_str()),
+                )
+            },
+        );
+        let mut query = sqlx::query(sql);
+        if let Some(tenant) = bind {
+            query = query.bind(tenant);
+        }
+        let rows = query
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Error::from)?;
+        rows.iter()
+            .map(|row| {
+                let tenant: Option<String> = row.try_get("tenant").ok().flatten();
+                Ok(AuditRow {
+                    id: row.get("id"),
+                    actor: row.get("actor"),
+                    action: row.get("action"),
+                    tenant: tenant.and_then(|t| t.parse().ok()),
+                    at: row.get("at"),
+                    detail: row.try_get("detail").ok().flatten(),
+                })
+            })
+            .collect()
     }
 }
 

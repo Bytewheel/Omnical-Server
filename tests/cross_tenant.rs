@@ -43,6 +43,16 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// A fixed actor for these tests. Not a credential, and it never leaves the test
+/// process — the point of these tests is the *shape* of an audit row, not who
+/// wrote it.
+///
+/// A function rather than a `static`, because `Actor::new` validates and is
+/// therefore not `const`.
+fn test_actor() -> rustical_store::Actor {
+    rustical_store::Actor::new("test").expect("a valid actor")
+}
+
 /// A running server plus per-tenant data directories.
 struct Cluster {
     dir: tempfile::TempDir,
@@ -129,7 +139,7 @@ impl Cluster {
             for slug in ["acme", "globex"] {
                 let new = rustical_store_sqlite::new_tenant(&slug.parse().expect("a slug"), None);
                 store
-                    .create_tenant(&new)
+                    .create_tenant(&new, &test_actor())
                     .await
                     .unwrap_or_else(|e| panic!("seeding {slug} failed: {e}"));
             }

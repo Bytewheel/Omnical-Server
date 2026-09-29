@@ -19,6 +19,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower::Service;
 
+/// A fixed actor for these tests. Not a credential, and it never leaves the test
+/// process — the point of these tests is the *shape* of an audit row, not who
+/// wrote it.
+///
+/// A function rather than a `static`, because `Actor::new` validates and is
+/// therefore not `const`.
+fn test_actor() -> rustical_store::Actor {
+    rustical_store::Actor::new("test").expect("a valid actor")
+}
+
 /// A tenant id that is a valid slug, for a fixture tenant.
 fn id(s: &str) -> TenantId {
     s.parse().expect("a valid slug")
@@ -57,7 +67,7 @@ impl Fixture {
         let mut new: NewTenant = new_tenant(&id(slug), Some(slug));
         new.hosts = hosts.iter().map(|h| (*h).to_owned()).collect();
         self.control_plane
-            .create_tenant(&new)
+            .create_tenant(&new, &test_actor())
             .await
             .expect("created");
         // Build the tenant's own database, so the store path convention is
@@ -353,7 +363,7 @@ async fn a_suspended_tenant_stops_serving_on_the_next_request() {
 
     fixture
         .control_plane
-        .update_tenant_status(&acme.id, TenantStatus::Suspended)
+        .update_tenant_status(&acme.id, TenantStatus::Suspended, &test_actor())
         .await
         .expect("suspended");
 
@@ -377,7 +387,7 @@ async fn a_suspended_tenant_is_not_papered_over_by_the_default_tenant() {
 
     fixture
         .control_plane
-        .update_tenant_status(&acme.id, TenantStatus::Suspended)
+        .update_tenant_status(&acme.id, TenantStatus::Suspended, &test_actor())
         .await
         .expect("suspended");
 
@@ -407,7 +417,7 @@ async fn the_three_no_tenant_outcomes_are_byte_identical() {
 
     fixture
         .control_plane
-        .update_tenant_status(&acme.id, TenantStatus::Suspended)
+        .update_tenant_status(&acme.id, TenantStatus::Suspended, &test_actor())
         .await
         .expect("suspended");
     let suspended = get(&d, "cal.acme.test").await;

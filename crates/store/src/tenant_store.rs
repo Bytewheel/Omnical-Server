@@ -40,6 +40,7 @@
 //! [`TenantStore::list_tenants`] is the one deliberate exception: an admin
 //! listing must be able to see suspended tenants, so it takes an explicit flag.
 
+use crate::actor::Actor;
 use crate::error::Error;
 use crate::tenant::{Tenant, TenantId, TenantStatus};
 use async_trait::async_trait;
@@ -87,6 +88,23 @@ pub struct NewTenant {
 /// The default implementations return [`Error::ReadOnly`] so that test and
 /// in-memory stores keep compiling without implementing tenancy, matching
 /// [`crate::invite_store::InviteStore`]'s convention.
+/// One row of the control-plane audit trail (row 33).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditRow {
+    pub id: i64,
+    /// The [`Actor`] that performed the change. Never empty: an [`Actor`] cannot
+    /// be constructed empty, so neither can this.
+    pub actor: String,
+    /// The trait method that performed it, e.g. `update_tenant_status`.
+    pub action: String,
+    /// The tenant it concerned, `None` for a creation.
+    pub tenant: Option<TenantId>,
+    /// ISO-8601 UTC, e.g. `2026-09-29T14:22:07Z`.
+    pub at: String,
+    /// Optional JSON. Never a credential — the panel renders this.
+    pub detail: Option<String>,
+}
+
 #[async_trait]
 pub trait TenantStore: Send + Sync + 'static {
     /// Insert a new tenant, plus any hosts it claims.
@@ -96,7 +114,7 @@ pub trait TenantStore: Send + Sync + 'static {
     ///   identity, and two tenants sharing one would collide on a hostname and
     ///   on the `data_root` path.
     /// - [`Error::ReadOnly`] if the store does not implement tenancy.
-    async fn create_tenant(&self, _new_tenant: &NewTenant) -> Result<(), Error> {
+    async fn create_tenant(&self, _new_tenant: &NewTenant, _actor: &Actor) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
 
@@ -200,6 +218,7 @@ pub trait TenantStore: Send + Sync + 'static {
         &self,
         _id: &TenantId,
         _status: TenantStatus,
+        _actor: &Actor,
     ) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
@@ -210,8 +229,50 @@ pub trait TenantStore: Send + Sync + 'static {
     /// # Errors
     /// - [`Error::NotFound`] if the id is unknown.
     /// - [`Error::ReadOnly`] if the store does not implement tenancy.
-    async fn set_quota(&self, _id: &TenantId, _quota: TenantQuota) -> Result<(), Error> {
+    async fn set_quota(
+        &self,
+        _id: &TenantId,
+        _quota: TenantQuota,
+        _actor: &Actor,
+    ) -> Result<(), Error> {
         Err(Error::ReadOnly)
+    }
+
+    /// Replace a tenant's `config_json`.
+    ///
+    /// On the trait rather than a direct statement in the CLI for one reason:
+    /// the CLI writes this column today, and a column written outside the trait
+    /// is a column that escapes the audit trail. `tenant config set` is exactly
+    /// the kind of change — an RSVP HMAC key, an SMTP identity — where an
+    /// unrecorded edit is worth knowing about.
+    ///
+    /// # Errors
+    /// - [`Error::NotFound`] if the id is unknown.
+    /// - [`Error::ReadOnly`] if the store does not implement tenancy.
+    async fn set_config_json(
+        &self,
+        _id: &TenantId,
+        _config_json: &str,
+        _actor: &Actor,
+    ) -> Result<(), Error> {
+        Err(Error::ReadOnly)
+    }
+
+    /// Read the audit trail, newest first, optionally for one tenant.
+    ///
+    /// Read-only by design: there is no `ON DELETE CASCADE` from `tenants` and no
+    /// update or delete path for this table anywhere in the fork, so an audit row
+    /// outlives the tenant it describes. Deleting a tenant must not erase the
+    /// record of who deleted it.
+    ///
+    /// # Errors
+    /// - [`Error::Other`] on a store failure.
+    async fn list_audit(
+        &self,
+        _tenant: Option<&TenantId>,
+        _limit: usize,
+    ) -> Result<Vec<AuditRow>, Error> {
+        Ok(Vec::new())
     }
 
     /// Read a tenant's quota.
@@ -233,7 +294,12 @@ pub trait TenantStore: Send + Sync + 'static {
     /// - [`Error::AlreadyExists`] if a host is claimed by another tenant.
     /// - [`Error::NotFound`] if the id is unknown.
     /// - [`Error::ReadOnly`] if the store does not implement tenancy.
-    async fn set_tenant_hosts(&self, _id: &TenantId, _hosts: &[String]) -> Result<(), Error> {
+    async fn set_tenant_hosts(
+        &self,
+        _id: &TenantId,
+        _hosts: &[String],
+        _actor: &Actor,
+    ) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
 
@@ -248,7 +314,7 @@ pub trait TenantStore: Send + Sync + 'static {
     /// # Errors
     /// - [`Error::NotFound`] if the id is unknown.
     /// - [`Error::ReadOnly`] if the store does not implement tenancy.
-    async fn delete_tenant(&self, _id: &TenantId) -> Result<(), Error> {
+    async fn delete_tenant(&self, _id: &TenantId, _actor: &Actor) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
 }

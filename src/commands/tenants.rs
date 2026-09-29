@@ -35,6 +35,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use rustical_store::Actor;
 use rustical_store::tenant::{Tenant, TenantId, TenantStatus};
 use rustical_store::tenant_store::{NewTenant, TenantQuota, TenantStore};
 use rustical_store_sqlite::{SqliteTenantStore, create_control_plane_pool};
@@ -81,6 +82,10 @@ pub struct CreateArgs {
     /// directory name, so it is validated rather than sanitised.
     #[arg(long)]
     pub slug: String,
+    /// Who is making this change, for the audit trail. Defaults to
+    /// `$OMNICAL_ACTOR`, then `$SUDO_USER`, then `$USER`; refuses if none is set.
+    #[arg(long)]
+    pub actor: Option<String>,
     /// Human-readable name shown in admin listings.
     #[arg(long)]
     pub display_name: Option<String>,
@@ -119,11 +124,17 @@ pub struct ShowArgs {
 #[derive(Debug, Parser)]
 pub struct SlugArgs {
     pub slug: String,
+    /// Who is making this change, for the audit trail.
+    #[arg(long)]
+    pub actor: Option<String>,
 }
 
 #[derive(Debug, Parser)]
 pub struct SetQuotaArgs {
     pub slug: String,
+    /// Who is making this change, for the audit trail.
+    #[arg(long)]
+    pub actor: Option<String>,
     #[arg(long)]
     pub principals: Option<i64>,
     #[arg(long)]
@@ -149,6 +160,9 @@ pub enum ConfigCommand {
 #[derive(Debug, Parser)]
 pub struct ConfigSetArgs {
     pub slug: String,
+    /// Who is making this change, for the audit trail.
+    #[arg(long)]
+    pub actor: Option<String>,
     /// A dotted key, e.g. `rsvp_secret` or `subscriptions.public_url`.
     #[arg(long)]
     pub key: String,
@@ -166,6 +180,9 @@ pub struct ConfigShowArgs {
 #[derive(Debug, Parser)]
 pub struct DeleteArgs {
     pub slug: String,
+    /// Who is making this change, for the audit trail.
+    #[arg(long)]
+    pub actor: Option<String>,
     /// Required. Without it, nothing is deleted.
     #[arg(long)]
     pub confirm: bool,
@@ -178,6 +195,36 @@ pub struct DeleteArgs {
     /// time, deliberately, and prints the path it is about to remove.
     #[arg(long)]
     pub purge_data: bool,
+}
+
+/// The `--actor`, or the usual environment fallbacks.
+///
+/// §6.6.7: an action that cannot be attributed does not happen, so this returns
+/// an `Err` rather than a placeholder. The flag is optional and the fallbacks
+/// mean ordinary use is unchanged — `rustical tenant list` still needs nothing
+/// typed — but a **mutating** command in a bare environment (`env -i`, a cron
+/// job with no `USER`) refuses rather than writing an audit row with an empty
+/// actor.
+///
+/// The fallbacks are not authentication. `$USER` is whatever the caller set, so
+/// the record says "who the shell said this was", which is the honest claim; a
+/// panel action, by contrast, is attributable to a credential verified against a
+/// hash.
+fn resolve_actor(flag: Option<&str>) -> Result<Actor> {
+    if let Some(name) = flag {
+        return Actor::new(name).map_err(anyhow::Error::msg);
+    }
+    for var in ["OMNICAL_ACTOR", "SUDO_USER", "USER"] {
+        if let Ok(value) = std::env::var(var)
+            && !value.trim().is_empty()
+        {
+            return Actor::new(value).map_err(anyhow::Error::msg);
+        }
+    }
+    anyhow::bail!(
+        "this change would be unaudited. Pass --actor <name>, or set OMNICAL_ACTOR, SUDO_USER or \
+         USER. A control-plane change that cannot be attributed does not happen (§6.6.7)."
+    )
 }
 
 /// Open the control plane, migrating it first.
@@ -240,11 +287,15 @@ pub async fn cmd_tenants(args: TenantArgs, config: crate::config::Config) -> Res
     match args.command {
         TenantCommand::Create(CreateArgs {
             slug,
+            actor,
             display_name,
             hosts,
             plan,
             config_json,
         }) => {
+            // Resolved before anything is written, so an unattributable create
+            // fails before it has created a row.
+            let actor = resolve_actor(actor.as_deref())?;
             let slug_id = parse_slug(&slug)?;
             let blob = match config_json {
                 Some(raw) => {
@@ -280,7 +331,7 @@ pub async fn cmd_tenants(args: TenantArgs, config: crate::config::Config) -> Res
             };
 
             store
-                .create_tenant(&new)
+                .create_tenant(&new, &actor)
                 .await
                 .map_err(|e| anyhow::anyhow!("could not create tenant {slug}: {e}"))?;
 
@@ -377,10 +428,11 @@ pub async fn cmd_tenants(args: TenantArgs, config: crate::config::Config) -> Res
             Ok(())
         }
 
-        TenantCommand::Suspend(SlugArgs { slug }) => {
+        TenantCommand::Suspend(SlugArgs { slug, actor }) => {
+            let actor = resolve_actor(actor.as_deref())?;
             let tenant = any_tenant(&store, &slug).await?;
             store
-                .update_tenant_status(&tenant.id, TenantStatus::Suspended)
+                .update_tenant_status(&tenant.id, TenantStatus::Suspended, &actor)
                 .await?;
             // No eviction, no signal: the next request consults the control
             // plane and sees this. See this module's docs.
@@ -391,10 +443,11 @@ pub async fn cmd_tenants(args: TenantArgs, config: crate::config::Config) -> Res
             Ok(())
         }
 
-        TenantCommand::Resume(SlugArgs { slug }) => {
+        TenantCommand::Resume(SlugArgs { slug, actor }) => {
+            let actor = resolve_actor(actor.as_deref())?;
             let tenant = any_tenant(&store, &slug).await?;
             store
-                .update_tenant_status(&tenant.id, TenantStatus::Active)
+                .update_tenant_status(&tenant.id, TenantStatus::Active, &actor)
                 .await?;
             eprintln!("Resumed {}", tenant.slug);
             Ok(())
@@ -402,10 +455,12 @@ pub async fn cmd_tenants(args: TenantArgs, config: crate::config::Config) -> Res
 
         TenantCommand::SetQuota(SetQuotaArgs {
             slug,
+            actor,
             principals,
             calendars,
             megabytes,
         }) => {
+            let actor = resolve_actor(actor.as_deref())?;
             let tenant = any_tenant(&store, &slug).await?;
             // Omitted flags clear to unlimited rather than being left alone, and
             // the help says so — a quota command where "I did not pass the flag"
@@ -415,7 +470,7 @@ pub async fn cmd_tenants(args: TenantArgs, config: crate::config::Config) -> Res
                 calendars,
                 megabytes,
             };
-            store.set_quota(&tenant.id, quota).await?;
+            store.set_quota(&tenant.id, quota, &actor).await?;
             eprintln!(
                 "Quota for {}: principals={:?} calendars={:?} megabytes={:?}",
                 tenant.slug, quota.principals, quota.calendars, quota.megabytes
@@ -429,7 +484,17 @@ pub async fn cmd_tenants(args: TenantArgs, config: crate::config::Config) -> Res
                 println!("{}", tenant.config_json);
                 Ok(())
             }
-            ConfigCommand::Set(ConfigSetArgs { slug, key, value }) => {
+            // Through the trait rather than a direct statement, so the write is
+            // audited: this column holds the RSVP HMAC key and SMTP passwords,
+            // and it is exactly the kind of edit whose absence from a log is a
+            // question someone eventually has to answer.
+            ConfigCommand::Set(ConfigSetArgs {
+                slug,
+                actor,
+                key,
+                value,
+            }) => {
+                let actor = resolve_actor(actor.as_deref())?;
                 let tenant = any_tenant(&store, &slug).await?;
                 let mut blob: serde_json::Value = serde_json::from_str(&tenant.config_json)
                     .with_context(|| {
@@ -450,7 +515,7 @@ pub async fn cmd_tenants(args: TenantArgs, config: crate::config::Config) -> Res
                 if effective.rsvp_secret.is_none() && text.contains("rsvp_secret") {
                     eprintln!("warning: rsvp_secret is present but did not parse as a string");
                 }
-                sqlx_upsert_config_json(&store, &tenant.id, &text).await?;
+                store.set_config_json(&tenant.id, &text, &actor).await?;
                 println!("{text}");
                 eprintln!("Set {key} for {}", tenant.slug);
                 Ok(())
@@ -459,6 +524,7 @@ pub async fn cmd_tenants(args: TenantArgs, config: crate::config::Config) -> Res
 
         TenantCommand::Delete(DeleteArgs {
             slug,
+            actor,
             confirm,
             purge_data,
         }) => {
@@ -472,7 +538,10 @@ pub async fn cmd_tenants(args: TenantArgs, config: crate::config::Config) -> Res
                     tenant.slug
                 );
             }
-            store.delete_tenant(&tenant.id).await?;
+            // After the `--confirm` gate, so a refused delete never needs an
+            // actor and never writes anything.
+            let actor = resolve_actor(actor.as_deref())?;
+            store.delete_tenant(&tenant.id, &actor).await?;
             eprintln!("Deleted the control-plane record for {}", tenant.slug);
 
             let root = config
@@ -569,35 +638,14 @@ fn warn_unknown_keys(json: &str) {
     }
 }
 
-/// Replace a tenant's `config_json`.
-///
-/// There is no `TenantStore` method for this — the trait's write methods are the
-/// ones the dispatcher needs, and adding a config setter for a CLI would widen
-/// the control plane's surface for one caller. So this is one direct statement
-/// against the control-plane pool, and it is the only place in the fork that
-/// writes that column.
-async fn sqlx_upsert_config_json(
-    store: &SqliteTenantStore,
-    id: &TenantId,
-    config_json: &str,
-) -> Result<()> {
-    let updated = sqlx::query("UPDATE tenants SET config_json = ? WHERE id = ?")
-        .bind(config_json)
-        .bind(id.as_str())
-        .execute(store.pool())
-        .await
-        .context("could not write config_json")?
-        .rows_affected();
-    if updated == 0 {
-        anyhow::bail!("no tenant with the id {id}");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::set_dotted;
 
+    /// A dotted key has to create the intermediate object rather than write a
+    /// literal `"registration.enabled"` key: the config loader walks
+    /// `registration.enabled`, so a flat key would be stored and then ignored —
+    /// silently, which is the failure mode this test exists to prevent.
     #[test]
     fn a_nested_key_lands_in_the_right_place() {
         let mut blob = serde_json::json!({});

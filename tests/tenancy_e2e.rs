@@ -34,12 +34,22 @@ use reqwest::{Client, StatusCode};
 use rustical::host_dispatch::HEALTH_PATH;
 use rustical_store::TenantId;
 use rustical_store::tenant_store::TenantStore;
+
 use rustical_store_sqlite::{SqliteTenantStore, create_control_plane_pool, new_tenant};
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// A fixed actor for these tests. Not a credential, and it never leaves the test
+/// process — the point is the *shape* of an audit row, not who wrote it.
+///
+/// A function rather than a `static`, because `Actor::new` validates and is
+/// therefore not `const`.
+fn test_actor() -> rustical_store::Actor {
+    rustical_store::Actor::new("test").expect("a valid actor")
+}
 
 /// A temporary install: a directory, a config written out of it, a server.
 struct Install {
@@ -213,7 +223,7 @@ impl Install {
                 let mut new = new_tenant(&slug.parse().expect("a valid slug"), Some(display));
                 new.hosts = hosts.iter().map(|h| (*h).to_owned()).collect();
                 store
-                    .create_tenant(&new)
+                    .create_tenant(&new, &test_actor())
                     .await
                     .unwrap_or_else(|e| panic!("seeding {slug} failed: {e}"));
             }
@@ -252,7 +262,7 @@ impl Install {
                 .await
                 .expect("the control plane opens");
             SqliteTenantStore::new(pool)
-                .update_tenant_status(id, rustical_store::TenantStatus::Suspended)
+                .update_tenant_status(id, rustical_store::TenantStatus::Suspended, &test_actor())
                 .await
                 .expect("suspended");
         });

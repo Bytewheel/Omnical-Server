@@ -23,8 +23,25 @@ use sqlx::Row;
 
 use crate::{SqliteTenantStore, create_control_plane_pool, new_tenant, new_tenant_id};
 
-/// A control-plane database in a real, throwaway file, deleted on drop.
+/// A fixed actor for store-level tests. Not a credential, and it never leaves the
+/// test process — the point of these tests is the *shape* of an audit row, not
+/// who wrote it.
 ///
+/// A function rather than a `static`, because `Actor::new` validates and is
+/// therefore not `const`. An `Actor` is two allocations, so this is not a cost
+/// worth arranging around.
+fn test_actor() -> rustical_store::Actor {
+    rustical_store::Actor::new("test").expect("a valid actor")
+}
+
+///
+/// A fixed actor for store-level tests. Not a credential, and it never leaves the
+/// test process — the point of these tests is the *shape* of an audit row, not
+/// who wrote it.
+///
+/// A function rather than a `static`, because `Actor::new` validates and is
+/// therefore not `const`. An `Actor` is two allocations, so this is not a cost
+/// worth arranging around.
 /// ## Why not `tempfile`, and why not `:memory:`
 ///
 /// `create_db_pool(":memory:", true)` is what the other store tests do, and it
@@ -87,7 +104,9 @@ async fn a_new_tenant_round_trips() {
     let (cp, _dir) = control_plane().await;
     let new = acme();
     let new_id = new.tenant.id.clone();
-    cp.create_tenant(&new).await.expect("created");
+    cp.create_tenant(&new, &test_actor())
+        .await
+        .expect("created");
 
     let got = cp.get_tenant_by_slug("acme").await.expect("a lookup");
     let got = got.expect("acme exists");
@@ -111,7 +130,9 @@ async fn the_config_blob_survives_verbatim() {
     let mut new = acme();
     new.tenant.config_json =
         r#"{"rsvp_secret":"s3cret","registration":{"enabled":true}}"#.to_owned();
-    cp.create_tenant(&new).await.expect("created");
+    cp.create_tenant(&new, &test_actor())
+        .await
+        .expect("created");
 
     let got = cp
         .get_tenant_by_slug("acme")
@@ -127,13 +148,15 @@ async fn a_duplicate_slug_is_refused() {
     // The slug is the identity: it becomes a hostname and a directory under
     // `data_root`. Two tenants sharing one is a collision in both.
     let (cp, _dir) = control_plane().await;
-    cp.create_tenant(&acme()).await.expect("created");
+    cp.create_tenant(&acme(), &test_actor())
+        .await
+        .expect("created");
 
     let mut clash = globex();
     clash.tenant.slug = id("acme");
     clash.hosts.clear();
     let err = cp
-        .create_tenant(&clash)
+        .create_tenant(&clash, &test_actor())
         .await
         .expect_err("a duplicate slug must be refused");
     assert!(
@@ -151,7 +174,10 @@ async fn a_tenant_cannot_be_created_suspended() {
     let (cp, _dir) = control_plane().await;
     let mut new = acme();
     new.tenant.status = TenantStatus::Suspended;
-    let err = cp.create_tenant(&new).await.expect_err("must be refused");
+    let err = cp
+        .create_tenant(&new, &test_actor())
+        .await
+        .expect_err("must be refused");
     assert!(matches!(err, StoreError::Other(_)), "got {err:?}");
 }
 
@@ -159,8 +185,12 @@ async fn a_tenant_cannot_be_created_suspended() {
 #[tokio::test]
 async fn a_host_resolves_to_its_tenant() {
     let (cp, _dir) = control_plane().await;
-    cp.create_tenant(&acme()).await.expect("acme");
-    cp.create_tenant(&globex()).await.expect("globex");
+    cp.create_tenant(&acme(), &test_actor())
+        .await
+        .expect("acme");
+    cp.create_tenant(&globex(), &test_actor())
+        .await
+        .expect("globex");
 
     let a = cp
         .get_tenant_by_host("cal.acme.test")
@@ -189,7 +219,9 @@ async fn suspension_takes_effect_on_the_next_lookup() {
     let (cp, _dir) = control_plane().await;
     let acme_new = acme();
     let acme_id = acme_new.tenant.id.clone();
-    cp.create_tenant(&acme_new).await.expect("created");
+    cp.create_tenant(&acme_new, &test_actor())
+        .await
+        .expect("created");
 
     // Serving first, so the "after" is a real transition rather than a tenant
     // that never worked.
@@ -202,7 +234,7 @@ async fn suspension_takes_effect_on_the_next_lookup() {
     assert!(cp.get_tenant_by_slug("acme").await.expect("ok").is_some());
     assert!(cp.get_tenant_by_id(&acme_id).await.expect("ok").is_some());
 
-    cp.update_tenant_status(&acme_id, TenantStatus::Suspended)
+    cp.update_tenant_status(&acme_id, TenantStatus::Suspended, &test_actor())
         .await
         .expect("suspended");
 
@@ -229,9 +261,11 @@ async fn suspension_is_dated_and_resuming_clears_the_date() {
     let (cp, _dir) = control_plane().await;
     let new = acme();
     let tid = new.tenant.id.clone();
-    cp.create_tenant(&new).await.expect("created");
+    cp.create_tenant(&new, &test_actor())
+        .await
+        .expect("created");
 
-    cp.update_tenant_status(&tid, TenantStatus::Suspended)
+    cp.update_tenant_status(&tid, TenantStatus::Suspended, &test_actor())
         .await
         .expect("ok");
     let listed = cp.list_tenants(true).await.expect("ok");
@@ -246,7 +280,7 @@ async fn suspension_is_dated_and_resuming_clears_the_date() {
         suspended.suspended_at
     );
 
-    cp.update_tenant_status(&tid, TenantStatus::Active)
+    cp.update_tenant_status(&tid, TenantStatus::Active, &test_actor())
         .await
         .expect("ok");
     let listed = cp.list_tenants(true).await.expect("ok");
@@ -263,7 +297,9 @@ async fn timestamptz_order_correctly_against_other_tables() {
     // silently misorders anything that sorts across both. This pins the shape.
     let (cp, _dir) = control_plane().await;
     let new = acme();
-    cp.create_tenant(&new).await.expect("created");
+    cp.create_tenant(&new, &test_actor())
+        .await
+        .expect("created");
     let t = cp
         .get_tenant_by_slug("acme")
         .await
@@ -282,9 +318,9 @@ async fn listing_hides_suspended_tenants_unless_asked() {
     let a = acme();
     let g = globex();
     let a_id = a.tenant.id.clone();
-    cp.create_tenant(&a).await.expect("acme");
-    cp.create_tenant(&g).await.expect("globex");
-    cp.update_tenant_status(&a_id, TenantStatus::Suspended)
+    cp.create_tenant(&a, &test_actor()).await.expect("acme");
+    cp.create_tenant(&g, &test_actor()).await.expect("globex");
+    cp.update_tenant_status(&a_id, TenantStatus::Suspended, &test_actor())
         .await
         .expect("suspend");
 
@@ -304,11 +340,13 @@ async fn a_host_cannot_be_stolen_from_another_tenant() {
     let (cp, _dir) = control_plane().await;
     let g = globex();
     let g_id = g.tenant.id.clone();
-    cp.create_tenant(&acme()).await.expect("acme");
-    cp.create_tenant(&g).await.expect("globex");
+    cp.create_tenant(&acme(), &test_actor())
+        .await
+        .expect("acme");
+    cp.create_tenant(&g, &test_actor()).await.expect("globex");
 
     let err = cp
-        .set_tenant_hosts(&g_id, &["cal.acme.test".to_owned()])
+        .set_tenant_hosts(&g_id, &["cal.acme.test".to_owned()], &test_actor())
         .await
         .expect_err("must refuse");
     assert!(
@@ -344,7 +382,9 @@ async fn replacing_a_hosts_list_withdraws_the_old_claims() {
     let (cp, _dir) = control_plane().await;
     let new = acme();
     let a_id = new.tenant.id.clone();
-    cp.create_tenant(&new).await.expect("created");
+    cp.create_tenant(&new, &test_actor())
+        .await
+        .expect("created");
     assert!(
         cp.get_tenant_by_host("cal.acme.test")
             .await
@@ -352,7 +392,7 @@ async fn replacing_a_hosts_list_withdraws_the_old_claims() {
             .is_some()
     );
 
-    cp.set_tenant_hosts(&a_id, &["calendar.acme.test".to_owned()])
+    cp.set_tenant_hosts(&a_id, &["calendar.acme.test".to_owned()], &test_actor())
         .await
         .expect("ok");
     assert!(
@@ -383,7 +423,9 @@ async fn hosts_are_normalised_before_they_are_stored() {
     let (cp, _dir) = control_plane().await;
     let new = acme();
     let a_id = new.tenant.id.clone();
-    cp.create_tenant(&new).await.expect("created");
+    cp.create_tenant(&new, &test_actor())
+        .await
+        .expect("created");
 
     cp.set_tenant_hosts(
         &a_id,
@@ -392,6 +434,7 @@ async fn hosts_are_normalised_before_they_are_stored() {
             "  spaced.acme.test  ".to_owned(),
             "dotted.acme.test.".to_owned(),
         ],
+        &test_actor(),
     )
     .await
     .expect("ok");
@@ -413,9 +456,11 @@ async fn a_blank_host_is_dropped_rather_than_stored() {
     let (cp, _dir) = control_plane().await;
     let new = acme();
     let a_id = new.tenant.id.clone();
-    cp.create_tenant(&new).await.expect("created");
+    cp.create_tenant(&new, &test_actor())
+        .await
+        .expect("created");
 
-    cp.set_tenant_hosts(&a_id, &[String::new(), "  ".to_owned()])
+    cp.set_tenant_hosts(&a_id, &[String::new(), "  ".to_owned()], &test_actor())
         .await
         .expect("ok");
     assert!(cp.get_tenant_by_host("").await.expect("ok").is_none());
@@ -434,7 +479,9 @@ async fn quotas_round_trip_and_none_means_unlimited() {
     let (cp, _dir) = control_plane().await;
     let new = acme();
     let a_id = new.tenant.id.clone();
-    cp.create_tenant(&new).await.expect("created");
+    cp.create_tenant(&new, &test_actor())
+        .await
+        .expect("created");
 
     assert!(
         cp.get_quota(&a_id).await.expect("ok").is_unlimited(),
@@ -446,7 +493,7 @@ async fn quotas_round_trip_and_none_means_unlimited() {
         calendars: Some(50),
         megabytes: None,
     };
-    cp.set_quota(&a_id, quota).await.expect("ok");
+    cp.set_quota(&a_id, quota, &test_actor()).await.expect("ok");
     assert_eq!(cp.get_quota(&a_id).await.expect("ok"), quota);
 
     // Clearing one dimension must not clear the others — three separate
@@ -456,11 +503,13 @@ async fn quotas_round_trip_and_none_means_unlimited() {
         calendars: Some(50),
         megabytes: None,
     };
-    cp.set_quota(&a_id, partial).await.expect("ok");
+    cp.set_quota(&a_id, partial, &test_actor())
+        .await
+        .expect("ok");
     assert_eq!(cp.get_quota(&a_id).await.expect("ok"), partial);
     assert!(!cp.get_quota(&a_id).await.expect("ok").is_unlimited());
 
-    cp.set_quota(&a_id, TenantQuota::default())
+    cp.set_quota(&a_id, TenantQuota::default(), &test_actor())
         .await
         .expect("ok");
     assert!(cp.get_quota(&a_id).await.expect("ok").is_unlimited());
@@ -472,14 +521,16 @@ async fn writes_to_an_unknown_tenant_are_not_found() {
     let (cp, _dir) = control_plane().await;
     let ghost = new_tenant_id();
     for err in [
-        cp.update_tenant_status(&ghost, TenantStatus::Suspended)
+        cp.update_tenant_status(&ghost, TenantStatus::Suspended, &test_actor())
             .await
             .expect_err("no such tenant"),
-        cp.set_quota(&ghost, TenantQuota::default())
+        cp.set_quota(&ghost, TenantQuota::default(), &test_actor())
             .await
             .expect_err("no such tenant"),
-        cp.delete_tenant(&ghost).await.expect_err("no such tenant"),
-        cp.set_tenant_hosts(&ghost, &["x.test".to_owned()])
+        cp.delete_tenant(&ghost, &test_actor())
+            .await
+            .expect_err("no such tenant"),
+        cp.set_tenant_hosts(&ghost, &["x.test".to_owned()], &test_actor())
             .await
             .expect_err("no such tenant"),
     ] {
@@ -495,8 +546,12 @@ async fn deleting_a_tenant_withdraws_its_host_claims() {
     let (cp, _dir) = control_plane().await;
     let new = acme();
     let a_id = new.tenant.id.clone();
-    cp.create_tenant(&new).await.expect("created");
-    cp.delete_tenant(&a_id).await.expect("deleted");
+    cp.create_tenant(&new, &test_actor())
+        .await
+        .expect("created");
+    cp.delete_tenant(&a_id, &test_actor())
+        .await
+        .expect("deleted");
 
     assert!(
         cp.get_tenant_by_host("cal.acme.test")
@@ -509,7 +564,9 @@ async fn deleting_a_tenant_withdraws_its_host_claims() {
     // The host is now free for someone else.
     let mut other = globex();
     other.hosts = vec!["cal.acme.test".to_owned()];
-    cp.create_tenant(&other).await.expect("reclaimed");
+    cp.create_tenant(&other, &test_actor())
+        .await
+        .expect("reclaimed");
     assert_eq!(
         cp.get_tenant_by_host("cal.acme.test")
             .await
@@ -559,11 +616,31 @@ async fn the_control_plane_holds_no_calendar_data() {
             "the control plane must not contain {forbidden}; found {tables:?}"
         );
     }
+    // The exact set, not just "none of the forbidden ones" — an unexpected table
+    // in here is as much a finding as a missing one, and this is the only place
+    // that would notice. `sqlite_sequence` is SQLite's own bookkeeping, created
+    // by the `AUTOINCREMENT` on the audit trail.
+    let expected = [
+        "_sqlx_migrations",
+        "control_admin_audit",
+        "platform_admins",
+        "sqlite_sequence",
+        "tenant_hosts",
+        "tenants",
+    ];
     assert_eq!(
-        tables.len(),
-        3,
-        "the control plane is exactly two tables plus sqlx's migration ledger: {tables:?}"
+        tables, expected,
+        "the control plane holds the cross-tenant index, the audit trail, the admin \
+         credentials and nothing else"
     );
+    // And the §6.6 tables must be there: an absent audit trail would make every
+    // other assertion in this file pass while row 33 is unimplemented.
+    for required in ["control_admin_audit", "platform_admins"] {
+        assert!(
+            tables.iter().any(|t| t == required),
+            "the control plane must contain {required}; found {tables:?}"
+        );
+    }
 }
 
 #[rstest]
@@ -592,8 +669,8 @@ async fn two_tenants_stay_independent() {
     let a = acme();
     let g = globex();
     let (a_id, g_id) = (a.tenant.id.clone(), g.tenant.id.clone());
-    cp.create_tenant(&a).await.expect("acme");
-    cp.create_tenant(&g).await.expect("globex");
+    cp.create_tenant(&a, &test_actor()).await.expect("acme");
+    cp.create_tenant(&g, &test_actor()).await.expect("globex");
 
     cp.set_quota(
         &a_id,
@@ -601,10 +678,11 @@ async fn two_tenants_stay_independent() {
             principals: Some(1),
             ..TenantQuota::default()
         },
+        &test_actor(),
     )
     .await
     .expect("ok");
-    cp.update_tenant_status(&g_id, TenantStatus::Suspended)
+    cp.update_tenant_status(&g_id, TenantStatus::Suspended, &test_actor())
         .await
         .expect("ok");
 
@@ -647,8 +725,10 @@ async fn a_suspended_tenant_still_owns_its_host_claim() {
     let (cp, _dir) = control_plane().await;
     let new = acme();
     let a_id = new.tenant.id.clone();
-    cp.create_tenant(&new).await.expect("created");
-    cp.update_tenant_status(&a_id, TenantStatus::Suspended)
+    cp.create_tenant(&new, &test_actor())
+        .await
+        .expect("created");
+    cp.update_tenant_status(&a_id, TenantStatus::Suspended, &test_actor())
         .await
         .expect("suspend");
 
@@ -683,7 +763,9 @@ async fn the_round_trip_preserves_every_field() {
     new.tenant.config_json = r#"{"scheduling":{"smtp":[]}}"#.to_owned();
     new.tenant.slug = id("acme-emea");
     let created = new.tenant.clone();
-    cp.create_tenant(&new).await.expect("created");
+    cp.create_tenant(&new, &test_actor())
+        .await
+        .expect("created");
 
     let got: Tenant = cp
         .get_tenant_by_id(&created.id)

@@ -16,6 +16,17 @@ use rustical_store::tenant_store::{NewTenant, TenantQuota, TenantStore};
 use rustical_store_sqlite::{
     SqlitePrincipalStore, SqliteTenantStore, create_control_plane_pool, new_tenant,
 };
+
+/// A fixed actor for the fixtures. Not a credential, and it never leaves the test
+/// process — the point of these tests is the *shape* of an audit row, not who
+/// wrote it.
+///
+/// A function rather than a `static`, because [`rustical_store::Actor::new`]
+/// validates and is therefore not `const`.
+fn test_actor() -> rustical_store::Actor {
+    rustical_store::Actor::new("test").expect("a valid actor")
+}
+
 use sqlx::Row;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -131,7 +142,7 @@ impl Fixture {
                 let mut new: NewTenant = new_tenant(&(*slug).parse().expect("a valid slug"), None);
                 new.tenant.config_json = (*config_json).to_owned();
                 store
-                    .create_tenant(&new)
+                    .create_tenant(&new, &test_actor())
                     .await
                     .unwrap_or_else(|e| panic!("seeding {slug} failed: {e}"));
             }
@@ -209,7 +220,7 @@ impl Fixture {
 
     pub fn set_status(&self, id: &TenantId, status: rustical_store::TenantStatus) {
         let store = self.control_plane();
-        rt().block_on(async { store.update_tenant_status(id, status).await })
+        rt().block_on(async { store.update_tenant_status(id, status, &test_actor()).await })
             .expect("a status update");
     }
 
@@ -387,6 +398,87 @@ impl Fixture {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         )
+    }
+
+    /// Run a subcommand with the given environment overrides.
+    ///
+    /// Each entry is `(key, Some(value))` to set or `(key, None)` to **remove**.
+    /// Removal is the point: `OMNICAL_ACTOR`/`SUDO_USER`/`USER` are the actor
+    /// fallbacks, so a test of "refuses with no actor" has to clear them rather
+    /// than trust that the harness happens to have none — otherwise the test
+    /// passes for a reason that has nothing to do with the code.
+    pub fn cli_env(
+        &self,
+        config: &PathBuf,
+        args: &[&str],
+        env: &[(&str, Option<&str>)],
+    ) -> std::process::Output {
+        // The config is used **as given**. Resolving a tenant id here would make
+        // `tenant create` untestable, since that is the command that brings the
+        // first tenant into existence.
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustical"));
+        cmd.arg("--config-file").arg(config).args(args);
+        for (key, value) in env {
+            match value {
+                Some(v) => {
+                    cmd.env(key, v);
+                }
+                None => {
+                    cmd.env_remove(key);
+                }
+            }
+        }
+        cmd.output().expect("the CLI runs")
+    }
+
+    /// Run a subcommand expecting **failure**, with the given env overrides.
+    pub fn cli_fail_with_env(
+        &self,
+        config: &PathBuf,
+        args: &[&str],
+        env: &[(&str, Option<&str>)],
+    ) -> std::process::Output {
+        let out = self.cli_env(config, args, env);
+        assert!(
+            !out.status.success(),
+            "`{args:?}` unexpectedly succeeded: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    }
+
+    /// Expect failure with every one of `cleared` removed from the environment.
+    pub fn cli_fail_bare_env(
+        &self,
+        config: &PathBuf,
+        args: &[&str],
+        cleared: &[&str],
+    ) -> std::process::Output {
+        let env: Vec<(&str, Option<&str>)> = cleared.iter().map(|k| (*k, None)).collect();
+        self.cli_fail_with_env(config, args, &env)
+    }
+
+    /// Run a subcommand expecting success, with `env` **set**.
+    pub fn cli_raw_with_env(
+        &self,
+        config: &PathBuf,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> String {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustical"));
+        cmd.arg("--config-file").arg(config).args(args);
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let out = cmd.output().expect("the CLI runs");
+        assert!(
+            out.status.success(),
+            "`{args:?}` failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
 
     /// Run a subcommand expecting **failure**.
