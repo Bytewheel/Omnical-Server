@@ -10,6 +10,7 @@ pub mod membership;
 pub mod principals;
 pub mod setup;
 pub mod subscriptions;
+pub mod support_bundle;
 pub mod tenants;
 
 pub use backup::{

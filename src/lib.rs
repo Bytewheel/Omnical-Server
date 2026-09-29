@@ -89,6 +89,8 @@ pub enum Command {
     Restore(commands::RestoreArgs),
     #[command(about = "Interactive first-run setup wizard (PLAN_DEPLOYMENTS.md §8.2)")]
     Setup(commands::SetupArgs),
+    /// §9.4's diagnostics bundle. The redaction inside it is the gate (row 50).
+    SupportBundle(commands::support_bundle::SupportBundleArgs),
     #[command(about = "Create, inspect, suspend and delete tenants (PLAN_DEPLOYMENTS.md §6.5)")]
     Tenant(commands::tenants::TenantArgs),
 }

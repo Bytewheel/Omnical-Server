@@ -8,6 +8,33 @@ pub struct HealthArgs {}
 
 /// Healthcheck for running rustical instance
 /// Currently just pings to see if it's reachable via HTTP
+/// The same probe, as one line of text rather than an exit code.
+///
+/// §9.4's support bundle wants `rustical health`'s output *in* the bundle, and
+/// the obvious thing — shelling out to `rustical health` and capturing stdout —
+/// would put a second process and the binary's own path into a bundle that
+/// somebody is about to attach to a public issue tracker. This is the same
+/// request, made inline.
+#[allow(clippy::missing_errors_doc)]
+pub async fn health_line(http_config: &HttpConfig) -> Option<String> {
+    let bind_config = http_config.bind_config().ok()?;
+    let client_builder = reqwest::ClientBuilder::new();
+    let address = match bind_config {
+        HttpBindConfig::Tcp(address) => address,
+        HttpBindConfig::Unix(_) => {
+            return Some("unix socket (no HTTP probe)".to_owned());
+        }
+    };
+    let client = client_builder.build().ok()?;
+    let url = format!("http://{address}/ping");
+    let endpoint: reqwest::Url = url.parse().ok()?;
+    let request = reqwest::Request::new(Method::GET, endpoint);
+    match client.execute(request).await {
+        Ok(response) => Some(format!("{url} -> {}", response.status())),
+        Err(e) => Some(format!("{url} -> UNREACHABLE ({e})")),
+    }
+}
+
 #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 pub async fn cmd_health(http_config: HttpConfig, _health_args: HealthArgs) -> Result<()> {
     let bind_config = http_config.bind_config()?;

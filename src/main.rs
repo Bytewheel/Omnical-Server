@@ -52,6 +52,14 @@ async fn main() -> Result<()> {
             let config = parse_config().await?;
             cmd_health(config.http, health_args).await
         }
+        Command::SupportBundle(bundle_args) => {
+            rustical::commands::support_bundle::cmd_support_bundle(
+                parse_config().await?,
+                &config_file,
+                bundle_args,
+            )
+            .await
+        }
         Command::Serve => {
             // §9.3 setup mode, checked BEFORE the config is parsed — an
             // appliance's first boot has no config file, so parsing first would
