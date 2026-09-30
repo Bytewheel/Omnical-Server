@@ -104,6 +104,9 @@ pub enum Command {
     SupportBundle(commands::support_bundle::SupportBundleArgs),
     #[command(about = "Create, inspect, suspend and delete tenants (PLAN_DEPLOYMENTS.md §6.5)")]
     Tenant(commands::tenants::TenantArgs),
+    /// item 21 / §12 row 42: roll the schema back, or report what that would do.
+    #[command(about = "Roll the database schema back (PLAN_DEPLOYMENTS.md item 21, row 42)")]
+    Upgrade(commands::upgrade::UpgradeArgs),
 }
 
 /// The twelve stores, as a named [`StoreBundle`].

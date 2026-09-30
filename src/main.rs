@@ -4,7 +4,7 @@ use clap::Parser;
 use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use rustical::config::Config;
-use rustical::{Args, Command, commands::tenants::cmd_tenants};
+use rustical::{Args, Command, commands::tenants::cmd_tenants, commands::upgrade::cmd_upgrade};
 use rustical::{
     cmd_backup, cmd_gen_config, cmd_guest_shares, cmd_health, cmd_invites, cmd_principals,
     cmd_restore, cmd_serve, cmd_setup, cmd_subscriptions,
@@ -39,6 +39,8 @@ async fn main() -> Result<()> {
             cmd_guest_shares(guest_share_args, parse_config().await?).await
         }
         Command::Tenant(tenant_args) => cmd_tenants(tenant_args, parse_config().await?).await,
+        // item 21 / row 42.
+        Command::Upgrade(upgrade_args) => cmd_upgrade(&parse_config().await?, upgrade_args).await,
         // §7.5 item 20a. The control plane is opened here so "unreadable" is one
         // error rather than a loop that measures nothing and exits 0.
         Command::TenantUsage(usage_args) => {

@@ -14,6 +14,7 @@ pub mod subscriptions;
 pub mod support_bundle;
 pub mod tenant_usage;
 pub mod tenants;
+pub mod upgrade;
 
 pub use backup::{
     ArchiveEntry, BackupArgs, BackupManifest, CONFIG_ENTRY, DB_ENTRY, MANIFEST_ENTRY,
@@ -28,6 +29,7 @@ pub use setup::{
     run_setup_with,
 };
 pub use subscriptions::{SubscriptionsArgs, cmd_subscriptions};
+pub use upgrade::{RollbackReport, UpgradeArgs, cmd_upgrade};
 
 #[derive(Debug, Parser)]
 pub struct GenConfigArgs {}

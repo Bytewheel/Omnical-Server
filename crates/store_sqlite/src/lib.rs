@@ -139,7 +139,7 @@ pub async fn create_control_plane_pool(
         .await?;
     if migrate {
         info!("Running control-plane database migrations");
-        sqlx::migrate!("./control_migrations").run(&db).await?;
+        CONTROL_MIGRATOR.run(&db).await?;
     }
     Ok(db)
 }
@@ -165,6 +165,16 @@ fn sqlite_path(db_url: &str) -> Option<String> {
     }
     Some(rest.to_owned())
 }
+
+/// The tenant store's migrator, exposed so `rustical upgrade --rollback`
+/// (PLAN_DEPLOYMENTS.md item 21) can ask it what is reversible and undo to a
+/// target. It was previously only ever `.run()` inline at startup, which means
+/// nothing outside this function could answer "can this migration be undone?"
+/// without re-declaring the same `migrate!` and hoping it still matched.
+pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// The control plane's migrator, for the same reason.
+pub static CONTROL_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./control_migrations");
 
 pub async fn create_db_pool(db_url: &str, migrate: bool) -> Result<Pool<Sqlite>, sqlx::Error> {
     let options: SqliteConnectOptions = db_url.parse()?;
@@ -195,7 +205,7 @@ pub async fn create_db_pool(db_url: &str, migrate: bool) -> Result<Pool<Sqlite>,
     .await?;
     if migrate {
         info!("Running database migrations");
-        sqlx::migrate!("./migrations").run(&db).await?;
+        MIGRATOR.run(&db).await?;
     }
     Ok(db)
 }
