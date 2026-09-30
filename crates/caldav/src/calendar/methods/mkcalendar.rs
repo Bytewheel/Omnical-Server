@@ -65,6 +65,10 @@ struct MkcolRequest {
 }
 
 #[instrument(skip(cal_store))]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one RFC 4791 MKCALENDAR handler; the sections are the spec's own order"
+)]
 pub async fn route_mkcalendar<C: CalendarStore, DP: DavPushStore>(
     Path((principal, cal_id)): Path<(String, String)>,
     user: Principal,

@@ -166,11 +166,13 @@ fn sqlite_path(db_url: &str) -> Option<String> {
     Some(rest.to_owned())
 }
 
-/// The tenant store's migrator, exposed so `rustical upgrade --rollback`
-/// (PLAN_DEPLOYMENTS.md item 21) can ask it what is reversible and undo to a
-/// target. It was previously only ever `.run()` inline at startup, which means
-/// nothing outside this function could answer "can this migration be undone?"
-/// without re-declaring the same `migrate!` and hoping it still matched.
+/// The tenant store's migrator.
+///
+/// Exposed so `rustical upgrade --rollback` (`PLAN_DEPLOYMENTS.md` item 21) can
+/// ask it what is reversible and undo to a target. It was previously only ever
+/// `.run()` inline at startup, which means nothing outside this function could
+/// answer "can this migration be undone?" without re-declaring the same
+/// `migrate!` and hoping it still matched.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// The control plane's migrator, for the same reason.

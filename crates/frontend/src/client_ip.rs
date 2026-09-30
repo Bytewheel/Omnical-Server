@@ -89,6 +89,10 @@ impl PeerAddr {
     }
 }
 
+#[allow(
+    clippy::unused_async_trait_impl,
+    reason = "an axum extractor whose value is already in the request extensions"
+)]
 impl<S> axum::extract::FromRequestParts<S> for PeerAddr
 where
     S: Send + Sync,
@@ -96,11 +100,10 @@ where
     type Rejection = std::convert::Infallible;
 
     // `async` with no `.await`, because the trait's method is `async` and the
-    // value is already in the request extensions. `clippy::nursery` is enabled
-    // crate-wide and flags it; the two pre-existing extractor impls in
-    // `crates/store/src/auth/principal.rs` carry the same warning, so this one
-    // does too rather than being the single place in the tree that silences a
-    // lint its neighbours accept.
+    // value is already in the request extensions. The `#[allow]` is on the impl
+    // below, and the two extractor impls in `crates/store/src/auth/principal.rs`
+    // carry the same one — so all three are silenced together rather than this
+    // being the single place in the tree that differs from its neighbours.
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         Ok(Self(
             parts

@@ -5,6 +5,7 @@ use crate::{
 use rstest::{fixture, rstest};
 use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType};
 use sqlx::SqlitePool;
+use std::collections::BTreeMap;
 
 mod addressbook_store;
 mod calendar_source_store;
@@ -41,7 +42,7 @@ pub async fn test_store_context() -> TestStoreContext {
                 password: None,
                 principal_type: PrincipalType::Individual,
                 needs_password_change: false,
-                privileges: Default::default(),
+                privileges: BTreeMap::default(),
             },
             false,
         )
@@ -81,7 +82,7 @@ async fn test_invalid_principal_id(
                         password: None,
                         memberships: vec![],
                         needs_password_change: false,
-                        privileges: Default::default(),
+                        privileges: BTreeMap::default(),
                     },
                     false,
                 )
@@ -102,7 +103,7 @@ async fn test_invalid_principal_id(
                         password: None,
                         memberships: vec![],
                         needs_password_change: false,
-                        privileges: Default::default(),
+                        privileges: BTreeMap::default(),
                     },
                     false,
                 )

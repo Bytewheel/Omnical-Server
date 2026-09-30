@@ -33,6 +33,7 @@ use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType};
 use rustical_store::{Calendar, CalendarMetadata, CalendarWriteStore};
 use rustical_store_sqlite::SqliteSchedulingStore;
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -46,8 +47,10 @@ const RSVP_SECRET: &str = "test-rsvp-secret-0123456789abcdef";
 /// Public base URL configured alongside [`RSVP_SECRET`].
 const RSVP_BASE_URL: &str = "https://cal.example.com:8443";
 
-/// Full caldav_router with scheduling enabled (router construction itself
-/// proves the `/inbox`/`/outbox` vs `/{calendar_id}` route precedence).
+/// Full `caldav_router` with scheduling enabled.
+///
+/// Router construction itself proves the `/inbox`/`/outbox` vs `/{calendar_id}`
+/// route precedence.
 async fn scheduling_app() -> axum::Router {
     scheduling_app_with_scheduler().await.0
 }
@@ -98,7 +101,7 @@ async fn setup_fixtures(context: &TestStoreContext) {
                 password: None,
                 principal_type: PrincipalType::Individual,
                 needs_password_change: false,
-                privileges: Default::default(),
+                privileges: BTreeMap::default(),
             },
             false,
         )
@@ -777,8 +780,8 @@ async fn test_outbox_rejects_non_organizer() {
 }
 
 /// Regression test for the production iPhone failure (2026-09-06): iOS
-/// writes the account owner's ORGANIZER (and self-ATTENDEE) as the CalDAV
-/// principal URL — RustiCal's advertised calendar-user-address — not as
+/// writes the account owner's ORGANIZER (and self-ATTENDEE) as the `CalDAV`
+/// principal URL — `RustiCal`'s advertised calendar-user-address — not as
 /// `mailto:`. The scheduler must still recognize the organizer and deliver.
 #[tokio::test]
 async fn test_principal_url_organizer_delivers_request() {
@@ -834,9 +837,10 @@ async fn test_principal_url_organizer_delivers_request() {
 // Inbound iMIP ingestion (IMAP poll leg → Scheduler::ingest_imip_reply)
 // ---------------------------------------------------------------------------
 
-/// PUT through the real CalDAV router with a sync-client (`vdirsyncer`) UA:
-/// the organizer copy is stored through the normal path, but the UA
-/// exclusion skips implicit scheduling (nothing is delivered).
+/// PUT through the real `CalDAV` router with a sync-client (`vdirsyncer`) UA.
+///
+/// The organizer copy is stored through the normal path, but the UA exclusion
+/// skips implicit scheduling (nothing is delivered).
 async fn put_as_sync_client(app: &axum::Router, uri: &str, ics: String) -> StatusCode {
     let mut request = request("PUT", uri, "user", Body::from(ics));
     request.headers_mut().insert(

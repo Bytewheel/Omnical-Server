@@ -6,11 +6,11 @@ fn default_mailbox() -> String {
     "INBOX".to_owned()
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
-fn default_imap_poll_secs() -> u64 {
+const fn default_imap_poll_secs() -> u64 {
     120
 }
 

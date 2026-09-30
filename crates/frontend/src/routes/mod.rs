@@ -2,6 +2,7 @@ pub mod addressbook;
 pub mod addressbooks;
 pub mod admin;
 pub mod app_token;
+pub mod appliance;
 pub mod calendar;
 pub mod groups;
 pub mod linked_platforms;

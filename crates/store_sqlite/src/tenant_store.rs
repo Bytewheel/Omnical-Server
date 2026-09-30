@@ -761,6 +761,33 @@ impl TenantStore for SqliteTenantStore {
     }
 
     #[instrument(skip(self))]
+    async fn record_appliance_action(
+        &self,
+        actor: &Actor,
+        action: &str,
+        detail: &str,
+    ) -> Result<(), rustical_store::Error> {
+        // Not inside a transaction, because there is no mutation to be atomic
+        // with — the panel's restore and flash act on the filesystem. §6.6.7's
+        // "one transaction or the control does not exist" is about a *change* to
+        // the control plane; this writes a record of something that happened
+        // elsewhere, which is a different thing and is named differently in the
+        // trait for that reason.
+        sqlx::query(
+            "INSERT INTO control_admin_audit (actor, action, tenant, at, detail) \
+             VALUES (?, ?, NULL, ?, ?)",
+        )
+        .bind(actor.as_str())
+        .bind(action)
+        .bind(now_iso())
+        .bind(detail)
+        .execute(&self.pool)
+        .await
+        .map_err(Error::from)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
     async fn list_audit(
         &self,
         tenant: Option<&TenantId>,

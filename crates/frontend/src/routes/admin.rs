@@ -333,7 +333,12 @@ impl AdminPanel {
         store: Arc<dyn TenantStore>,
         admins: Arc<dyn AdminCredentialStore>,
         allowlist: Vec<String>,
-        admin_hosts: Vec<String>,
+        // By reference, because the panel only reads it — it normalises each
+        // entry into a `String` of its own. Taking `Vec<String>` by value read
+        // as a hint that the panel keeps the caller's allocation, and it does
+        // not; `src/tenancy.rs` was cloning a `Vec` to satisfy a signature that
+        // never needed ownership.
+        admin_hosts: &[String],
         trusted_proxies: Vec<IpNet>,
     ) -> Self {
         Self {
@@ -357,8 +362,34 @@ impl AdminPanel {
     /// portal's cookie name, so an admin session cannot be read by a tenant
     /// router — and, again, none is reachable from here.
     pub fn router(self: Arc<Self>) -> Router {
+        self.router_with(None)
+    }
+
+    /// The same, with the appliance section merged in **inside** the session
+    /// layer.
+    ///
+    /// The merge is inside the layer, not beside it, and that is the whole
+    /// point: a second `SessionManagerLayer` over a second `MemoryStore` would
+    /// mean a second login for one operator and two cookies for one browser. The
+    /// appliance panel (`routes::appliance`) is merged here so it shares this
+    /// panel's session, cookie and CSRF token — which is what "reuse the admin
+    /// panel's auth, do not duplicate" means when it is implemented rather than
+    /// quoted.
+    ///
+    /// **The appliance panel is a separate struct with its own state**, carried
+    /// as an `Extension`, and `AdminPanel` gains no field for it. That is
+    /// deliberate: the panel's no-tenant-database invariant is a property of
+    /// what this struct holds, and adding an appliance field — even a
+    /// path-only one — is how that property would quietly stop being true.
+    pub fn router_with(
+        self: Arc<Self>,
+        appliance: Option<Arc<super::appliance::AppliancePanel>>,
+    ) -> Router {
         let sessions = tower_sessions::MemoryStore::default();
-        Router::new()
+        // Annotated rather than left to inference: `not_found` takes no state,
+        // so without this the type is ambiguous after the merge and the
+        // compiler picks the one that does not compile.
+        let base: Router<Arc<Self>> = Router::new()
             .route("/frontend/admin/login", get(login_page))
             .route("/frontend/admin/login", post(login_submit))
             .route("/frontend/admin/logout", post(logout))
@@ -372,24 +403,40 @@ impl AdminPanel {
             .route(
                 "/frontend/admin/tenants/{id}/resume",
                 post(set_suspended::<false>),
-            )
+            );
+        let mut extension_layer = None;
+        let router = if let Some(appliance) = appliance {
+            extension_layer = Some(axum::Extension(appliance.clone()));
+            base.merge(appliance.routes())
+        } else {
+            base
+        };
+        // `Router<()>` from here on: the state has been supplied.
+        let router: Router = router
             // **No delete route** (§6.6.1). A `DELETE` on
             // `/frontend/admin/tenants/{id}` is a 405 from axum's router, and
             // there is no other path in this module that deletes a tenant.
             //
             // Everything unrouted is the panel's own 404, which is the real
-            // half of row 32.
+            // half of row 32. Merging the appliance routes *before* the
+            // fallback is what keeps that a single gate for both sections.
             .fallback(not_found)
-            .with_state(self)
-            .layer(
-                tower_sessions::SessionManagerLayer::new(sessions)
-                    .with_name(ADMIN_SESSION_COOKIE)
-                    .with_secure(true)
-                    .with_same_site(tower_sessions::cookie::SameSite::Strict)
-                    .with_expiry(tower_sessions::Expiry::OnInactivity(
-                        tower_sessions::cookie::time::Duration::hours(2),
-                    )),
-            )
+            .with_state(self);
+        // The extension is applied outside the session layer so it wraps every
+        // route including the merged ones and the fallback.
+        let router = match extension_layer {
+            Some(extension) => router.layer(extension),
+            None => router,
+        };
+        router.layer(
+            tower_sessions::SessionManagerLayer::new(sessions)
+                .with_name(ADMIN_SESSION_COOKIE)
+                .with_secure(true)
+                .with_same_site(tower_sessions::cookie::SameSite::Strict)
+                .with_expiry(tower_sessions::Expiry::OnInactivity(
+                    tower_sessions::cookie::time::Duration::hours(2),
+                )),
+        )
     }
 
     /// The address this login is rate-limited by (C5, §7.3.4).
@@ -409,8 +456,8 @@ impl AdminPanel {
     /// The authenticated admin's name, or `None`.
     ///
     /// Note what it does **not** do: consult the allowlist. A session minted
-    /// while a name was allowlisted stays valid until it expires, and that is
-    /// the *eventual* consequence §6.6.3 accepts — revoking an admin is a config
+    /// while a name was allowlisted stays valid until it expires, and that is the
+    /// *eventual* consequence §6.6.3 accepts — revoking an admin is a config
     /// edit and a row delete, and a config edit does not reach into a running
     /// process's memory. Pretending otherwise would be a lie about what a config
     /// change can do. The revocation that *is* immediate is the row delete.
@@ -418,18 +465,36 @@ impl AdminPanel {
         session.get::<String>("admin").await.ok().flatten()
     }
 
-    /// The session's CSRF token, checked against `submitted`.
+    /// The authenticated admin's name for a **read-only** page, or `None`.
     ///
-    /// One function so no handler can check the session and forget the token.
-    /// `Err(StatusCode)` rather than `Err(Response)`: an `axum::Response` in the
-    /// error slot is 128 bytes and this runs on every mutating POST.
+    /// The read-only counterpart to [`Self::require_admin`], and it exists
+    /// because a GET carries no CSRF token to check. Public so the appliance
+    /// panel (`routes::appliance`) gates its pages on the same 404 rather than
+    /// reimplementing the "is there a session" half of the gate.
     ///
-    /// The two refusals are **not** collapsed, and that was learned the hard way:
-    /// an earlier version returned `Err(())` for both, which made every failing
-    /// POST answer 404 — so a request with a *valid* session and a *stale* token
-    /// reported "nothing here" instead of "your token expired". Two tests caught
-    /// it, and the distinction is now explicit in the type.
-    async fn require_admin(
+    /// **404, not 401**, for the reason `require_admin` gives: a 401 with a
+    /// login link would confirm that a panel exists.
+    pub async fn require_admin_read(&self, session: &Session) -> Option<String> {
+        self.current_admin(session).await
+    }
+
+    /// Check the session and the CSRF token, in that order.
+    ///
+    /// The mutating-page gate. `Err(StatusCode)` rather than `Err(Response)`:
+    /// an `axum::Response` in the error slot is 128 bytes and this runs on every
+    /// mutating POST.
+    ///
+    /// **Public** so `routes::appliance` uses this exact function for its
+    /// restore and flash POSTs. Duplicating it would mean two places that each
+    /// have to remember the 404-vs-403 distinction, and the reason that
+    /// distinction exists at all is the two tests `admin.rs:427-431` records.
+    ///
+    /// # Errors
+    /// [`StatusCode::NOT_FOUND`] when there is no admin session — 404 rather
+    /// than 401, because a 401 with a login link would confirm a panel exists —
+    /// and [`StatusCode::FORBIDDEN`] when the session is valid but the CSRF
+    /// token is absent or stale. The two are deliberately not collapsed.
+    pub async fn require_admin(
         &self,
         session: &Session,
         submitted: Option<&str>,
@@ -715,12 +780,14 @@ fn usage_rows(
 
 /// Bytes as MiB, rounded, because the quota is in MiB and a panel showing bytes
 /// against a limit in MiB makes the reader do arithmetic.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a display value, not a count: these are rendered as a \
+              human-readable size and never used in arithmetic. A byte count \
+              above 2^53 is 9 petabytes, which no quota in this product reaches."
+)]
 fn format_mib(bytes: i64) -> String {
     const MIB: i64 = 1024 * 1024;
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "a display value, not a count"
-    )]
     let mib = (bytes / MIB) as f64;
     let exact = bytes as f64 / MIB as f64;
     if (mib - exact).abs() < 0.01 {
@@ -811,7 +878,7 @@ async fn create_tenant(
         hosts: if host.is_empty() {
             Vec::new()
         } else {
-            vec![host.to_owned()]
+            vec![host.clone()]
         },
     };
     match panel.store.create_tenant(&new, &actor).await {
@@ -909,7 +976,10 @@ async fn not_found() -> Response {
 /// A page reached by a browser that already has a session reuses the token; a
 /// direct navigation mints one, so the form it renders is one that works rather
 /// than one whose every POST is rejected.
-async fn session_csrf(session: &Session) -> String {
+///
+/// **Public** so `routes::appliance` renders forms carrying a token this same
+/// session will accept, rather than minting a second one under a second key.
+pub async fn session_csrf(session: &Session) -> String {
     if let Ok(Some(existing)) = session.get::<String>("csrf").await {
         return existing;
     }

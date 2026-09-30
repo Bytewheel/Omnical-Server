@@ -363,7 +363,7 @@ where
         let auth: Arc<dyn AuthenticationProvider> = auth_provider.clone();
         router = router.merge(register_router(
             addr_store.clone(),
-            combined_cal_store.clone(),
+            combined_cal_store,
             auth,
             registration,
             // Read off the same `FrontendConfig` the portal uses, so the

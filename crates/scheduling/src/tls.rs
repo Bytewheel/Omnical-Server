@@ -30,7 +30,7 @@ fn connector_with_roots(roots: rustls::RootCertStore) -> TlsConnector {
     TlsConnector::from(Arc::new(config))
 }
 
-pub(crate) fn tls_connector() -> TlsConnector {
+pub fn tls_connector() -> TlsConnector {
     connector_with_roots(webpki_root_store())
 }
 
@@ -45,9 +45,7 @@ pub(crate) fn tls_connector() -> TlsConnector {
 /// is picked up transparently and unrelated hosts are unaffected. Lines
 /// outside `-----BEGIN/END CERTIFICATE-----` sections (e.g. `#`
 /// provenance comments) are ignored by the PEM parser.
-pub(crate) fn tls_connector_with_extra_ca(
-    extra_ca: &Path,
-) -> Result<TlsConnector, SchedulingError> {
+pub fn tls_connector_with_extra_ca(extra_ca: &Path) -> Result<TlsConnector, SchedulingError> {
     let imap_err =
         |msg: String| SchedulingError::Imap(format!("ca file {}: {msg}", extra_ca.display()));
     let certs: Vec<CertificateDer> = CertificateDer::pem_file_iter(extra_ca)

@@ -1,0 +1,76 @@
+{% extends "layouts/admin.html" %}
+
+{#
+  "Your restore is staged." — the last page an operator sees before the service
+  restarts.
+
+  The wording is the point. At this moment **nothing has been restored**: the
+  verified database is sitting beside the live one and the swap has not happened.
+  A page that said "restore complete" here would be the single most damaging lie
+  this panel could tell, because the operator would close the browser and believe
+  their data was back when it was not.
+
+  So it says what is staged, what it will do, and where the way back is.
+#}
+
+{% block title %}Omnical administration — restore staged{% endblock %}
+
+{% block header_right %}
+<form method="POST" action="/frontend/admin/logout" class="logout_form">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit">Log out {{ admin }}</button>
+</form>
+{% endblock %}
+
+{% block content %}
+
+<h1>Restore staged — the service is restarting</h1>
+
+<p class="error">
+  <strong>Nothing has been restored yet.</strong>
+  The database below has been verified and written beside the live one. The swap
+  happens during the restart, before anything opens the database. This page will
+  not come back.
+</p>
+
+<table>
+  <tbody>
+    <tr><th>Archive</th><td>{{ staged.archive }}</td></tr>
+    <tr><th>Taken</th><td>{{ staged.archive_created_at }}</td></tr>
+    <tr><th>Tables in the archive</th><td>{{ staged.expected_tables }}</td></tr>
+    <tr><th>Staged at</th><td>{{ staged.staged }}</td></tr>
+    <tr><th>Requested by</th><td>{{ staged.requested_by }}</td></tr>
+    <tr>
+      <th>Previous database</th>
+      <td>
+        {% match staged.safety_copy %}
+        {% when Some with (copy) %}
+          kept at {{ copy }}
+        {% when None %}
+          (there was no database to copy — this is the first one)
+        {% endmatch %}
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>What happens next</h2>
+<ol>
+  <li>The service restarts.</li>
+  <li>The staged database replaces the live one, with no process holding it open.</li>
+  <li>Pending migrations are applied.</li>
+  <li>
+    Row counts are compared against the archive's manifest, and the result is on
+    the <a href="/frontend/admin/appliance">appliance page</a> when you log back
+    in.
+  </li>
+</ol>
+
+<p>
+  The comparison is against the <strong>archive</strong>, not against what was
+  there before. A restore deliberately moves data back in time, so every row
+  written since the archive was taken is meant to disappear — that is not
+  damage, and the report will not present it as any.
+</p>
+
+{% endblock %}

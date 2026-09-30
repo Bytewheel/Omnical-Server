@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use rustical_store::tenant::{Tenant, TenantId, TenantStatus};
+use rustical_store::tenant::{Tenant, TenantStatus};
 
 const SAMPLES: usize = 40;
 

@@ -138,6 +138,7 @@ async fn test_initial_setup() {
                 subscriptions: Default::default(),
                 registration: Default::default(),
                 maintenance: Default::default(),
+                appliance: Default::default(),
             },
         )
         .await
@@ -172,6 +173,7 @@ async fn test_initial_setup() {
                 subscriptions: Default::default(),
                 registration: Default::default(),
                 maintenance: Default::default(),
+                appliance: Default::default(),
             },
         )
         .await
@@ -283,6 +285,7 @@ async fn test_principal_impersonation() {
             subscriptions: Default::default(),
             registration: Default::default(),
             maintenance: Default::default(),
+            appliance: Default::default(),
         };
 
         // Create principal
@@ -516,6 +519,7 @@ async fn test_subscriptions_export() {
                 },
                 registration: Default::default(),
                 maintenance: Default::default(),
+                appliance: Default::default(),
             };
 
             // Create the principal (CLI), seed a calendar through the stores
@@ -693,6 +697,7 @@ async fn test_register_enabled_provisions() {
                 },
                 registration: Default::default(),
                 maintenance: Default::default(),
+                appliance: Default::default(),
             };
 
             cmd_invites(

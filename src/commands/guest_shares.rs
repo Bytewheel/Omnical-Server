@@ -1,14 +1,16 @@
-//! CLI for the Omnical guest-shares extension (PLAN.md §17.10):
+//! CLI for the Omnical guest-shares extension (`PLAN.md` §17.10).
+//!
 //! `rustical guest-share add|list|revoke|credential` — server-admin surface,
 //! same pattern as `rustical subscriptions` (no HTTP auth involved).
 //!
 //! `add` mints a lightweight `guest-{uuid}` principal, an app token and a
 //! `collection_shares` row in one step, exactly like the portal "Invite
-//! guest" form — the credential it prints is the same one-time token a CalDAV
+//! guest" form — the credential it prints is the same one-time token a `CalDAV`
 //! client needs.
 use clap::{Parser, Subcommand};
 use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType, Privilege};
 use rustical_store::{CalendarReadStore, CollectionShareStore, SubscriptionKind};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use super::app_token::generate_app_token;
@@ -106,7 +108,12 @@ async fn find_share(
     Ok(None)
 }
 
-#[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#[allow(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::too_many_lines,
+    reason = "a match over eight subcommands; splitting it would scatter one command's validation across eight functions"
+)]
 pub async fn cmd_guest_shares(args: GuestSharesArgs, config: Config) -> anyhow::Result<()> {
     let (addr_store, cal_store, _, principal_store, _, _, subscription_store, _, _, share_store, _) =
         get_data_stores(true, &config.data_store).await?;
@@ -135,7 +142,7 @@ pub async fn cmd_guest_shares(args: GuestSharesArgs, config: Config) -> anyhow::
                         password: None,
                         principal_type: PrincipalType::Individual,
                         needs_password_change: false,
-                        privileges: Default::default(),
+                        privileges: BTreeMap::default(),
                     },
                     false,
                 )
@@ -172,20 +179,14 @@ pub async fn cmd_guest_shares(args: GuestSharesArgs, config: Config) -> anyhow::
                 .await?
                 .into_iter()
                 .find(|s| s.kind == SubscriptionKind::Calendar && s.collection_id == collection_id);
-            let subscribe_token = match existing {
-                Some(sub) => sub.token,
-                None => {
-                    let token = generate_app_token();
-                    subscription_store
-                        .add_subscription(
-                            &owner,
-                            SubscriptionKind::Calendar,
-                            &collection_id,
-                            &token,
-                        )
-                        .await?;
-                    token
-                }
+            let subscribe_token = if let Some(sub) = existing {
+                sub.token
+            } else {
+                let token = generate_app_token();
+                subscription_store
+                    .add_subscription(&owner, SubscriptionKind::Calendar, &collection_id, &token)
+                    .await?;
+                token
             };
             let base_url = public_base_url(
                 config.subscriptions.public_url.as_deref(),
@@ -196,7 +197,9 @@ pub async fn cmd_guest_shares(args: GuestSharesArgs, config: Config) -> anyhow::
                     .as_ref()
                     .and_then(|c| match c {
                         crate::config::HttpBindConfig::Tcp(addr) => Some(addr.as_str()),
-                        _ => None,
+                        // Named so a future `HttpBindConfig` variant is a compile error
+                        // rather than a silently-absent value.
+                        crate::config::HttpBindConfig::Unix(_) => None,
                     }),
             );
             let subscribe_url = export_url(&base_url, &subscribe_token, SubscriptionKind::Calendar);

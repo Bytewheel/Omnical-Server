@@ -8,6 +8,14 @@
 //! PARTSTAT never updates; with it, replies update the organizer's stored
 //! copies and appear in their scheduling inbox like internal replies.
 //!
+//! # Why `large_futures` is allowed in this module
+//!
+//! The size here is inherited, not introduced: every warning is on a function
+//! that awaits into [`crate::imap`], whose futures are 60–66 KB for the reasons
+//! that module's docs give. Boxing at these eight call sites would move the
+//! allocation rather than remove it — the same future is still built, one
+//! pointer deeper — on a loop that polls every 30 s.
+//!
 //! Mailbox hygiene: only messages carrying a `text/calendar` part are ever
 //! touched (flagged `\Seen` after successful ingestion when `mark_seen`).
 //! Everything else — personal mail, invitations addressed *to* the user —
@@ -19,6 +27,10 @@
 //! days regardless of `\Seen` — a normal mail client may read (and flag)
 //! a reply before a poll sees it, and an UNSEEN-only search would then
 //! miss it permanently.
+#![allow(
+    clippy::large_futures,
+    reason = "inherited from crate::imap; see this module's docs"
+)]
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -37,10 +49,11 @@ const MAX_PER_POLL: usize = 25;
 /// Soft cap on the process-local "already examined, not ours" set.
 const MAX_CHECKED: usize = 100_000;
 
-/// Spawn one polling task per configured IMAP account. No-op when
-/// scheduling is disabled or no mailboxes are configured. `shutdown` is a
-/// constructor for shutdown futures so every task gets its own listener.
-pub fn spawn_ingestion<S, F>(scheduler: Arc<Scheduler>, shutdown: S)
+/// Spawn one polling task per configured IMAP account.
+///
+/// No-op when scheduling is disabled or no mailboxes are configured. `shutdown`
+/// is a constructor for shutdown futures so every task gets its own listener.
+pub fn spawn_ingestion<S, F>(scheduler: &Arc<Scheduler>, shutdown: &S)
 where
     S: Fn() -> F + Send + Sync + Clone + 'static,
     F: Future<Output = ()> + Send + 'static,
@@ -80,7 +93,7 @@ async fn poll_loop<S, F>(
             warn!("IMAP ingest {}: {}", account.identity, err);
         }
         tokio::select! {
-            _ = tokio::time::sleep(poll_interval) => {}
+            () = tokio::time::sleep(poll_interval) => {}
             () = shutdown() => {
                 debug!("IMAP ingest {}: stopping", account.identity);
                 return;
@@ -176,13 +189,13 @@ async fn poll_mailbox_inner(
                 Disposition::Ingested => {
                     ingested += 1;
                     state.remember(message.uid);
-                    if account.mark_seen {
-                        if let Err(err) = session.uid_mark_seen(message.uid).await {
-                            warn!(
-                                "IMAP ingest {}: could not mark uid {} seen: {}",
-                                account.identity, message.uid, err
-                            );
-                        }
+                    if account.mark_seen
+                        && let Err(err) = session.uid_mark_seen(message.uid).await
+                    {
+                        warn!(
+                            "IMAP ingest {}: could not mark uid {} seen: {}",
+                            account.identity, message.uid, err
+                        );
                     }
                 }
                 Disposition::NotOurs => state.remember(message.uid),

@@ -38,6 +38,7 @@ fn test_config(db_path: &Path) -> Config {
         subscriptions: Default::default(),
         registration: Default::default(),
         maintenance: Default::default(),
+        appliance: Default::default(),
     }
 }
 

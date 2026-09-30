@@ -1,4 +1,4 @@
-//! CalDAV layer of the Omnical RFC 6638 scheduling extension.
+//! `CalDAV` layer of the Omnical `RFC 6638` scheduling extension.
 //!
 //! When a [`rustical_scheduling::Scheduler`] is enabled, this module serves
 //! the per-principal schedule-inbox (a real, DB-backed collection) and
@@ -26,7 +26,7 @@ pub struct SchedulingProps {
     pub(crate) default_calendar_id: Option<String>,
 }
 
-/// `DAV` header advertised by the CalDAV services: the scheduling feature
+/// `DAV` header advertised by the `CalDAV` services: the scheduling feature
 /// tokens are appended only while the extension is enabled.
 pub(crate) fn dav_header_with_scheduling(
     base: &'static str,

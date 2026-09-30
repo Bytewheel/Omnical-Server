@@ -112,6 +112,13 @@ impl rustical_dav::Principal for Principal {
     }
 }
 
+// `async` with no `.await`, because the trait's method is `async` and the value
+// is already in the request extensions. Removing `async` would change the
+// trait's signature, which is axum's, not ours.
+#[allow(
+    clippy::unused_async_trait_impl,
+    reason = "an axum extractor whose value is already in the request extensions"
+)]
 impl<S: Send + Sync + Clone> FromRequestParts<S> for Principal {
     type Rejection = UnauthorizedError;
 
@@ -127,6 +134,10 @@ impl<S: Send + Sync + Clone> FromRequestParts<S> for Principal {
     }
 }
 
+#[allow(
+    clippy::unused_async_trait_impl,
+    reason = "an axum extractor whose value is already in the request extensions"
+)]
 impl<S: Send + Sync + Clone> OptionalFromRequestParts<S> for Principal {
     type Rejection = Infallible;
 

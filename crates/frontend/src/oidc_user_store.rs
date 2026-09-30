@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use rustical_oidc::UserStore;
 use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub struct OidcUserStore<AP: AuthenticationProvider>(pub Arc<AP>);
@@ -35,7 +36,7 @@ impl<AP: AuthenticationProvider> UserStore for OidcUserStore<AP> {
                     password: None,
                     memberships: vec![],
                     needs_password_change: false,
-                    privileges: Default::default(),
+                    privileges: BTreeMap::default(),
                 },
                 false,
             )

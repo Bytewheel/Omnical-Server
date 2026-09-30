@@ -1,0 +1,268 @@
+{% extends "layouts/admin.html" %}
+
+{#
+  The appliance panel: Data / Network / Firmware (item 14, §9.4).
+
+  Three sections on one page, because they answer one question — "is this box
+  healthy?" — and an operator who has to visit three URLs to answer it will
+  visit one and assume the rest.
+
+  Every value here arrived already redacted. The panel holds no secret and has no
+  redaction code: `rustical::commands::support_bundle::redact` ran in the binary
+  before any of this was constructed, and it fails rather than returning a string
+  that still holds one. A screenshot of this page is therefore as safe to attach
+  to a public issue as a support bundle — which is the whole of row 50's rule
+  applied to a second surface.
+
+  Each section carries its own error. A panel that showed one error for all three
+  would tell an operator nothing about which measurement failed, and one that
+  showed an empty table would tell them the box has no network.
+#}
+
+{% block title %}Omnical administration — appliance{% endblock %}
+
+{% block header_right %}
+<form method="POST" action="/frontend/admin/logout" class="logout_form">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit">Log out {{ admin }}</button>
+</form>
+{% endblock %}
+
+{% block content %}
+
+<h1>Appliance</h1>
+
+<p><a href="/frontend/admin/tenants">&larr; All tenants</a></p>
+
+{# ───────────────────────────── Data ───────────────────────────── #}
+
+<h2>Data</h2>
+
+{% match data %}
+{% when Err with (message) %}
+  <p class="error">The data section could not be read: {{ message }}</p>
+{% when Ok with (facts) %}
+
+  <table>
+    <tbody>
+      <tr><th>Database</th><td>{{ facts.database }}</td></tr>
+      <tr><th>Restore points</th><td>{{ facts.backup_dir }}</td></tr>
+    </tbody>
+  </table>
+
+  {% if !facts.database_exists %}
+  <p class="error">
+    There is no database at that path. The service may not have run with this
+    configuration yet.
+  </p>
+  {% endif %}
+
+  {# A staged restore has changed nothing yet. Saying so is the difference
+     between an operator who waits for the restart and one who assumes their
+     data is already back. #}
+  {% if let Some(pending) = facts.pending %}
+  <p class="error">
+    <strong>A restore is staged and has NOT been applied.</strong>
+    It was requested by {{ pending.requested_by }} from
+    {{ pending.archive }} (taken {{ pending.archive_created_at }}). The
+    service is restarting to complete it. Until it does, the live database is
+    unchanged.
+    {% match pending.safety_copy %}
+    {% when Some with (copy) %}
+      The current database is kept at {{ copy }}.
+    {% when None %}
+    {% endmatch %}
+  </p>
+  {% endif %}
+
+  {% match facts.last_report %}
+  {% when Some with (report) %}
+  <h3>The last completed restore</h3>
+  <table>
+    <tbody>
+      <tr><th>Archive</th><td>{{ report.archive }}</td></tr>
+      <tr><th>Taken</th><td>{{ report.archive_created_at }}</td></tr>
+      <tr><th>Completed</th><td>{{ report.completed_at }}</td></tr>
+      <tr><th>Requested by</th><td>{{ report.requested_by }}</td></tr>
+      <tr>
+        <th>Result</th>
+        <td>
+          {% if report.verified %}matched the archive{% else %}
+          <span class="error">did NOT match the archive</span>{% endif %}
+        </td>
+      </tr>
+      <tr><th>integrity_check</th><td>{{ report.integrity_check }}</td></tr>
+    </tbody>
+  </table>
+
+  {# The claim is worded by the binary, not here. A template that assembled its
+     own sentence about what a row count proves is a second place for the two
+     to disagree — and the one that has to be right is the one an operator reads
+     after destroying their live data. #}
+  <p>{{ report.claim }}</p>
+
+  {% if !report.losses.is_empty() %}
+  <h4>Rows the archive had that the restored database does not</h4>
+  <table>
+    <thead><tr><th>Table</th><th>In the archive</th><th>After the restore</th></tr></thead>
+    <tbody>
+    {% for (table, before, after) in report.losses %}
+      <tr><td>{{ table }}</td><td>{{ before }}</td><td>{{ after }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if !report.missing.is_empty() %}
+  <h4>Tables in the archive that are missing</h4>
+  <ul>
+  {% for table in report.missing %}<li>{{ table }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if !report.added_by_migration.is_empty() %}
+  <h4>Tables added since the archive was taken</h4>
+  <ul>
+  {% for table in report.added_by_migration %}<li>{{ table }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  {% match report.safety_copy %}
+  {% when Some with (copy) %}
+  <p>The pre-restore copy is at {{ copy }}.</p>
+  {% when None %}
+  {% endmatch %}
+  {% when None %}
+  <p>No restore has been completed on this database yet.</p>
+  {% endmatch %}
+
+  {% match facts.report_error %}
+  {% when Some with (message) %}
+  <p class="error">A restore report exists but could not be read: {{ message }}</p>
+  {% when None %}
+  {% endmatch %}
+
+  <h3>Restore points</h3>
+  {% if facts.restore_points.is_empty() %}
+  <p>No restore points in that directory.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Archive</th><th>Size</th><th>Taken</th><th></th></tr></thead>
+    <tbody>
+    {% for point in facts.restore_points %}
+      <tr>
+        <td>{{ point.name }}</td>
+        <td>{{ point.size_text }}</td>
+        <td>{{ point.modified_text }}</td>
+        <td>
+          {# A GET, so the operator sees what will happen before the POST that
+             does it. The form itself is on the confirmation page. #}
+          <a href="/frontend/admin/appliance/restore?archive={{ point.name|urlencode }}">
+            Restore&hellip;
+          </a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+{% endmatch %}
+
+{# ──────────────────────────── Network ──────────────────────────── #}
+
+<h2>Network</h2>
+
+{% match network %}
+{% when Err with (message) %}
+  {# Not an empty table. "Could not be read" and "this box has no addresses"
+     are different facts, and only one of them is true when `ip` is missing. #}
+  <p class="error">The network section could not be read: {{ message }}</p>
+{% when Ok with (facts) %}
+<table>
+  <tbody>
+    <tr><th>Bind</th><td>{{ facts.bind }}</td></tr>
+    {% match facts.public_url %}
+    {% when Some with (url) %}
+    <tr><th>Public URL</th><td>{{ url }}</td></tr>
+    {% when None %}
+    <tr><th>Public URL</th><td>(not configured)</td></tr>
+    {% endmatch %}
+    <tr><th>Data root</th><td>{{ facts.data_root }}</td></tr>
+    <tr><th>Admin hosts</th><td>{{ facts.admin_hosts.join(", ") }}</td></tr>
+  </tbody>
+</table>
+
+{% if facts.addresses.is_empty() %}
+<p>No addresses are configured on any interface.</p>
+{% else %}
+<table>
+  <thead><tr><th>Interface</th><th>Family</th><th>Address</th><th>Prefix</th></tr></thead>
+  <tbody>
+  {% for address in facts.addresses %}
+    <tr>
+      <td>{{ address.interface }}</td>
+      <td>{{ address.family }}</td>
+      <td>{{ address.address }}</td>
+      <td>/{{ address.prefix_len }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endmatch %}
+
+{# ──────────────────────────── Firmware ─────────────────────────── #}
+
+<h2>Firmware</h2>
+
+{% match firmware %}
+{% when Err with (message) %}
+<p class="error">The firmware section could not be read: {{ message }}</p>
+{% when Ok with (facts) %}
+<table>
+  <tbody>
+    <tr><th>Running version</th><td>{{ facts.version }}</td></tr>
+    <tr><th>Commit</th><td>{{ facts.commit }}</td></tr>
+    <tr><th>Binary size</th><td>{{ facts.size_text }}</td></tr>
+    <tr>
+      <th>Overlay free</th>
+      <td>
+        {{ facts.free_text }}
+        {% if !facts.space_known %}
+        <span class="error">(not measured — this is not the same as having no free space)</span>
+        {% endif %}
+      </td>
+    </tr>
+    <tr><th>Overlay</th><td>{{ facts.overlay_mount }}</td></tr>
+    <tr><th>Images looked for in</th><td>{{ facts.firmware_dir }}</td></tr>
+  </tbody>
+</table>
+
+{% if facts.can_flash %}
+  {% if facts.images.is_empty() %}
+  <p>No firmware images are available to flash.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Image</th><th>Size</th><th></th></tr></thead>
+    <tbody>
+    {% for image in facts.images %}
+      <tr>
+        <td>{{ image.name }}</td>
+        <td>{{ image.size_text }}</td>
+        <td>
+          <a href="/frontend/admin/appliance/firmware?image={{ image.name|urlencode }}">
+            Flash&hellip;
+          </a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+{% else %}
+<p>No flashing tool is present on this host, so there is nothing to flash.</p>
+{% endif %}
+{% endmatch %}
+
+{% endblock %}

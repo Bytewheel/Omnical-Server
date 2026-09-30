@@ -14,6 +14,10 @@ use std::path::PathBuf;
 use tracing::warn;
 
 #[tokio::main(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one arm per subcommand, and every arm is a straight-line call into its command. Splitting it would mean a function per arm that exists only to be called once"
+)]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -132,10 +136,55 @@ async fn main() -> Result<()> {
                 let bind: std::net::SocketAddr = std::env::var("OMNICAL_SETUP_BIND")
                     .ok()
                     .and_then(|v| v.parse().ok())
-                    .unwrap_or(([192, 168, 0, 1], 8080).into());
+                    .unwrap_or_else(|| ([192, 168, 0, 1], 8080).into());
                 rustical::setup_mode::serve_setup_mode(&config_file, bind).await
             } else {
                 let config = parse_config().await?;
+                // A staged restore is completed **here**, before `cmd_serve`
+                // opens the connection pool.
+                //
+                // This is the only place both the config and the subcommand are
+                // in scope, and the ordering is the whole design: `cmd_restore`
+                // refuses while the server is reachable because replacing a
+                // database under a live server corrupts it, and the appliance
+                // panel is served *by* that server. So the panel verifies the
+                // archive, writes the new database beside the live one and asks
+                // for a restart; this is the moment the server is not running
+                // and the database is not open, which is the only moment the
+                // swap is safe.
+                //
+                // `Ok(None)` is the ordinary case — no restore was ever staged.
+                // A failure is logged and the service continues on the existing
+                // database: the marker is already consumed by
+                // `complete_staged_restore` before it does anything, so a
+                // failure here is not retried on the next boot, and refusing to
+                // boot would leave an operator with a working server and no way
+                // to fix it from the panel they cannot reach.
+                if config.appliance.enabled {
+                    let db = config
+                        .appliance_paths()
+                        .map(|paths| paths.database)
+                        .map_err(anyhow::Error::msg)?;
+                    match rustical::appliance::complete_staged_restore(&db).await {
+                        Ok(Some(report)) => {
+                            warn!(
+                                database = %report.database.display(),
+                                verified = report.is_verified(),
+                                claim = %report.claim(),
+                                "a staged restore was completed at start-up"
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            warn!(
+                                %e,
+                                database = %db.display(),
+                                "a staged restore could not be completed; the service is \
+                                 running on the existing database"
+                            );
+                        }
+                    }
+                }
                 cmd_serve(args, config, None, true).await
             }
         }
@@ -229,6 +278,11 @@ async fn load_config(config_file: &str) -> Result<Config> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::result_large_err,
+    reason = "figment::Error is 208 bytes and boxing it in a test helper would only \
+              move the noise; the production call sites already box it"
+)]
 mod test_config {
     use figment::{
         Figment, Jail,

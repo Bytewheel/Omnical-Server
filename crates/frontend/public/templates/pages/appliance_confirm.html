@@ -1,0 +1,93 @@
+{% extends "layouts/admin.html" %}
+
+{#
+  The confirmation page for both destructive appliance actions — a restore and a
+  firmware flash.
+
+  One template for both, because the *shape* of a confirmation is the same and
+  two templates would be two places for "what this is about to do" to go stale.
+  Only the facts differ, and they are passed in.
+
+  Three things this page does that a plain form does not:
+
+  1. **It lists the consequences** before the button, in the order they happen.
+     A destructive action described in a paragraph is one nobody reads twice.
+  2. **It requires the name to be typed.** Not a checkbox. The cost of a wrong
+     restore is a customer's data at an older timestamp; typing forces the
+     operator to read *which* archive they picked.
+  3. **It refuses to render a working button when the action cannot work** —
+     no flashing tool, or an unmeasured filesystem. Each is reported with its
+     own cause, because "no tool", "no room" and "not measured" are three
+     different problems.
+
+  The `csrf` token is the admin panel's own session token. This page is rendered
+  inside the panel's router, so the form it emits posts to a handler gated by the
+  same `require_admin` — there is one credential surface here, not two.
+#}
+
+{% block title %}Omnical administration — {{ title }}{% endblock %}
+
+{% block header_right %}
+<form method="POST" action="/frontend/admin/logout" class="logout_form">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit">Log out {{ admin }}</button>
+</form>
+{% endblock %}
+
+{% block content %}
+
+<p><a href="/frontend/admin/appliance">&larr; Appliance</a></p>
+
+<h1>{{ title }}</h1>
+
+{% if let Some(error) = error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+{% if !detail.is_empty() %}
+<table>
+  <tbody>
+  {% for line in detail %}<tr><td>{{ line }}</td></tr>{% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if !consequences.is_empty() %}
+<h2>This will:</h2>
+<ol>
+{% for line in consequences %}<li>{{ line }}</li>{% endfor %}
+</ol>
+{% endif %}
+
+{% match blocked %}
+{% when Some with (reason) %}
+{# No form at all. A disabled button that is still focusable and still submits
+   is a control that looks like a refusal and behaves like a bypass. #}
+<p class="error"><strong>This action is not available.</strong> {{ reason }}</p>
+{% when None %}
+<form method="POST" action="/frontend/admin/appliance/{{ action }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="{% if action == "restore" %}archive{% else %}image{% endif %}" value="{{ target }}">
+
+  <p>
+    <label for="confirm">
+      Type <code>{{ target }}</code> to confirm:
+    </label>
+  </p>
+  <p>
+    <input type="text" id="confirm" name="confirm" autocomplete="off" spellcheck="false" required>
+  </p>
+
+  <p>
+    <button type="submit">
+      {% if action == "restore" %}
+      Restore this database — the service will restart
+      {% else %}
+      Flash this firmware — the unit will reboot
+      {% endif %}
+    </button>
+  </p>
+</form>
+{% endmatch %}
+
+{% endblock %}

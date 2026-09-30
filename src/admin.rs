@@ -93,7 +93,7 @@ async fn assert_one_admin_host_unclaimed(
         // `get_any_tenant_by_host`, not `get_tenant_by_host`: the latter filters
         // on `status = 'active'`, and a *suspended* tenant's hostname is still
         // a claim. A refusal that cannot name the tenant is half a refusal.
-        let holder = store.get_any_tenant_by_host(&admin).await?;
+        let holder = store.get_any_tenant_by_host(admin).await?;
         return Err(anyhow::anyhow!(
             "[tenancy] admin_host = {admin:?} is already claimed by an explicit tenant_hosts \
              row (tenant {}). The admin panel is selected before tenant dispatch, so this \

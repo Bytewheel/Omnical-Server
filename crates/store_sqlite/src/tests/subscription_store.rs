@@ -12,7 +12,7 @@ mod tests {
         #[from(test_store_context)]
         context: TestStoreContext,
     ) {
-        let store = SqliteSubscriptionStore::new(context.await.cal_store.clone());
+        let store = SqliteSubscriptionStore::new(context.await.cal_store);
 
         // Unknown token -> NotFound (this is the export URL's 404 path)
         assert!(
@@ -95,7 +95,7 @@ mod tests {
         #[from(test_store_context)]
         context: TestStoreContext,
     ) {
-        let store = SqliteSubscriptionStore::new(context.await.cal_store.clone());
+        let store = SqliteSubscriptionStore::new(context.await.cal_store);
 
         store
             .add_subscription(

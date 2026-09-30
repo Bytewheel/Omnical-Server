@@ -92,14 +92,14 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         // carry the `needs_password_change` column without regenerating the
         // committed `.sqlx/` offline metadata for the old statement shape.
         let rows = sqlx::query(
-            r#"
+            r"
             SELECT p.id, p.displayname, p.principal_type, p.password_hash,
                    p.needs_password_change,
                    json_group_array(m.member_of) AS memberships
             FROM principals p
             LEFT JOIN memberships m ON p.id == m.principal
             GROUP BY p.id
-        "#,
+        ",
         )
         .fetch_all(&self.db)
         .await
@@ -164,14 +164,14 @@ impl AuthenticationProvider for SqlitePrincipalStore {
     #[instrument]
     async fn get_principal(&self, id: &str) -> Result<Option<Principal>, Error> {
         let row = sqlx::query(
-            r#"
+            r"
             SELECT p.id, p.displayname, p.principal_type, p.password_hash,
                    p.needs_password_change,
                    json_group_array(m.member_of) AS memberships
             FROM (SELECT * FROM principals WHERE id = ?) AS p
             LEFT JOIN memberships m ON p.id == m.principal
             GROUP BY p.id
-        "#,
+        ",
         )
         .bind(id)
         .fetch_optional(&self.db)
@@ -225,13 +225,13 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         let principal_type = user.principal_type.as_str();
         let password = user.password.map(Secret::into_inner);
         sqlx::query!(
-            r#"
+            r"
             INSERT INTO principals
             (id, displayname, principal_type, password_hash) VALUES (?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 (displayname, principal_type, password_hash)
                 = (excluded.displayname, excluded.principal_type, excluded.password_hash)
-        "#,
+        ",
             user.id,
             user.displayname,
             principal_type,
@@ -278,11 +278,11 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         let id = uuid::Uuid::new_v4().to_string();
         let token_hash = hash_app_token(&token)?;
         sqlx::query!(
-            r#"
+            r"
             INSERT INTO app_tokens
                 (id, principal, token, displayname)
             VALUES (?, ?, ?, ?)
-        "#,
+        ",
             id,
             user_id,
             token_hash,
@@ -324,11 +324,11 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         // are a real user (have a stored password) — group principals never
         // get the forced password-change nudge.
         let info = sqlx::query(
-            r#"
+            r"
             SELECT
                 (SELECT COUNT(*) FROM memberships WHERE principal = ?) AS membership_count,
                 (SELECT password_hash FROM principals WHERE id = ?) AS password_hash
-            "#,
+            ",
         )
         .bind(principal)
         .bind(principal)
@@ -351,13 +351,13 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         // memberships (an existing row — e.g. the owner's `admin` row seeded
         // by `set_group_owner` — is left untouched).
         sqlx::query(
-            r#"
+            r"
             INSERT INTO group_members (group_id, member_id, privilege)
             SELECT ?, ?, 'edit'
             FROM principals
             WHERE id = ? AND principal_type = 'GROUP'
             ON CONFLICT(group_id, member_id) DO NOTHING
-            "#,
+            ",
         )
         .bind(member_of)
         .bind(principal)
@@ -424,14 +424,14 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         // Omnical §17.9.2 invariant: the last admin of a group cannot be
         // removed.
         let info = sqlx::query(
-            r#"
+            r"
             SELECT
                 (SELECT privilege FROM group_members
                  WHERE group_id = ? AND member_id = ?) AS privilege,
                 (SELECT COUNT(*) FROM group_members
                  WHERE group_id = ? AND member_id != ? AND privilege = 'admin')
                  AS other_admins
-            "#,
+            ",
         )
         .bind(member_of)
         .bind(principal)
@@ -477,9 +477,10 @@ impl AuthenticationProvider for SqlitePrincipalStore {
                 .fetch_optional(&self.db)
                 .await
                 .map_err(crate::Error::from)?;
-        let privilege = row
-            .map(|row| row.get::<String, _>("privilege"))
-            .unwrap_or_else(|| Privilege::Edit.as_str().to_owned());
+        let privilege = row.map_or_else(
+            || Privilege::Edit.as_str().to_owned(),
+            |row| row.get::<String, _>("privilege"),
+        );
         privilege
             .parse()
             .map_err(|e| Error::Other(anyhow::Error::msg(e)))
@@ -530,12 +531,12 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         }
 
         sqlx::query(
-            r#"
+            r"
             INSERT INTO group_members (group_id, member_id, privilege)
             VALUES (?, ?, ?)
             ON CONFLICT(group_id, member_id)
             DO UPDATE SET privilege = excluded.privilege
-            "#,
+            ",
         )
         .bind(group_id)
         .bind(member_id)
@@ -554,7 +555,7 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         group_id: &str,
     ) -> Result<Vec<(String, Privilege)>, Error> {
         let rows = sqlx::query(
-            r#"
+            r"
             SELECT m.principal AS member_id,
                    COALESCE(gm.privilege, 'edit') AS privilege,
                    o.owner_id IS NOT NULL AS is_owner
@@ -565,7 +566,7 @@ impl AuthenticationProvider for SqlitePrincipalStore {
                 ON o.group_id = m.member_of AND o.owner_id = m.principal
             WHERE m.member_of = ?
             ORDER BY m.principal
-            "#,
+            ",
         )
         .bind(group_id)
         .fetch_all(&self.db)
@@ -606,12 +607,12 @@ impl AuthenticationProvider for SqlitePrincipalStore {
     #[instrument]
     async fn list_groups_for_user(&self, user_id: &str) -> Result<Vec<(String, String)>, Error> {
         Ok(sqlx::query(
-            r#"
+            r"
             SELECT memberships.member_of AS id, principals.displayname
             FROM memberships
             JOIN principals ON memberships.member_of = principals.id
             WHERE memberships.principal = ? AND principals.principal_type = 'GROUP'
-            "#,
+            ",
         )
         .bind(user_id)
         .fetch_all(&self.db)
@@ -631,7 +632,7 @@ impl AuthenticationProvider for SqlitePrincipalStore {
     #[instrument]
     async fn get_group_owner(&self, group_id: &str) -> Result<Option<String>, Error> {
         Ok(
-            sqlx::query(r#"SELECT owner_id FROM group_owners WHERE group_id = ?"#)
+            sqlx::query(r"SELECT owner_id FROM group_owners WHERE group_id = ?")
                 .bind(group_id)
                 .fetch_optional(&self.db)
                 .await
@@ -643,7 +644,7 @@ impl AuthenticationProvider for SqlitePrincipalStore {
     #[instrument]
     async fn set_group_owner(&self, group_id: &str, owner_id: &str) -> Result<(), Error> {
         let mut tx = self.db.begin().await.map_err(crate::Error::from)?;
-        sqlx::query(r#"INSERT INTO group_owners (group_id, owner_id) VALUES (?, ?)"#)
+        sqlx::query(r"INSERT INTO group_owners (group_id, owner_id) VALUES (?, ?)")
             .bind(group_id)
             .bind(owner_id)
             .execute(&mut *tx)
@@ -653,11 +654,11 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         // wins even when the membership — and its default `edit` row — was
         // created first).
         sqlx::query(
-            r#"
+            r"
             INSERT INTO group_members (group_id, member_id, privilege)
             VALUES (?, ?, 'admin')
             ON CONFLICT(group_id, member_id) DO UPDATE SET privilege = 'admin'
-            "#,
+            ",
         )
         .bind(group_id)
         .bind(owner_id)
@@ -672,12 +673,12 @@ impl AuthenticationProvider for SqlitePrincipalStore {
     async fn search_users(&self, query: &str) -> Result<Vec<(String, String)>, Error> {
         let pattern = format!("%{query}%");
         Ok(sqlx::query(
-            r#"
+            r"
             SELECT id, displayname
             FROM principals
             WHERE principal_type = 'INDIVIDUAL' AND (id LIKE ? OR displayname LIKE ?)
             LIMIT 20
-            "#,
+            ",
         )
         .bind(&pattern)
         .bind(&pattern)

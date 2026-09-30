@@ -1,7 +1,8 @@
-//! Minimal RFC 5322 / MIME parsing for *inbound* iMIP messages: just enough
-//! to find the first `text/calendar` part (RFC 6047) and the sender address
-//! in a real-world email — nested multiparts, base64 and quoted-printable
-//! transfer encodings, folded headers.
+//! Minimal `RFC 5322` / MIME parsing for *inbound* iMIP messages.
+//!
+//! Just enough to find the first `text/calendar` part (RFC 6047) and the sender
+//! address in a real-world email — nested multiparts, base64 and
+//! quoted-printable transfer encodings, folded headers.
 //!
 //! Hand-rolled like the rest of the extension (no new dependencies); the
 //! outbound counterpart is [`crate::mime`].
@@ -75,10 +76,13 @@ fn parse_content_type(value: &str) -> (String, Vec<(String, String)>) {
     (ctype, params)
 }
 
-/// Extract the first `text/calendar` body (as plain text) from a full RFC 5322
-/// message. Also returns the Content-Type `method` parameter when present —
-/// RFC 6047 puts the iTIP method on both the MIME part and the VCALENDAR;
-/// callers act on the body's METHOD property, this is informational.
+#[must_use]
+/// Extract the first `text/calendar` body (as plain text) from a full
+/// `RFC 5322` message.
+///
+/// Also returns the Content-Type `method` parameter when present — RFC 6047
+/// puts the iTIP method on both the MIME part and the VCALENDAR; callers act on
+/// the body's METHOD property, this is informational.
 pub fn extract_calendar_part(raw_message: &str) -> Option<(String, Option<String>)> {
     let (headers, body) = split_message(raw_message)?;
     extract_from_part(&headers, body)
@@ -106,10 +110,10 @@ fn extract_from_part(headers: &Headers, body: &str) -> Option<(String, Option<St
             .find(|(k, _)| k == "BOUNDARY")
             .map(|(_, v)| v.to_owned())?;
         for part in split_multipart(body, &boundary) {
-            if let Some((part_headers, part_body)) = split_message(part) {
-                if let Some(found) = extract_from_part(&part_headers, part_body) {
-                    return Some(found);
-                }
+            if let Some((part_headers, part_body)) = split_message(part)
+                && let Some(found) = extract_from_part(&part_headers, part_body)
+            {
+                return Some(found);
             }
         }
     }
@@ -139,7 +143,7 @@ fn decode_body(headers: &Headers, body: &str) -> Option<String> {
 /// Decode quoted-printable (RFC 2045 6.7): `=XX` hex escapes and `=\r\n` /
 /// `=\n` soft line breaks.
 fn qp_decode(input: &str) -> Vec<u8> {
-    fn hex(byte: u8) -> Option<u8> {
+    const fn hex(byte: u8) -> Option<u8> {
         match byte {
             b'0'..=b'9' => Some(byte - b'0'),
             b'A'..=b'F' => Some(byte - b'A' + 10),
@@ -161,12 +165,12 @@ fn qp_decode(input: &str) -> Vec<u8> {
                     continue;
                 }
                 // Hex escape "=XX"
-                if rest.len() >= 2 {
-                    if let (Some(hi), Some(lo)) = (hex(rest[0]), hex(rest[1])) {
-                        out.push(hi * 16 + lo);
-                        i += 3;
-                        continue;
-                    }
+                if rest.len() >= 2
+                    && let (Some(hi), Some(lo)) = (hex(rest[0]), hex(rest[1]))
+                {
+                    out.push(hi * 16 + lo);
+                    i += 3;
+                    continue;
                 }
                 // Stray "=": lenient pass-through when bytes follow; only a
                 // "=" dangling at the very end of input is dropped.
@@ -220,15 +224,16 @@ fn split_multipart<'a>(body: &'a str, boundary: &str) -> Vec<&'a str> {
     parts
 }
 
+#[must_use]
 /// The first From (or Sender) address of a message, lowercased — used to
 /// disambiguate which attendee replied when a REPLY lists several.
 pub fn from_address(raw_message: &str) -> Option<String> {
     let (headers, _) = split_message(raw_message)?;
     for field in ["from", "sender"] {
-        if let Some(value) = headers.get(field) {
-            if let Some(addr) = extract_addr(value) {
-                return Some(addr);
-            }
+        if let Some(value) = headers.get(field)
+            && let Some(addr) = extract_addr(value)
+        {
+            return Some(addr);
         }
     }
     None
@@ -317,8 +322,8 @@ mod tests {
             "bob@example.org",
             &ics_body,
             "REQUEST",
-            mime::itip_subject("REQUEST", &event),
-            "You are invited.".to_owned(),
+            &mime::itip_subject("REQUEST", &event),
+            "You are invited.",
         );
         let (extracted, method) = extract_calendar_part(&mail).expect("calendar part");
         assert_eq!(method.as_deref(), Some("REQUEST"));

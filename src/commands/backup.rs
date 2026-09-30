@@ -67,6 +67,11 @@ const DIR_MODE: u32 = 0o700;
 const PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 const COPY_CHUNK: usize = 64 * 1024;
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+/// The two archive suffixes [`is_archive_name`] accepts. Consts rather than
+/// literals so a reader can see the comparison is deliberately case-insensitive
+/// (the caller lowercases first) instead of having to infer it.
+const TAR_SUFFIX: &str = ".tar";
+const TAR_GZ_SUFFIX: &str = ".tar.gz";
 
 /// One file inside the archive, with the digest that proves it arrived intact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -572,12 +577,40 @@ fn swap_in_database(archive: &VerifiedArchive, staging: &Path, db_path: &Path) -
 
 /// A verified archive, extracted to a scratch directory for as long as the
 /// command runs. `Drop` removes it, so an aborted restore leaves nothing.
-struct VerifiedArchive {
+pub struct VerifiedArchive {
     manifest: BackupManifest,
     dir: PathBuf,
 }
 
 impl VerifiedArchive {
+    /// The manifest, which is the archive's own account of what it holds.
+    ///
+    /// Read-only and exposed because the appliance panel has to show what an
+    /// archive contains *before* anyone commits to restoring it — the expected
+    /// row counts are what the post-restore report is measured against, and an
+    /// operator deciding whether to restore needs to see them first.
+    #[must_use]
+    pub const fn manifest(&self) -> &BackupManifest {
+        &self.manifest
+    }
+
+    /// Extract the archive's database to `destination` and verify it.
+    ///
+    /// The one entry point a caller outside this module needs. `dest` is a
+    /// *caller-chosen* path and is **not** removed when the `VerifiedArchive`
+    /// drops — only the scratch directory is. That is what lets the appliance
+    /// panel stage a restore into a file that has to outlive this process: the
+    /// panel restarts the service to complete it, so anything living in the
+    /// scratch directory would be gone before the swap.
+    ///
+    /// # Errors
+    /// Everything [`read_archive`] can fail with, plus a failure to write
+    /// `destination`. The archive is fully verified before a single byte is
+    /// written, so a corrupt archive never creates the destination at all.
+    pub fn extract_database_to(&self, destination: &Path) -> Result<()> {
+        self.copy_out(&self.manifest.database, destination)
+    }
+
     /// Check every extracted file against the manifest. Called once, after
     /// the whole archive has been read, so a bad archive is rejected before
     /// the caller has touched the target at all — no safety copy, no staging
@@ -626,6 +659,93 @@ impl VerifiedArchive {
 impl Drop for VerifiedArchive {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Read, parse and verify an archive, for a caller outside this module.
+///
+/// The appliance panel's staged restore is the second caller of the verification
+/// that [`cmd_restore`] already does, and it must be the *same* verification: a
+/// second implementation would be free to disagree with the CLI about what
+/// "verified" means, which is precisely the bug a restore gate exists to
+/// prevent. So this is a wrapper, not a re-derivation.
+///
+/// # Errors
+/// Every failure [`read_archive`] reports — an unreadable file, a non-tar, an
+/// unexpected or duplicated entry, a manifest this build does not understand,
+/// a size or `sha256` mismatch. Nothing is written to the target on any of them.
+pub fn verify_archive(path: &Path) -> Result<VerifiedArchive> {
+    read_archive(path)
+}
+
+/// Row counts and `PRAGMA integrity_check` for a database file.
+///
+/// The one inventory, reused. A panel that counted rows its own way would be a
+/// second opinion about the same database, and the two would eventually
+/// disagree — most likely about which tables exist, since that is exactly what
+/// changes across a migration.
+///
+/// # Errors
+/// If the file cannot be opened, is not a SQLite database, or a table cannot be
+/// counted. Notably it does **not** return `Ok` with empty counts for a file
+/// that is not a database: `create_db_pool` fails, and that failure is reported.
+pub async fn row_counts_of(path: &Path) -> Result<DatabaseInventory> {
+    let (integrity_check, row_counts) = inspect_database(path).await?;
+    Ok(DatabaseInventory {
+        integrity_check,
+        row_counts,
+    })
+}
+
+/// What [`row_counts_of`] measured.
+///
+/// A named type rather than the bare tuple so a caller cannot silently swap the
+/// integrity string for a row count, and so `claim()` below has something to be
+/// honest about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatabaseInventory {
+    /// `PRAGMA integrity_check`. `"ok"` is the only passing value.
+    pub integrity_check: String,
+    /// One entry per user table, excluding `sqlite_*` and `_sqlx_migrations`.
+    pub row_counts: BTreeMap<String, i64>,
+}
+
+impl DatabaseInventory {
+    /// The one claim a row count can support.
+    ///
+    /// **Deliberately narrow**, and the wording is load-bearing. This says the
+    /// archive's tables are all present with the archived row counts. It does
+    /// *not* say no data was lost, because a restore deliberately discards every
+    /// row written since the archive — so "nothing was lost" is false for every
+    /// correct restore, and a banner that said it would be lying in the one case
+    /// where the operator most needs the truth.
+    ///
+    /// Nor can it see a **dropped column**: row counts are per table, so a
+    /// restore that loses an entire column while every table keeps its count
+    /// reads as clean. This is the honest limit carried forward from §18.28.
+    #[must_use]
+    pub fn claim(&self, comparison: &RowCountComparison) -> String {
+        if self.integrity_check != "ok" {
+            return format!(
+                "The database failed its integrity check: {}.",
+                self.integrity_check
+            );
+        }
+        if !comparison.mismatches.is_empty() || !comparison.missing.is_empty() {
+            return format!(
+                "{} of {} tables do not match the archive ({} missing). The restore is not \
+                 verified; the previous database was kept and nothing was lost from it.",
+                comparison.mismatches.len() + comparison.missing.len(),
+                self.row_counts.len(),
+                comparison.missing.len(),
+            );
+        }
+        format!(
+            "Every table in the archive is present with its archived row count ({} tables, \
+             integrity_check ok). This is what a row count can show: it cannot see a dropped \
+             column, and the restore did discard rows written since the archive was taken.",
+            self.row_counts.len(),
+        )
     }
 }
 
@@ -773,13 +893,40 @@ async fn inspect_database(path: &Path) -> Result<(String, BTreeMap<String, i64>)
     Ok((integrity_check, row_counts))
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
-struct RowCountComparison {
-    mismatches: Vec<String>,
-    notes: Vec<String>,
+/// The difference between what a manifest says a database held and what the
+/// restored database holds.
+///
+/// Three signals, kept apart because they mean different things and an operator
+/// acts on them differently:
+///
+/// - [`Self::mismatches`] — a table is present with a *different* count.
+/// - [`Self::missing`] — a table in the archive is **absent** from the database.
+/// - [`Self::added_by_migration`] — a table the archive did not have.
+///
+/// `missing` was folded into `mismatches` when this was CLI-only, and splitting
+/// it out is what lets a panel render a missing table as a missing table instead
+/// of asking the reader to parse it out of a sentence. Both still print a
+/// `MISMATCH` line, so the CLI's behaviour and its text are unchanged.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RowCountComparison {
+    pub mismatches: Vec<String>,
+    pub missing: Vec<String>,
+    pub added_by_migration: Vec<String>,
+    /// Human-readable notes that are neither of the above.
+    pub notes: Vec<String>,
 }
 
-fn compare_row_counts(
+/// Compare an archive's manifest against a measured inventory.
+///
+/// **Reused rather than reimplemented**: the appliance panel's restore report is
+/// measured against the manifest's `row_counts`, never against the live
+/// database's pre-restore counts. Comparing "before vs after" would print every
+/// *correct* restore as catastrophic data loss, because restoring moves data
+/// back in time on purpose — the same trap §18.29 fell into when a deliberate
+/// token revocation was reported as `LOST ROWS` under a collateral-damage
+/// banner.
+#[must_use]
+pub fn compare_row_counts(
     expected: &BTreeMap<String, i64>,
     actual: &BTreeMap<String, i64>,
 ) -> RowCountComparison {
@@ -791,13 +938,17 @@ fn compare_row_counts(
                 "MISMATCH {table}: the manifest says {count}, the restored database has \
                  {actual_count}"
             )),
-            None => comparison.mismatches.push(format!(
-                "MISMATCH {table}: missing from the restored database"
-            )),
+            None => {
+                comparison.missing.push(table.clone());
+                comparison.mismatches.push(format!(
+                    "MISMATCH {table}: missing from the restored database"
+                ));
+            }
         }
     }
     for table in actual.keys() {
         if !expected.contains_key(table) {
+            comparison.added_by_migration.push(table.clone());
             comparison.notes.push(format!(
                 "{table} is not in the manifest (added by a migration)"
             ));
@@ -900,6 +1051,119 @@ fn scratch_dir() -> Result<PathBuf> {
         .create(&dir)
         .with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir)
+}
+
+/// One archive on disk that an operator could restore from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestorePoint {
+    pub path: PathBuf,
+    /// File size, from the directory entry — **not** the archive's contents.
+    /// A panel listing a 400 MiB archive must not read all 400 MiB to draw a
+    /// table row.
+    pub size: u64,
+    /// Filesystem mtime, seconds since the epoch.
+    ///
+    /// **Not** the archive's own `created_at`. Listing is a directory read and
+    /// a stat, and reading every manifest to show a timestamp would make the
+    /// page cost more the more restore points an install accumulates. The name
+    /// already carries the creation time, and the manifest is read when someone
+    /// actually commits to a restore.
+    pub modified: i64,
+}
+
+/// The archives in `dir` that are complete and worth offering to restore from.
+///
+/// **Newest first, `.part` excluded, and both are load-bearing.** `cmd_backup`
+/// writes `.<name>.part` while it works and renames on success, so a `.part` in
+/// the directory is either a backup in progress or the remains of a killed one —
+/// either way it is not something to restore from, and offering it would be
+/// offering a truncated database. `cmd_backup` also leaves `.sqlite3.part`
+/// snapshots behind on the failure path, and a restore leaves `.restore-<ts>`
+/// and `.pre-restore-<ts>` siblings next to the *database* rather than here.
+///
+/// This scans `dir` **non-recursively on purpose**. `backup_all` gives each
+/// tenant a subdirectory, so a recursive walk here would list every tenant's
+/// backups as if they were this database's — and restoring the wrong tenant's
+/// archive is the exact mistake a restore button exists to prevent.
+///
+/// # Errors
+/// If `dir` cannot be read. An absent directory is an error rather than an
+/// empty list, because "no backups" and "the backup directory is gone" are
+/// different facts and an operator needs to be able to tell them apart.
+pub fn list_restore_points(dir: &Path) -> Result<Vec<RestorePoint>> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir)
+        .with_context(|| format!("listing the restore points in {}", dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("reading an entry in {}", dir.display()))?;
+        let metadata = entry
+            .metadata()
+            .with_context(|| format!("reading {}", entry.path().display()))?;
+        if !metadata.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || !is_archive_name(&name) {
+            continue;
+        }
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+            // `try_from` rather than `as i64`: a saturating read is the honest
+            // one for a timestamp, and an `as` that silently wrapped would sort
+            // a restore point into the wrong place in the listing.
+            .map_or(0, |elapsed| {
+                i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+            });
+        out.push(RestorePoint {
+            path: entry.path(),
+            size: metadata.len(),
+            modified,
+        });
+    }
+    // Reverse on the filename, not on `modified`: two archives written in the
+    // same second have an arbitrary directory order, and the name is
+    // `omnical-backup-<timestamp>`, which sorts chronologically by
+    // construction. Ties then fall back to the path so the order is total.
+    out.sort_by(|a, b| {
+        b.path
+            .file_name()
+            .cmp(&a.path.file_name())
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    Ok(out)
+}
+
+/// Does this name look like a backup archive?
+///
+/// Shape-based, not content-based: listing cannot open every archive to check,
+/// and [`verify_archive`] is what actually decides whether a restore may
+/// proceed. This only has to not offer the obviously-wrong files.
+///
+/// Requires both the `omnical-backup-` prefix and a `.tar`/`.tar.gz` suffix, so
+/// a `config.toml` or a stray `.sqlite3` sitting in the backup directory is
+/// never rendered as a restore button.
+fn is_archive_name(name: &str) -> bool {
+    let stem = name.strip_prefix("omnical-backup-").unwrap_or(name);
+    // Matched against a lowered copy, so an archive called `ARCHIVE.TAR.GZ` is
+    // recognised. `is_archive_name` gates what may be *offered* as a restore
+    // point, and a case-sensitive miss here would hide a perfectly good backup
+    // from the operator who has it on disk.
+    //
+    let lower = stem.to_ascii_lowercase();
+    lower.ends_with(TAR_SUFFIX) || lower.ends_with(TAR_GZ_SUFFIX)
+}
+
+/// A readable, human-sized rendering of a byte count, for a table cell.
+///
+/// Public because the panel draws a size column and the CLI draws the same
+/// column, and two formatters would eventually disagree about what "1.0 KiB"
+/// means.
+#[must_use]
+pub fn format_size(bytes: u64) -> String {
+    human_size(bytes)
 }
 
 fn staging_path(db_path: &Path) -> PathBuf {
@@ -1072,9 +1336,24 @@ mod tests {
                 mismatches: vec![
                     "MISMATCH principals: missing from the restored database".to_owned()
                 ],
+                // A missing table is also recorded as missing, so a panel can
+                // render "principals is gone" without parsing the sentence above.
+                missing: vec!["principals".to_owned()],
+                added_by_migration: vec![],
                 notes: vec![],
             }
         );
+    }
+
+    #[test]
+    fn test_compare_row_counts_records_added_tables_typed() {
+        let expected = BTreeMap::from([("principals".to_owned(), 1)]);
+        let actual = BTreeMap::from([("principals".to_owned(), 1), ("tenants".to_owned(), 4)]);
+        let comparison = compare_row_counts(&expected, &actual);
+        assert!(comparison.mismatches.is_empty(), "{comparison:?}");
+        assert_eq!(comparison.added_by_migration, vec!["tenants".to_owned()]);
+        // The CLI's own text is unchanged: the note is still what it always was.
+        assert_eq!(comparison.notes.len(), 1, "{:?}", comparison.notes);
     }
 
     #[test]

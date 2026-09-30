@@ -80,7 +80,9 @@ pub async fn cmd_subscriptions(args: SubscriptionsArgs, config: Config) -> anyho
             .as_ref()
             .and_then(|c| match c {
                 crate::config::HttpBindConfig::Tcp(addr) => Some(addr.as_str()),
-                _ => None,
+                // Named so a future `HttpBindConfig` variant is a compile error
+                // rather than a silently-absent value.
+                crate::config::HttpBindConfig::Unix(_) => None,
             }),
     );
 

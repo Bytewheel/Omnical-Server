@@ -57,9 +57,20 @@ pub struct SupportBundleArgs {
 
 /// A redaction, with the reason — so the bundle can say what it removed, which
 /// is the difference between "trust me" and "here is the list".
-struct Redaction {
-    value: String,
-    reason: String,
+///
+/// Public because the appliance panel redacts through this: `NEXT_AGENT_ITEM14_PANEL.md`
+/// settles that redaction happens **here**, in the `rustical` crate, before data
+/// reaches the view layer, so the panel renders strings that were already
+/// redacted and holds no secret of its own. `crates/frontend` cannot import this
+/// crate, so the panel is handed already-redacted values by the caller rather
+/// than being given a second copy of `redact` to keep honest.
+pub struct Redaction {
+    /// The literal value to replace. Never empty — an empty secret would match
+    /// everywhere, so [`redact`] skips empty entries rather than honouring one.
+    pub value: String,
+    /// Human-readable reason, shown in the "what was removed" list. Never the
+    /// secret itself.
+    pub reason: String,
 }
 
 /// Every secret found in `config`, plus the key-shaped ones.
@@ -68,7 +79,13 @@ struct Redaction {
 /// redacted even if its value is a constant, because the cost of a false
 /// positive is a support engineer asking for one more line, and the cost of a
 /// false negative is a credential on a public issue.
-fn secrets_in(config: &Config, raw_toml: &str) -> Vec<Redaction> {
+///
+/// Public for the appliance panel's Network section, which runs every rendered
+/// string through this and [`redact`]. The panel is exactly the kind of surface
+/// row 50 was written about — a page an operator screenshots into a support
+/// ticket — so it must not be a second, weaker redaction path.
+#[must_use]
+pub fn secrets_in(config: &Config, raw_toml: &str) -> Vec<Redaction> {
     let mut out: Vec<Redaction> = Vec::new();
 
     // 1. Values the typed config knows are secret. These are the ones the gate
@@ -139,7 +156,14 @@ fn secrets_in(config: &Config, raw_toml: &str) -> Vec<Redaction> {
 /// **Verified**, which is the whole point: the caller must not be able to write
 /// a bundle that still contains one. Longest-first, so a secret that contains
 /// another secret is replaced whole rather than leaving a tail behind.
-fn redact(text: &str, secrets: &[Redaction]) -> Result<String> {
+///
+/// # Errors
+/// Fails — rather than returning text that still holds a secret — if any
+/// non-empty secret survives the replacement. That is what makes this a gate
+/// rather than a hope, and it is why the appliance panel can render whatever
+/// `redact` returns without checking anything itself: this is the only place a
+/// secret can survive, and it does not return in that case.
+pub fn redact(text: &str, secrets: &[Redaction]) -> Result<String> {
     let mut sorted: Vec<&Redaction> = secrets.iter().collect();
     sorted.sort_by_key(|r| std::cmp::Reverse(r.value.len()));
 

@@ -33,7 +33,7 @@
 //! and nothing more.
 
 use rustical_store::tenant::Tenant;
-use tracing::Span;
+use tracing::{Instrument as _, Span};
 
 /// The span field names. Named once so the setter and any reader cannot drift.
 pub const TENANT_ID_FIELD: &str = "omnical.tenant_id";
@@ -175,6 +175,5 @@ where
         omnical.tenant_slug = %tenant.slug.as_str(),
         omnical.dispatch = rule,
     );
-    use tracing::Instrument as _;
     f.instrument(span).await
 }

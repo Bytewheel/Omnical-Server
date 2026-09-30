@@ -476,12 +476,11 @@ impl HostDispatch {
             }))
         })
         .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(()) => return server_error(),
-        };
 
-        response
+        match response {
+            Ok(response) => response,
+            Err(()) => server_error(),
+        }
     }
 }
 
@@ -632,15 +631,11 @@ impl Tenancy {
     /// mean a panel nothing can reach, which §6.6.2 makes a startup refusal's
     /// job to prevent rather than a panic's.
     #[must_use]
-    pub fn new(
-        dispatch: Arc<HostDispatch>,
-        panel: Option<Router>,
-        admin_hosts: Vec<String>,
-    ) -> Self {
+    pub fn new(dispatch: Arc<HostDispatch>, panel: Option<Router>, admin_hosts: &[String]) -> Self {
         Self {
             dispatch,
             panel,
-            admin_hosts: normalise_host_list(&admin_hosts),
+            admin_hosts: normalise_host_list(admin_hosts),
             readiness: None,
         }
     }
@@ -651,7 +646,7 @@ impl Tenancy {
     pub fn with_readiness(
         dispatch: Arc<HostDispatch>,
         panel: Option<Router>,
-        admin_hosts: Vec<String>,
+        admin_hosts: &[String],
         readiness: Arc<crate::readiness::ReadinessProbe>,
     ) -> Self {
         Self {

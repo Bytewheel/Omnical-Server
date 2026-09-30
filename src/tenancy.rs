@@ -25,7 +25,7 @@
 //! - A **missing `default_tenant` on an appliance-style install** is a refusal
 //!   to boot, from [`TenancyConfig::validate`], not a 404 on every request.
 
-use rustical_frontend::AdminPanel;
+use rustical_frontend::{AdminPanel, AppliancePanel};
 use rustical_store::admin_store::AdminCredentialStore;
 use rustical_store::tenant_store::TenantStore;
 use rustical_store_sqlite::{SqliteTenantStore, create_control_plane_pool};
@@ -45,6 +45,33 @@ use crate::store_bundle::StoreBundleCache;
 /// startup failures: a server that boots and then 404s everybody is worse than
 /// one that refuses to start and says why.
 pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> {
+    serve_dispatch_with_config_file(config, None).await
+}
+
+/// [`serve_dispatch`], told where the config file is.
+///
+/// The extra argument exists for exactly one thing: the appliance panel's
+/// redaction pass reads the config's **text**, so its key-shape pass can cover
+/// fields this build does not know about. `Config` deliberately does not carry
+/// its own path — a `Config` assembled by a test has no file, and one loaded
+/// from `RUSTICAL_*` environment variables has none either — so the path has to
+/// be handed in rather than derived.
+///
+/// `None` is the honest default and it means the key-shape pass is unavailable.
+/// The typed-config pass still runs, so the SMTP passwords and the RSVP secret
+/// are still redacted; only fields this build has never heard of are not
+/// covered. `cmd_serve` passes the real path.
+///
+/// # Errors
+/// Anything [`TenancyConfig::validate`](crate::config::TenancyConfig::validate)
+/// rejects, a failure to open or migrate the control plane, a reserved admin
+/// host a tenant has claimed, or an enabled-but-unusable `[appliance]` config.
+/// All startup failures: a server that boots and then 404s everybody is worse
+/// than one that says why it will not start.
+pub async fn serve_dispatch_with_config_file(
+    config: &Config,
+    config_file: Option<&std::path::Path>,
+) -> anyhow::Result<TenancyAwareApp> {
     config.tenancy.validate().map_err(anyhow::Error::msg)?;
 
     let control_plane = open_control_plane(&config.tenancy.control_db_url).await?;
@@ -103,27 +130,37 @@ pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> 
         // against the same file, which is the exact thing
         // `store_sqlite`'s module doc argues against for the tenant stores and
         // which the control plane's own two-connection cap depends on.
-        let panel: Arc<dyn TenantStore> = Arc::new(control_plane.clone());
+        let panel_store: Arc<dyn TenantStore> = Arc::new(control_plane.clone());
         let admins: Arc<dyn AdminCredentialStore> = Arc::new(control_plane.clone());
-        Some(
-            Arc::new(AdminPanel::new(
-                panel,
-                admins,
-                config.tenancy.platform_admins.clone(),
-                admin_hosts.clone(),
-                // Already validated by `TenancyConfig::validate`, called at the
-                // top of this function, so this cannot fail. Propagated rather
-                // than `expect`ed because a `.expect` here would be a panic on a
-                // path that a malformed config should have refused earlier —
-                // and quietly substituting an empty list would turn that config
-                // bug into a security control that silently does nothing.
-                config
-                    .tenancy
-                    .parsed_trusted_proxies()
-                    .map_err(anyhow::Error::msg)?,
-            ))
-            .router(),
-        )
+        let admin_panel = Arc::new(AdminPanel::new(
+            panel_store,
+            admins,
+            config.tenancy.platform_admins.clone(),
+            &admin_hosts,
+            // Already validated by `TenancyConfig::validate`, called at the
+            // top of this function, so this cannot fail. Propagated rather
+            // than `expect`ed because a `.expect` here would be a panic on a
+            // path that a malformed config should have refused earlier —
+            // and quietly substituting an empty list would turn that config
+            // bug into a security control that silently does nothing.
+            config
+                .tenancy
+                .parsed_trusted_proxies()
+                .map_err(anyhow::Error::msg)?,
+        ));
+
+        // The appliance section (item 14). Merged into the admin panel's router
+        // so it shares one session, one cookie and one CSRF token — a second
+        // `SessionManagerLayer` would mean a second login for one operator.
+        //
+        // A **separate struct with its own state**, and `AdminPanel` gains no
+        // field for it. That is what keeps the panel's never-open-a-tenant-DB
+        // invariant (§6.6.6) a property of its types: the appliance service
+        // holds one *configured path*, never a `TenantStore` that could resolve
+        // an arbitrary tenant.
+        let appliance = build_appliance_panel(config, &control_plane, config_file)?;
+
+        Some(admin_panel.router_with(appliance))
     };
 
     // §7.4 (item 18): the readiness probe, over the same two things a request
@@ -142,13 +179,90 @@ pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> 
     Ok(TenancyAwareApp::Hosted(Arc::new(Tenancy::with_readiness(
         dispatch,
         panel,
-        admin_hosts,
+        &admin_hosts,
         readiness,
     ))))
 }
 
+/// Build the appliance section, or `None` when it is not configured.
+///
+/// **`None` is the default and it means absent** — no routes, on no host. An
+/// install that upgrades does not acquire a panel that can replace its database
+/// because a new config section was added, which is §6.6.2's rule applied a
+/// second time.
+///
+/// # Errors
+/// [`Config::appliance_paths`]'s refusals. A **startup refusal**, not a
+/// warning: a panel whose restore has no target is a control surface that looks
+/// armed and is not, and an operator discovers that at the worst possible moment.
+fn build_appliance_panel(
+    config: &Config,
+    control_plane: &SqliteTenantStore,
+    config_file: Option<&std::path::Path>,
+) -> anyhow::Result<Option<Arc<AppliancePanel>>> {
+    if !config.appliance.enabled {
+        return Ok(None);
+    }
+    let paths = config.appliance_paths().map_err(anyhow::Error::msg)?;
+
+    // The config file's **text**, for the redaction pass's key-shape half. Read
+    // once here rather than per-request: a config that became unreadable after
+    // boot is then a fact about this build, not a surprise that appears and
+    // disappears between page views.
+    //
+    // **Read for structure, never echoed.** §5.2 records that a `sed` on this
+    // file during a previous session put two SMTP passwords and the RSVP secret
+    // into a transcript. This read exists so the panel's *own* output is
+    // redacted; the value never leaves this function except as a `&str` handed
+    // straight to `secrets_in`.
+    //
+    // An unreadable or absent path yields an empty string, and the redaction
+    // falls back to the typed config's known secrets. That is a **weaker** pass
+    // and it is stated rather than glossed: the key-shape pass, which covers a
+    // field a later version added, needs the file. The support bundle remains
+    // the surface that shows an operator the full redacted config.
+    let raw_config = config_file
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+
+    let binary = crate::appliance::current_executable()
+        .unwrap_or_else(|| std::path::PathBuf::from("/usr/sbin/rustical"));
+
+    let facts = crate::appliance::ApplianceFacts {
+        database: paths.database.clone(),
+        backup_dir: paths.backup_dir.clone(),
+        binary,
+        overlay_mount: paths.overlay_mount.clone(),
+        config: config.clone(),
+        raw_config,
+    };
+
+    let firmware_dir = paths.firmware_dir.clone();
+    let service = crate::appliance_service::service_for(
+        facts,
+        crate::appliance_service::sysupgrade_writer(),
+        // A **clone of the same control plane**, for the audit trail only.
+        Arc::new(control_plane.clone()),
+        Arc::new(crate::setup_mode::ProcdRestart),
+        firmware_dir.clone(),
+    )?;
+
+    info!(
+        database = %paths.database.display(),
+        backup_dir = %paths.backup_dir.display(),
+        firmware_dir = %firmware_dir.display(),
+        "appliance panel enabled"
+    );
+    Ok(Some(Arc::new(AppliancePanel::new(service))))
+}
+
 /// Open and migrate the control plane — a **different file** from any tenant
 /// store (§3.4).
+///
+/// # Errors
+/// If the control plane cannot be opened or migrated. The message names the URL,
+/// because a control plane that will not open is a path problem and the path is
+/// the only thing an operator can act on.
 pub async fn open_control_plane(url: &str) -> anyhow::Result<SqliteTenantStore> {
     let pool = create_control_plane_pool(url, true)
         .await

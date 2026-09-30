@@ -90,7 +90,7 @@ impl OutboxStatus {
         }
     }
 
-    fn failure(recipient: String, message: String) -> Self {
+    const fn failure(recipient: String, message: String) -> Self {
         Self {
             recipient,
             code: 5_00,
@@ -112,11 +112,11 @@ impl Scheduler {
     }
 
     #[must_use]
-    pub fn enabled(&self) -> bool {
+    pub const fn enabled(&self) -> bool {
         self.config.enabled
     }
 
-    /// The backing store handle (used by the CalDAV layer to serve the
+    /// The backing store handle (used by the `CalDAV` layer to serve the
     /// schedule-inbox collections).
     #[must_use]
     pub fn store(&self) -> Arc<dyn SchedulingStore> {
@@ -136,7 +136,7 @@ impl Scheduler {
         Duration::from_secs(self.config.imap_poll_secs.max(30))
     }
 
-    /// Called by the CalDAV PUT handler after an object was stored.
+    /// Called by the `CalDAV` PUT handler after an object was stored.
     ///
     /// `acting_user` is the *authenticated* principal (email id), `current`
     /// the (principal, calendar, object) location the PUT targeted — the
@@ -188,7 +188,7 @@ impl Scheduler {
         }
     }
 
-    /// Called by the CalDAV DELETE handler after an object was removed.
+    /// Called by the `CalDAV` DELETE handler after an object was removed.
     #[instrument(skip(self, deleted_ics))]
     pub async fn handle_delete(&self, acting_user: &str, deleted_ics: &str, ua: Option<&str>) {
         if self.run_guard() {
@@ -338,8 +338,10 @@ impl Scheduler {
         }
     }
 
-    fn run_guard(&self) -> bool {
-        !self.enabled()
+    /// `true` when scheduling is switched off, so the callers can `if
+    /// self.run_guard() { return; }` in one line.
+    const fn run_guard(&self) -> bool {
+        !self.config.enabled
     }
 
     // --- Organizers -----------------------------------------------------------
@@ -391,13 +393,14 @@ impl Scheduler {
                         return;
                     }
                 };
-                let copies: Vec<_> = copies
-                    .into_iter()
-                    .filter(|(cal_id, object_id, _)| {
-                        !(principal == current.0 && cal_id == current.1 && object_id == current.2)
-                    })
-                    .collect();
-                if !copies.is_empty() {
+                // `any`, not `filter().collect()`: the collection was only ever
+                // tested for emptiness and then thrown away by the `return`
+                // below, so the `Vec` was built to answer one yes/no question.
+                let copied_elsewhere = copies.into_iter().any(|(cal_id, object_id, _)| {
+                    principal != current.0 || cal_id != current.1 || object_id != current.2
+                });
+
+                if copied_elsewhere {
                     info!(
                         uid = event.uid,
                         existing_in = principal,
@@ -434,18 +437,15 @@ impl Scheduler {
         };
         // Only act when the PARTSTAT actually changed (edits to other fields
         // of an invited event must not re-deliver replies).
-        if let Some(old_ics) = old_ics {
-            if let Some(old_event) = ics::parse_event(old_ics) {
-                if let Some(old_attendee) = old_event
-                    .attendees
-                    .iter()
-                    .find(|a| a.email.eq_ignore_ascii_case(acting_user))
-                {
-                    if old_attendee.partstat.as_deref() == Some(partstat.as_str()) {
-                        return;
-                    }
-                }
-            }
+        if let Some(old_ics) = old_ics
+            && let Some(old_event) = ics::parse_event(old_ics)
+            && let Some(old_attendee) = old_event
+                .attendees
+                .iter()
+                .find(|a| a.email.eq_ignore_ascii_case(acting_user))
+            && old_attendee.partstat.as_deref() == Some(partstat.as_str())
+        {
+            return;
         }
 
         if !self
@@ -504,14 +504,13 @@ impl Scheduler {
                 };
                 for (cal_id, object_id, stored_ics) in copies {
                     // Only touch copies organised by this organizer
-                    if let Some(parsed) = ics::parse_event(&stored_ics) {
-                        if parsed
+                    if let Some(parsed) = ics::parse_event(&stored_ics)
+                        && parsed
                             .organizer
                             .as_deref()
                             .is_none_or(|o| !o.eq_ignore_ascii_case(organizer))
-                        {
-                            continue;
-                        }
+                    {
+                        continue;
                     }
                     let updated = ics::set_attendee_partstat(&stored_ics, attendee_email, partstat);
                     if updated == stored_ics {
@@ -531,7 +530,7 @@ impl Scheduler {
             }
 
             // File a REPLY in the organizer's inbox
-            let object_id = ics::sanitize_id("reply", &event.uid, &format!("-{}", attendee_email));
+            let object_id = ics::sanitize_id("reply", &event.uid, &format!("-{attendee_email}"));
             if let Err(err) = self
                 .store
                 .put_inbox_object(organizer, &object_id, &reply_ics)
@@ -553,7 +552,7 @@ impl Scheduler {
                 match self.store.principal_memberships(attendee_email).await {
                     Ok(memberships) => principals.extend(memberships),
                     Err(err) => {
-                        warn!("scheduling: memberships lookup failed for {attendee_email}: {err}")
+                        warn!("scheduling: memberships lookup failed for {attendee_email}: {err}");
                     }
                 }
                 for principal in principals {
@@ -566,14 +565,13 @@ impl Scheduler {
                         continue;
                     };
                     for (cal_id, object_id, stored_ics) in copies {
-                        if let Some(parsed) = ics::parse_event(&stored_ics) {
-                            if parsed
+                        if let Some(parsed) = ics::parse_event(&stored_ics)
+                            && parsed
                                 .organizer
                                 .as_deref()
                                 .is_none_or(|o| !o.eq_ignore_ascii_case(organizer))
-                            {
-                                continue;
-                            }
+                        {
+                            continue;
                         }
                         let updated =
                             ics::set_attendee_partstat(&stored_ics, attendee_email, partstat);
@@ -609,8 +607,8 @@ impl Scheduler {
                 organizer,
                 &reply_ics,
                 "REPLY",
-                mime::reply_body(attendee_email, partstat, event),
-                format!(
+                &mime::reply_body(attendee_email, partstat, event),
+                &format!(
                     "Response: {}",
                     event
                         .summary
@@ -727,7 +725,7 @@ impl Scheduler {
     /// signing secret and a public base URL configured) and the public
     /// response route is mounted.
     #[must_use]
-    pub fn rsvp_links_enabled(&self) -> bool {
+    pub const fn rsvp_links_enabled(&self) -> bool {
         self.config.rsvp_links_enabled()
     }
 
@@ -958,8 +956,8 @@ impl Scheduler {
                         email,
                         &ics_for_email,
                         method,
-                        body,
-                        subject,
+                        &body,
+                        &subject,
                     );
                 } else {
                     warn!(
@@ -1010,8 +1008,8 @@ impl Scheduler {
                     email,
                     &ics_for_email,
                     method,
-                    body,
-                    subject,
+                    &body,
+                    &subject,
                 );
                 statuses.push(OutboxStatus::success(email.to_owned(), "email queued"));
             }
@@ -1020,6 +1018,10 @@ impl Scheduler {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::unused_self,
+        reason = "called as self.spawn_email at three sites; it reads better than                   Scheduler::spawn_email and the receiver is what will hold the                   SMTP handle once this stops being a free function"
+    )]
     fn spawn_email(
         &self,
         account: SmtpAccount,
@@ -1027,8 +1029,8 @@ impl Scheduler {
         to: &str,
         ics_with_method: &str,
         method: &str,
-        body: String,
-        subject: String,
+        body: &str,
+        subject: &str,
     ) {
         let message = mime::build_imip(&account, to, ics_with_method, method, subject, body);
         let to = to.to_owned();
@@ -1079,13 +1081,12 @@ fn pick_reply_attendee<'a>(
                 .is_some_and(|p| !p.eq_ignore_ascii_case("NEEDS-ACTION") && !p.is_empty())
         })
         .collect();
-    if let Some(from) = from {
-        if let Some(found) = candidates
+    if let Some(from) = from
+        && let Some(found) = candidates
             .iter()
             .find(|a| a.email.eq_ignore_ascii_case(from))
-        {
-            return Some(found);
-        }
+    {
+        return Some(found);
     }
     candidates.first().copied()
 }

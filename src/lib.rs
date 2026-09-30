@@ -40,6 +40,8 @@ use tracing::{info, warn};
 
 pub mod admin;
 pub mod app;
+pub mod appliance;
+pub mod appliance_service;
 pub mod build_provenance;
 pub mod commands;
 mod tasks;
@@ -229,6 +231,10 @@ async fn single_tenant_pool_for_probe(config: &DataStoreConfig) -> Result<sqlx::
     .await?)
 }
 
+/// # Errors
+/// If the store cannot be opened, or — when `migrate` is set — if a pending
+/// migration fails. Both are startup failures: a server that boots with a
+/// half-migrated store serves requests it will corrupt.
 pub async fn get_data_stores(
     migrate: bool,
     config: &DataStoreConfig,
@@ -293,7 +299,10 @@ pub async fn cmd_serve(
         scheduling_store,
         subscription_store,
         invite_store,
-        _calendar_source_store,
+        // Unpacked and passed straight through to `make_app`, so the pool is
+        // created and kept alive even though nothing reads it yet. Named so the
+        // destructure says which field it is.
+        calendar_source_store,
         share_store,
         password_reset_store,
     ) = get_data_stores(!args.no_migrations, &config.data_store).await?;
@@ -327,7 +336,10 @@ pub async fn cmd_serve(
     // Inbound iMIP ingestion: poll the configured IMAP mailboxes for
     // attendee REPLY emails. No-op unless [scheduling.imap] is configured.
     if let Some(scheduler) = scheduler.clone() {
-        rustical_scheduling::ingest::spawn_ingestion(scheduler, shutdown_signal);
+        // The spawned task is detached on purpose: it runs for the life of the
+        // process and there is nothing to do with a handle to it. `spawn_ingestion`
+        // returns `()`, so there is no handle to hold on to.
+        rustical_scheduling::ingest::spawn_ingestion(&scheduler, &shutdown_signal);
     }
 
     // The base URL the portal Share page prints — computed with the same
@@ -342,7 +354,10 @@ pub async fn cmd_serve(
             .as_ref()
             .and_then(|c| match c {
                 config::HttpBindConfig::Tcp(addr) => Some(addr.as_str()),
-                _ => None,
+                // A unix socket has no address to advertise. Named rather than
+                // `_` so that adding a `HttpBindConfig` variant makes this a
+                // compile error instead of a silently-absent public URL.
+                config::HttpBindConfig::Unix(_) => None,
             }),
     );
 
@@ -384,7 +399,10 @@ pub async fn cmd_serve(
         config.dav_push.enabled,
         config.http.session_cookie_samesite_strict,
         config.http.payload_limit_mb,
-        _calendar_source_store,
+        // A positional argument, so the name is fixed by the callee. The store
+        // is unpacked above so its pool exists; the router decides what to do
+        // with it.
+        calendar_source_store,
         subscriptions_public_url,
         invite_store.clone(),
         share_store,
@@ -392,7 +410,12 @@ pub async fn cmd_serve(
         config.scheduling.smtp.clone(),
     );
     let app = if tenancy_enabled {
-        crate::tenancy::serve_dispatch(&config_for_tenancy)
+        // The config file's path, for the appliance panel's redaction pass — see
+        // `tenancy::serve_dispatch_with_config_file`. Taken from `args` rather
+        // than threaded in as a new parameter because every existing caller
+        // already passes `Args` and none of them has the path in scope.
+        let config_file = std::path::PathBuf::from(&args.config_file);
+        crate::tenancy::serve_dispatch_with_config_file(&config_for_tenancy, Some(&config_file))
             .await
             .map_err(anyhow::Error::msg)?
     } else {

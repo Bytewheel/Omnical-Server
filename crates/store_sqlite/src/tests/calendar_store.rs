@@ -250,7 +250,7 @@ END:VCALENDAR";
                     password: None,
                     principal_type: PrincipalType::Individual,
                     needs_password_change: false,
-                    privileges: Default::default(),
+                    privileges: std::collections::BTreeMap::default(),
                 },
                 false,
             )

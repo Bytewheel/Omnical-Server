@@ -36,6 +36,15 @@ use oidc_user_store::OidcUserStore;
 pub use routes::admin::{
     ADMIN_SESSION_COOKIE, AdminPanel, AdminRateLimiter, normalise_host as admin_normalise_host,
 };
+// The appliance panel's seam. `routes` is private, so the `rustical` crate —
+// which is the only thing that implements `ApplianceService` — could not name
+// the trait or the view types without these. Re-exported rather than the module
+// made public, so the *contract* is visible from outside the crate and the
+// handlers are not.
+pub use routes::appliance::{
+    AddressView, AppliancePanel, ApplianceService, DataView, FirmwareView, ImageView, NetworkView,
+    PendingView, ReportView, RestorePointView, StagedView,
+};
 
 use crate::routes::{
     addressbook::{route_addressbook, route_addressbook_restore},

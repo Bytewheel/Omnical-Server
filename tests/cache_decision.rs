@@ -126,6 +126,14 @@ async fn seed() -> Env {
 ///
 /// The fix is one line of config. The lesson is that a harness which panics
 /// without showing the log will cost the next person an hour, so it dumps it.
+// The child is returned to the caller, which kills and `wait()`s it (see
+// `measure`). The lint cannot see across the function boundary, so it reads the
+// `spawn` as un-waited; allowing it here is narrower than restructuring the
+// harness to hand back a `Child` it never needed to.
+#[allow(
+    clippy::zombie_processes,
+    reason = "the Child is returned and reaped by the caller"
+)]
 async fn boot(
     env: &Env,
     max_cached: usize,

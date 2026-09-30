@@ -341,7 +341,7 @@ END:VCALENDAR"
                 password: None,
                 memberships: vec![],
                 needs_password_change: false,
-                privileges: Default::default(),
+                privileges: std::collections::BTreeMap::default(),
             },
             &PropfindType::Propname,
         )

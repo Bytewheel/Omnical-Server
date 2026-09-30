@@ -5,8 +5,8 @@
     clippy::module_name_repetitions,
     clippy::too_many_lines
 )]
-//! Omnical scheduling extension for RustiCal: a pragmatic subset of RFC 6638
-//! (CalDAV scheduling) that enables Apple Calendar (iOS/macOS) to show its
+//! Omnical scheduling extension for `RustiCal`: a pragmatic subset of `RFC 6638`
+//! (`CalDAV` scheduling) that enables Apple Calendar (iOS/macOS) to show its
 //! invitees UI and delivers invitations either server-side (internal
 //! attendees, via the schedule-inbox) or via iMIP email (external attendees,
 //! through the organizer's SMTP account). Inbound replies from external
@@ -23,7 +23,9 @@ pub mod mime_parse;
 pub mod rsvp;
 pub mod scheduler;
 pub mod smtp;
-mod tls;
+// Private to the crate but reachable from `imap` and `smtp`, so its two
+// connector constructors are `pub(crate)` rather than private.
+pub(crate) mod tls;
 
 pub use config::{ImapAccount, SchedulingConfig, SmtpAccount};
 pub use error::SchedulingError;

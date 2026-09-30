@@ -17,8 +17,8 @@ pub fn build_imip(
     to: &str,
     ics_with_method: &str,
     method: &str,
-    subject: String,
-    body: String,
+    subject: &str,
+    body: &str,
 ) -> String {
     let from_domain = account
         .identity
@@ -28,7 +28,7 @@ pub fn build_imip(
     let message_id = uuid::Uuid::new_v4();
     let date = chrono::Utc::now().to_rfc2822();
     let boundary = format!("=_omnical_{}", uuid::Uuid::new_v4().simple());
-    let subject_encoded = rfc2047_encode(&subject);
+    let subject_encoded = rfc2047_encode(subject);
 
     let ics_b64 = {
         let engine = base64::engine::general_purpose::STANDARD;
@@ -44,43 +44,45 @@ pub fn build_imip(
         folded
     };
 
-    let from_header = match &account.displayname {
-        Some(name) => format!("{} <{}>", rfc2047_encode(name), account.identity),
-        None => account.identity.clone(),
-    };
+    let from_header = account.displayname.as_ref().map_or_else(
+        || account.identity.clone(),
+        |name| format!("{} <{}>", rfc2047_encode(name), account.identity),
+    );
 
     let mut out = String::new();
-    out.push_str(&format!("From: {from_header}\r\n"));
-    out.push_str(&format!("To: <{to}>\r\n"));
-    out.push_str(&format!("Subject: {subject_encoded}\r\n"));
-    out.push_str(&format!("Date: {date}\r\n"));
-    out.push_str(&format!("Message-ID: <{message_id}@{from_domain}>\r\n"));
+    let _ = write!(out, "From: {from_header}\r\n");
+    let _ = write!(out, "To: <{to}>\r\n");
+    let _ = write!(out, "Subject: {subject_encoded}\r\n");
+    let _ = write!(out, "Date: {date}\r\n");
+    let _ = write!(out, "Message-ID: <{message_id}@{from_domain}>\r\n");
     out.push_str("X-Mailer: Omnical (RustiCal scheduling extension)\r\n");
     out.push_str("Auto-Submitted: auto-generated\r\n");
     out.push_str("MIME-Version: 1.0\r\n");
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n"
-    ));
+    );
     out.push_str("\r\n");
     out.push_str("This is a multipart message in MIME format.\r\n");
-    out.push_str(&format!("--{boundary}\r\n"));
+    let _ = write!(out, "--{boundary}\r\n");
     out.push_str("Content-Type: text/plain; charset=utf-8\r\n");
     out.push_str("Content-Transfer-Encoding: 8bit\r\n");
     out.push_str("\r\n");
-    out.push_str(&body);
+    out.push_str(body);
     if !body.ends_with("\r\n") {
         out.push_str("\r\n");
     }
-    out.push_str(&format!("--{boundary}\r\n"));
-    out.push_str(&format!(
+    let _ = write!(out, "--{boundary}\r\n");
+    let _ = write!(
+        out,
         "Content-Type: text/calendar; method={method}; charset=utf-8\r\n"
-    ));
+    );
     out.push_str("Content-Transfer-Encoding: base64\r\n");
     out.push_str("Content-Disposition: attachment; filename=\"invite.ics\"\r\n");
     out.push_str("\r\n");
     out.push_str(&ics_b64);
     out.push_str("\r\n");
-    out.push_str(&format!("--{boundary}--\r\n"));
+    let _ = write!(out, "--{boundary}--\r\n");
     out
 }
 
@@ -115,13 +117,14 @@ pub fn invite_body(
     let when = ics::humanize_dtstart(event.dtstart.as_ref());
     let recurring = if event.rrule { " (repeats)" } else { "" };
     let mut body = String::new();
-    body.push_str(&format!(
+    let _ = write!(
+        body,
         "You have been invited to an event by {organizer}.\r\n\r\n"
-    ));
-    body.push_str(&format!("  Event: {summary}\r\n"));
-    body.push_str(&format!("  When:  {when}{recurring}\r\n"));
+    );
+    let _ = write!(body, "  Event: {summary}\r\n");
+    let _ = write!(body, "  When:  {when}{recurring}\r\n");
     if let Some(url) = &event.url {
-        body.push_str(&format!("  URL:   {url}\r\n"));
+        let _ = write!(body, "  URL:   {url}\r\n");
     }
     body.push_str("\r\n");
     if let Some(url) = rsvp_url {
@@ -143,10 +146,11 @@ pub fn invite_body(
         );
     }
     body.push_str("\r\n");
-    body.push_str(&format!(
+    let _ = write!(
+        body,
         "This message was generated automatically by the Omnical calendar server on \r\n\
          behalf of {organizer}. Replies to this email go to the organizer.\r\n"
-    ));
+    );
     let _ = account; // reserved for footer/config-driven text
     body
 }
@@ -160,13 +164,14 @@ pub fn cancel_body(event: &ics::EventInfo, organizer: &str) -> String {
         .unwrap_or_else(|| "(no title)".to_owned());
     let when = ics::humanize_dtstart(event.dtstart.as_ref());
     let mut body = String::new();
-    body.push_str(&format!(
+    let _ = write!(
+        body,
         "An event you were invited to has been cancelled by {organizer}.\r\n\r\n"
-    ));
-    body.push_str(&format!("  Event: {summary}\r\n"));
-    body.push_str(&format!("  When:  {when}\r\n"));
+    );
+    let _ = write!(body, "  Event: {summary}\r\n");
+    let _ = write!(body, "  When:  {when}\r\n");
     if let Some(url) = &event.url {
-        body.push_str(&format!("  URL:   {url}\r\n"));
+        let _ = write!(body, "  URL:   {url}\r\n");
     }
     body.push_str("\r\n");
     body.push_str(
@@ -191,14 +196,16 @@ pub fn reply_body(attendee: &str, partstat: &str, event: &ics::EventInfo) -> Str
         _ => "updated their response to",
     };
     let mut body = String::new();
-    body.push_str(&format!(
+    let _ = write!(
+        body,
         "{attendee} has {partstat_human} an invitation.\r\n\r\n"
-    ));
-    body.push_str(&format!("  Event: {summary}\r\n"));
-    body.push_str(&format!(
+    );
+    let _ = write!(body, "  Event: {summary}\r\n");
+    let _ = write!(
+        body,
         "  UID:   {}\r\n",
         event.uid.split('#').next().unwrap_or(&event.uid)
-    ));
+    );
     body.push_str("\r\n");
     body.push_str(
         "The iTIP reply is attached (invite.ics); opening it updates the attendee's \r\n\
@@ -223,15 +230,19 @@ pub fn itip_subject(method: &str, event: &ics::EventInfo) -> String {
 
 /// Build a plaintext guest-calendar-share email (Omnical §17.10.7): the
 /// one-time credential the owner has just minted, with the server URL, the
-/// guest username and the app token a CalDAV client needs.
+/// guest username and the app token a `CalDAV` client needs.
 ///
 /// The credential is shown once in the portal banner and mailed here so the
 /// owner does not have to copy it manually. `subscribe_url`, when present, is
 /// the credential-less `/export/{token}.ics` share link of the same calendar —
 /// for clients that take a URL only (Google Calendar "From URL", webcal),
-/// where CalDAV credentials cannot be entered. CRLF line endings, single
+/// where `CalDAV` credentials cannot be entered. CRLF line endings, single
 /// `-`-free body so `send_mail` dot-stuffing never kicks in.
 #[must_use]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "an email template's parts; grouping them would only move the list"
+)]
 pub fn build_guest_invite(
     account: &SmtpAccount,
     to: &str,
@@ -249,10 +260,10 @@ pub fn build_guest_invite(
         .unwrap_or("omnical.local");
     let message_id = uuid::Uuid::new_v4();
     let date = chrono::Utc::now().to_rfc2822();
-    let from_header = match &account.displayname {
-        Some(name) => format!("{} <{}>", rfc2047_encode(name), account.identity),
-        None => account.identity.clone(),
-    };
+    let from_header = account.displayname.as_ref().map_or_else(
+        || account.identity.clone(),
+        |name| format!("{} <{}>", rfc2047_encode(name), account.identity),
+    );
 
     let subscribe = match subscribe_url {
         Some(url) if !url.is_empty() => format!(
@@ -267,21 +278,23 @@ pub fn build_guest_invite(
     };
 
     let mut out = String::new();
-    out.push_str(&format!("From: {from_header}\r\n"));
-    out.push_str(&format!("To: <{to}>\r\n"));
-    out.push_str(&format!(
+    let _ = write!(out, "From: {from_header}\r\n");
+    let _ = write!(out, "To: <{to}>\r\n");
+    let _ = write!(
+        out,
         "Subject: =?utf-8?B?{}?=\r\n",
         base64::engine::general_purpose::STANDARD
             .encode(format!("Calendar access for you: {calendar_id}").as_bytes(),)
-    ));
-    out.push_str(&format!("Date: {date}\r\n"));
-    out.push_str(&format!("Message-ID: <{message_id}@{from_domain}>\r\n"));
+    );
+    let _ = write!(out, "Date: {date}\r\n");
+    let _ = write!(out, "Message-ID: <{message_id}@{from_domain}>\r\n");
     out.push_str("X-Mailer: Omnical (RustiCal guest share)\r\n");
     out.push_str("MIME-Version: 1.0\r\n");
     out.push_str("Content-Type: text/plain; charset=utf-8\r\n");
     out.push_str("Content-Transfer-Encoding: 8bit\r\n");
     out.push_str("\r\n");
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "You have been given access to the calendar \"{calendar_id}\" by {owner}.\r\n\
          \r\n\
          Add it to your CalDAV calendar app (Apple Calendar, DAVx5, ...) with:\r\n\
@@ -292,12 +305,13 @@ pub fn build_guest_invite(
          \r\n\
          The app token is only shown here and in the Share page right after \
          creating it. Keep it secret.{subscribe}\r\n"
-    ));
+    );
     out
 }
 
-/// Build a plaintext one-time registration-link email (Omnical §17.8). The
-/// single-use invite code is embedded in the `{base}/register?code=…` link,
+/// Build a plaintext one-time registration-link email (Omnical §17.8).
+///
+/// The single-use invite code is embedded in the `{base}/register?code=…` link,
 /// matching what the portal Share section mints. `register_url` is the full
 /// clickable link; `expires_at` (optional, ISO 8601 UTC) becomes a plain-line
 /// footnote. CRLF line endings; no body line starts with a dot so `send_mail`
@@ -317,10 +331,10 @@ pub fn build_registration_invite(
         .unwrap_or("omnical.local");
     let message_id = uuid::Uuid::new_v4();
     let date = chrono::Utc::now().to_rfc2822();
-    let from_header = match &account.displayname {
-        Some(name) => format!("{} <{}>", rfc2047_encode(name), account.identity),
-        None => account.identity.clone(),
-    };
+    let from_header = account.displayname.as_ref().map_or_else(
+        || account.identity.clone(),
+        |name| format!("{} <{}>", rfc2047_encode(name), account.identity),
+    );
 
     let expiry = match expires_at {
         Some(date) if !date.is_empty() => format!("\r\nThis invite expires on {date}."),
@@ -328,20 +342,22 @@ pub fn build_registration_invite(
     };
 
     let mut out = String::new();
-    out.push_str(&format!("From: {from_header}\r\n"));
-    out.push_str(&format!("To: <{to}>\r\n"));
-    out.push_str(&format!(
+    let _ = write!(out, "From: {from_header}\r\n");
+    let _ = write!(out, "To: <{to}>\r\n");
+    let _ = write!(
+        out,
         "Subject: {}\r\n",
         rfc2047_encode("Invitation to Omnical calendar server")
-    ));
-    out.push_str(&format!("Date: {date}\r\n"));
-    out.push_str(&format!("Message-ID: <{message_id}@{from_domain}>\r\n"));
+    );
+    let _ = write!(out, "Date: {date}\r\n");
+    let _ = write!(out, "Message-ID: <{message_id}@{from_domain}>\r\n");
     out.push_str("X-Mailer: Omnical (RustiCal registration invite)\r\n");
     out.push_str("MIME-Version: 1.0\r\n");
     out.push_str("Content-Type: text/plain; charset=utf-8\r\n");
     out.push_str("Content-Transfer-Encoding: 8bit\r\n");
     out.push_str("\r\n");
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "You have been invited to create an account on Omnical by {created_by}.\r\n\
          \r\n\
          Open this one-time link to set a password and finish signing up:\r\n\
@@ -354,15 +370,16 @@ pub fn build_registration_invite(
          If you did not expect this email, you can ignore it.\r\n\
          \r\n\
          This message was generated automatically by the Omnical calendar server.\r\n"
-    ));
+    );
     out
 }
 
-/// Build a plaintext one-time password-reset email (Omnical). The
-/// single-use 64-char token is embedded in the
-/// `{base}/frontend/reset-password/{token}` link; `expires_at` (ISO 8601
-/// UTC) becomes a plain-line footnote. CRLF line endings; no body line
-/// starts with a dot so `send_mail` dot-stuffing never kicks in.
+/// Build a plaintext one-time password-reset email (Omnical).
+///
+/// The single-use 64-char token is embedded in the
+/// `{base}/frontend/reset-password/{token}` link; `expires_at` (ISO 8601 UTC)
+/// becomes a plain-line footnote. CRLF line endings; no body line starts with a
+/// dot so `send_mail` dot-stuffing never kicks in.
 #[must_use]
 pub fn build_password_reset(
     account: &SmtpAccount,
@@ -377,26 +394,28 @@ pub fn build_password_reset(
         .unwrap_or("omnical.local");
     let message_id = uuid::Uuid::new_v4();
     let date = chrono::Utc::now().to_rfc2822();
-    let from_header = match &account.displayname {
-        Some(name) => format!("{} <{}>", rfc2047_encode(name), account.identity),
-        None => account.identity.clone(),
-    };
+    let from_header = account.displayname.as_ref().map_or_else(
+        || account.identity.clone(),
+        |name| format!("{} <{}>", rfc2047_encode(name), account.identity),
+    );
 
     let mut out = String::new();
-    out.push_str(&format!("From: {from_header}\r\n"));
-    out.push_str(&format!("To: <{to}>\r\n"));
-    out.push_str(&format!(
+    let _ = write!(out, "From: {from_header}\r\n");
+    let _ = write!(out, "To: <{to}>\r\n");
+    let _ = write!(
+        out,
         "Subject: {}\r\n",
         rfc2047_encode("Reset your Omnical password")
-    ));
-    out.push_str(&format!("Date: {date}\r\n"));
-    out.push_str(&format!("Message-ID: <{message_id}@{from_domain}>\r\n"));
+    );
+    let _ = write!(out, "Date: {date}\r\n");
+    let _ = write!(out, "Message-ID: <{message_id}@{from_domain}>\r\n");
     out.push_str("X-Mailer: Omnical (RustiCal password reset)\r\n");
     out.push_str("MIME-Version: 1.0\r\n");
     out.push_str("Content-Type: text/plain; charset=utf-8\r\n");
     out.push_str("Content-Transfer-Encoding: 8bit\r\n");
     out.push_str("\r\n");
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "A password reset was requested for the account {to} on the Omnical \r\n\
          calendar server.\r\n\
          \r\n\
@@ -410,7 +429,7 @@ pub fn build_password_reset(
          stays unchanged.\r\n\
          \r\n\
          This message was generated automatically by the Omnical calendar server.\r\n"
-    ));
+    );
     out
 }
 
@@ -562,8 +581,8 @@ mod tests {
             "bob@example.org",
             &ics_body,
             "REQUEST",
-            itip_subject("REQUEST", &event),
-            invite_body(&account, &event, "nick@example.com", None),
+            &itip_subject("REQUEST", &event),
+            &invite_body(&account, &event, "nick@example.com", None),
         );
         assert!(mail.starts_with("From: Nick Example <nick@example.com>\r\n"));
         assert!(mail.contains("To: <bob@example.org>\r\n"));

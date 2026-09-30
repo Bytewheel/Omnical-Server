@@ -316,6 +316,33 @@ pub trait TenantStore: Send + Sync + 'static {
         Err(Error::ReadOnly)
     }
 
+    /// Record an action that is **not** scoped to a tenant.
+    ///
+    /// Every other writer on this trait is a tenant mutation, and §6.6.7's rule
+    /// is that the mutation and its record are one transaction. That rule does
+    /// not apply here, because there is no mutation: the appliance panel's
+    /// actions — staging a restore, flashing firmware — touch the filesystem and
+    /// a flash, not the control plane. Refusing to record them would leave the
+    /// two most destructive things an operator can do entirely absent from the
+    /// trail, and a trail that silently omits the worst actions is worse than no
+    /// trail.
+    ///
+    /// So this is an **honest second door**, and the doc comment says so rather
+    /// than pretending it is the same one. The `tenant` column is `None`, the
+    /// same shape a tenant creation writes.
+    ///
+    /// # Errors
+    /// - [`Error::ReadOnly`] if the store does not implement tenancy.
+    /// - [`Error::Other`] on a store failure.
+    async fn record_appliance_action(
+        &self,
+        _actor: &Actor,
+        _action: &str,
+        _detail: &str,
+    ) -> Result<(), Error> {
+        Err(Error::ReadOnly)
+    }
+
     /// Read the audit trail, newest first, optionally for one tenant.
     ///
     /// Read-only by design: there is no `ON DELETE CASCADE` from `tenants` and no

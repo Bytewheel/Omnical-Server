@@ -33,7 +33,7 @@ pub trait ResourceService: Clone + Sized + Send + Sync + AxumMethods + 'static {
     const DAV_HEADER: &'static str;
 
     /// Instance-level `DAV` header advertised by `OPTIONS`.
-    /// Services whose feature set depends on runtime state (e.g. the CalDAV
+    /// Services whose feature set depends on runtime state (e.g. the `CalDAV`
     /// scheduling extension) override this; the default is [`Self::DAV_HEADER`].
     fn dav_header(&self) -> Cow<'static, str> {
         Cow::Borrowed(Self::DAV_HEADER)

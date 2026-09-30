@@ -109,7 +109,7 @@ where
                             // the impersonated principal so write checks see
                             // the real privilege instead of "self = admin".
                             impersonating.privileges.insert(
-                                impersonating.id.to_owned(),
+                                impersonating.id.clone(),
                                 user.privilege_for(&impersonating.id),
                             );
                             request.extensions_mut().insert(impersonating);

@@ -50,6 +50,7 @@ use rustical_store::{
     InviteStore, Secret, SubscriptionKind, SubscriptionStore,
     auth::{AuthenticationProvider, Principal, PrincipalType},
 };
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
@@ -391,22 +392,20 @@ async fn validate<AS: AddressbookStore, CS: CalendarStore>(
             .invite_store
             .get_invite(form.invite.trim())
             .await
+            && invite.used_by.is_none()
+            && invite
+                .expires_at
+                .as_deref()
+                .is_none_or(|at| at > now.as_str())
+            && invite.target_group.is_some()
         {
-            if invite.used_by.is_none()
-                && invite
-                    .expires_at
-                    .as_deref()
-                    .is_none_or(|at| at > now.as_str())
-                && invite.target_group.is_some()
+            // Email binding check
+            if let Some(target) = invite.target_email.as_deref()
+                && target != email
             {
-                // Email binding check
-                if let Some(target) = invite.target_email.as_deref() {
-                    if target != email {
-                        return Err(FormError::render(INVALID_INVITE_EMAIL_MSG));
-                    }
-                }
-                return Ok(());
+                return Err(FormError::render(INVALID_INVITE_EMAIL_MSG));
             }
+            return Ok(());
         }
     }
 
@@ -535,16 +534,16 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
 
     if let Some(_existing) = existing_user {
         // User already exists — just join the target group if set.
-        if let Some(group) = &target_group {
-            if let Err(err) = state.auth_provider.add_membership(email, group).await {
-                error!(%err, "registration: target_group membership failed");
-            }
+        if let Some(group) = &target_group
+            && let Err(err) = state.auth_provider.add_membership(email, group).await
+        {
+            error!(%err, "registration: target_group membership failed");
         }
         // Log them in and show success.
         if session.insert("user", email).await.is_err() {
             warn!("registration: session persist failed for {email}");
         }
-        return render_existing_user_success(email, displayname, host, &target_group)
+        return render_existing_user_success(email, displayname, host, target_group.as_deref())
             .into_response();
     }
 
@@ -564,7 +563,7 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
         password: Some(Secret::from(password_hash)),
         memberships: vec![],
         needs_password_change: false,
-        privileges: Default::default(),
+        privileges: BTreeMap::default(),
     };
     if let Err(err) = state.auth_provider.insert_principal(principal, false).await {
         // A concurrent registration won the race for the same email.
@@ -598,10 +597,10 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
     }
 
     // Auto-join the invite's target group (grants shared calendar access).
-    if let Some(group) = &target_group {
-        if let Err(err) = state.auth_provider.add_membership(email, group).await {
-            error!(%err, "registration: invite target_group membership failed");
-        }
+    if let Some(group) = &target_group
+        && let Err(err) = state.auth_provider.add_membership(email, group).await
+    {
+        error!(%err, "registration: invite target_group membership failed");
     }
 
     // The registrant chose their password in this very request, so the
@@ -978,7 +977,7 @@ fn render_existing_user_success(
     email: &str,
     displayname: &str,
     host: &str,
-    target_group: &Option<String>,
+    target_group: Option<&str>,
 ) -> Html<String> {
     let host_html = if host.is_empty() {
         String::new()
@@ -993,13 +992,12 @@ fn render_existing_user_success(
     } else {
         format!(" <strong>{}</strong>", escape_html(displayname))
     };
-    let group_msg = match target_group {
-        Some(group) => format!(
+    let group_msg = target_group.map_or_else(String::new, |group| {
+        format!(
             "<p>You have been added to the <code>{}</code> group.</p>",
             escape_html(group)
-        ),
-        None => String::new(),
-    };
+        )
+    });
 
     render_page(&format!(
         r#"<h1>Welcome back{greeting}</h1>
@@ -1472,7 +1470,7 @@ mod tests {
                     password: None,
                     memberships: vec![],
                     needs_password_change: false,
-                    privileges: Default::default(),
+                    privileges: BTreeMap::default(),
                 },
                 false,
             )

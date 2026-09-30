@@ -7,6 +7,7 @@ use rustical_dav::resource::{Resource, ResourceService};
 use rustical_store::auth::{Principal, PrincipalType::Individual};
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
 use rustical_xml::XmlSerializeRoot;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[rstest]
@@ -69,7 +70,7 @@ async fn test_propfind() {
         password: None,
         memberships: vec!["group".to_string()],
         needs_password_change: false,
-        privileges: Default::default(),
+        privileges: BTreeMap::default(),
     };
 
     let resource = PrincipalResource {

@@ -53,7 +53,7 @@ pub trait SchedulingStore: Send + Sync + 'static {
     }
 
     /// Find all calendar objects with the given UID owned by `principal`.
-    /// Returns (calendar_id, object_id, ics) triples.
+    /// Returns (`calendar_id`, `object_id`, `ics`) triples.
     async fn find_calendar_objects_by_uid(
         &self,
         _principal: &str,

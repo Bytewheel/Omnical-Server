@@ -22,7 +22,7 @@ pub struct SqliteSchedulingStore {
 
 impl SqliteSchedulingStore {
     #[must_use]
-    pub fn new(cal_store: SqliteCalendarStore) -> Self {
+    pub const fn new(cal_store: SqliteCalendarStore) -> Self {
         Self { cal_store }
     }
 }

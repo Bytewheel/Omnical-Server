@@ -62,7 +62,7 @@ pub struct CreateArgs {
     #[arg(long, default_value = "admin")]
     pub created_by: String,
     /// Email the one-time registration link to --email (requires SMTP in
-    /// [scheduling] and [subscriptions] public_url). The invite itself is
+    /// [scheduling] and [subscriptions] `public_url`). The invite itself is
     /// still a platform invite: no group, no shared calendar.
     #[arg(long)]
     pub send: bool,
@@ -111,24 +111,19 @@ pub async fn cmd_invites(args: InvitesArgs, config: Config) -> anyhow::Result<()
         }) => {
             // Validate --send prerequisites up front so nothing is minted
             // that cannot be mailed (the code would then need revoking).
-            let (send_to, send_account, send_base) = match send {
-                true => {
-                    let to = email.as_ref().ok_or_else(|| {
-                        anyhow!("--send requires --email: the invite is mailed to that address")
-                    })?;
-                    let account = config.scheduling.smtp.first().ok_or_else(|| {
-                        anyhow!(
-                            "--send needs a configured [[scheduling.smtp]] account in [scheduling]"
-                        )
-                    })?;
-                    let base = config.subscriptions.public_url.as_deref().ok_or_else(|| {
-                        anyhow!(
-                            "--send needs [subscriptions] public_url to build the register link"
-                        )
-                    })?;
-                    (Some(to.as_str()), Some(account), Some(base))
-                }
-                false => (None, None, None),
+            let (send_to, send_account, send_base) = if send {
+                let to = email.as_ref().ok_or_else(|| {
+                    anyhow!("--send requires --email: the invite is mailed to that address")
+                })?;
+                let account = config.scheduling.smtp.first().ok_or_else(|| {
+                    anyhow!("--send needs a configured [[scheduling.smtp]] account in [scheduling]")
+                })?;
+                let base = config.subscriptions.public_url.as_deref().ok_or_else(|| {
+                    anyhow!("--send needs [subscriptions] public_url to build the register link")
+                })?;
+                (Some(to.as_str()), Some(account), Some(base))
+            } else {
+                (None, None, None)
             };
             let code = generate_invite_code();
             let expires = expires

@@ -1,6 +1,7 @@
 use rustical_dav::resource::Resource;
 use rustical_store::auth::Principal;
 use rustical_xml::XmlSerializeRoot;
+use std::collections::BTreeMap;
 
 use crate::{CardDavPrincipalUri, principal::PrincipalResource};
 
@@ -20,7 +21,7 @@ fn test_propfind() {
         password: None,
         memberships: vec!["group".to_string()],
         needs_password_change: false,
-        privileges: Default::default(),
+        privileges: BTreeMap::default(),
     };
 
     let resource = PrincipalResource {

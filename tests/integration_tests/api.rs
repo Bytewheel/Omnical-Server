@@ -94,7 +94,7 @@ fn auth_request(
     body: Option<Body>,
 ) -> Request<Body> {
     let mut request_builder = Request::builder().method(method).uri(uri);
-    if let Some(_) = &body {
+    if body.is_some() {
         request_builder = request_builder.header(CONTENT_TYPE, "application/json");
     }
     let mut request = if let Some(body) = body {

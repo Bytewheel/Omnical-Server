@@ -77,6 +77,7 @@ where
                 subscriptions: Default::default(),
                 registration: Default::default(),
                 maintenance: Default::default(),
+                appliance: Default::default(),
             };
             customize(&mut config);
             cmd_serve(

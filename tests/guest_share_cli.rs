@@ -31,6 +31,7 @@ fn test_config(db_url: String) -> Config {
         subscriptions: Default::default(),
         registration: Default::default(),
         maintenance: Default::default(),
+        appliance: Default::default(),
     }
 }
 

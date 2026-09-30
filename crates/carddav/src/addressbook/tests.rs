@@ -3,6 +3,7 @@ use rustical_dav::resource::Resource;
 use rustical_dav_push::VapidPublicKeyB64;
 use rustical_store::{Addressbook, auth::Principal};
 use rustical_xml::XmlSerializeRoot;
+use std::collections::BTreeMap;
 
 #[test]
 fn test_propfind() {
@@ -20,7 +21,7 @@ fn test_propfind() {
         password: None,
         memberships: vec!["group".to_string()],
         needs_password_change: false,
-        privileges: Default::default(),
+        privileges: BTreeMap::default(),
     };
 
     let addressbook = Addressbook {

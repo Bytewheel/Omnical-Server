@@ -1,4 +1,15 @@
-//! Minimal async IMAP4rev1 client (implicit TLS) for polling iMIP replies.
+//! Minimal async `IMAP4rev1` client (implicit TLS) for polling iMIP replies.
+//!
+//! # Why `large_futures` is allowed in this module
+//!
+//! Every `async fn` here inlines the read/write helpers it calls, so the futures
+//! are 60–66 KB each. The alternative — `Box::pin` at nineteen call sites —
+//! would add a heap allocation per call to buy stack headroom on a code path
+//! that runs once per poll interval (30 s by default) and spends essentially
+//! all of its time blocked on a TLS socket.
+//!
+//! Allowed at module scope rather than per function so the reason is read once,
+//! next to the code it applies to, rather than repeated nineteen times.
 //!
 //! Hand-rolled like [`crate::smtp`]: the workspace already vendors tokio,
 //! rustls (aws-lc provider) and webpki-roots, so this adds no new
@@ -14,6 +25,11 @@
 //!   messages are streamed to /dev/null to keep the session in sync,
 //! * `UID STORE … +FLAGS.SILENT (\Seen)`,
 //! * `LOGOUT`.
+#![allow(
+    clippy::large_futures,
+    reason = "see the module docs: these futures are 60-66 KB and this is a 30-second
+              poll, not a hot loop"
+)]
 
 use std::time::Duration;
 
@@ -234,7 +250,10 @@ where
         let oversize = size > MAX_MESSAGE_BYTES;
         let mut data: Vec<u8> = Vec::with_capacity(if oversize { 0 } else { size });
         let mut remaining = size;
-        let mut chunk = [0_u8; DISCARD_CHUNK];
+        // A `Vec`, not a stack array: the chunk is a discard buffer for
+        // oversized messages and `DISCARD_CHUNK` is 32 KiB, which is a lot of
+        // stack for a function that is already inside a 60 KB future.
+        let mut chunk = vec![0_u8; DISCARD_CHUNK];
         while remaining > 0 {
             let want = remaining.min(chunk.len());
             self.reader
@@ -492,6 +511,17 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    /// The twelve RFC 3501 month abbreviations. `chrono`'s `%b` is English and
+    /// always three letters, which is what IMAP `SEARCH SINCE` requires.
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    /// The placeholder a scripted server response uses for its own tag. A plain
+    /// `String::replace`, not a `format!`: it is a literal in the script rather
+    /// than a format placeholder, and naming it keeps it from reading as one.
+    const TAG_PLACEHOLDER: &str = "{tag}";
+
     // ---- pure parsing helpers --------------------------------------------
 
     #[test]
@@ -525,11 +555,6 @@ mod tests {
         assert_eq!(recheck_since_date(date(2027, 1, 2)), "30-Dec-2026");
         // Leap year: 2028-03-01 - 3 = 2028-02-27 (Feb has 29 days).
         assert_eq!(recheck_since_date(date(2028, 3, 1)), "27-Feb-2028");
-        // All twelve RFC 3501 month abbreviations (chrono %b is English,
-        // always 3 letters).
-        const MONTHS: [&str; 12] = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
         for (month_num, month) in (1_u32..=12).zip(MONTHS) {
             // Mid-month day so the window never rolls over.
             assert_eq!(
@@ -609,7 +634,7 @@ mod tests {
                 }
                 let tag = line.split(' ').next().unwrap_or("").to_owned();
                 let reply = lines.next().unwrap_or_else(|| format!("{tag} OK"));
-                let reply = reply.replace("{tag}", &tag);
+                let reply = reply.replace(TAG_PLACEHOLDER, &tag);
                 write.write_all(reply.as_bytes()).await.unwrap();
                 write.write_all(b"\r\n").await.unwrap();
                 if reply.starts_with('+') {
@@ -618,7 +643,7 @@ mod tests {
                     let mut sasl_response = String::new();
                     reader.read_line(&mut sasl_response).await.unwrap();
                     let completion = lines.next().unwrap_or_else(|| format!("{tag} OK"));
-                    let completion = completion.replace("{tag}", &tag);
+                    let completion = completion.replace(TAG_PLACEHOLDER, &tag);
                     write.write_all(completion.as_bytes()).await.unwrap();
                     write.write_all(b"\r\n").await.unwrap();
                 }
@@ -778,10 +803,7 @@ mod tests {
             "{tag} OK Logged in".to_owned(),
             "* 1 EXISTS\r\n* OK [UIDVALIDITY 7]\r\n{tag} OK SELECT".to_owned(),
             "* SEARCH 4\r\n{tag} OK".to_owned(),
-            format!(
-                "* 4 FETCH (UID 4 BODY[] {{{}}}\r\n{payload})\r\n{{tag}} OK",
-                oversize
-            ),
+            format!("* 4 FETCH (UID 4 BODY[] {{{oversize}}}\r\n{payload})\r\n{{tag}} OK"),
             "{tag} OK".to_owned(),
         ])
         .await;

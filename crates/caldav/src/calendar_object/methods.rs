@@ -181,7 +181,9 @@ pub async fn put_event<C: CalendarStore>(
             .handle_put(
                 &user.id,
                 (&principal, &calendar_id, &object_id),
-                existing.as_ref().map(|obj| obj.get_ics()),
+                existing
+                    .as_ref()
+                    .map(rustical_ical::CalendarObject::get_ics),
                 &stored_ics,
                 user_agent,
             )

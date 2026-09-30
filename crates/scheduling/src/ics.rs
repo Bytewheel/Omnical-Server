@@ -6,6 +6,8 @@
 //! property lines of the stored ICS: the same bytes the client sent, without
 //! any normalisation in between.
 
+use std::fmt::Write as _;
+
 /// One unfolded logical content line of an ICS body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
@@ -61,6 +63,7 @@ impl Line {
         }
     }
 
+    #[must_use]
     pub fn param(&self, key: &str) -> Option<&str> {
         self.params
             .iter()
@@ -68,11 +71,12 @@ impl Line {
             .map(|(_, v)| v.as_str())
     }
 
+    #[must_use]
     /// The address of an ORGANIZER/ATTENDEE value, if any. Accepts three
     /// CAL-ADDRESS forms:
     /// * `mailto:user@example.com` — taken verbatim (principal ids are
     ///   arbitrary strings and need not contain `@`);
-    /// * a CalDAV principal URL — RustiCal advertises the principal URL as
+    /// * a `CalDAV` principal URL — `RustiCal` advertises the principal URL as
     ///   the calendar-user-address, so clients such as iOS write the account
     ///   owner's ORGANIZER/self-ATTENDEE in this form
     ///   (`/caldav[-compat]/principal/<percent-encoded id>/`, absolute or
@@ -112,6 +116,12 @@ fn percent_decode(segment: &str) -> String {
             let hi = (bytes[i + 1] as char).to_digit(16);
             let lo = (bytes[i + 2] as char).to_digit(16);
             if let (Some(hi), Some(lo)) = (hi, lo) {
+                // `hi` and `lo` are single hex digits, so the product is at
+                // most 0xFF and the narrowing cannot lose a bit.
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "two hex digits cannot exceed 0xFF"
+                )]
                 out.push((hi * 16 + lo) as u8);
                 i += 3;
                 continue;
@@ -127,20 +137,16 @@ fn percent_decode(segment: &str) -> String {
 /// Handles absolute (`https://host:port/caldav/principal/<id>/…`) and
 /// path-only (`/caldav-compat/principal/<id>/`) forms; the id is the
 /// percent-decoded path segment after `/principal/`. Principal ids cannot
-/// contain `/` in this form (RustiCal percent-encodes them otherwise).
+/// contain `/` in this form (`RustiCal` percent-encodes them otherwise).
+/// The path segment that precedes a principal id in a `CalDAV` principal URL.
+const PRINCIPAL_MARKER: &str = "/principal/";
+
 fn principal_url_id(value: &str) -> Option<String> {
     // Drop an optional scheme://host[:port] prefix to get to the path.
-    let path = match value.find("://") {
-        Some(i) => &value[i + 3..],
-        None => value,
-    };
-    let path = match path.find('/') {
-        Some(i) => &path[i..],
-        None => return None,
-    };
-    const MARKER: &str = "/principal/";
-    let idx = path.find(MARKER)?;
-    let rest = &path[idx + MARKER.len()..];
+    let path = value.find("://").map_or(value, |i| &value[i + 3..]);
+    let path = &path[path.find('/')?..];
+    let idx = path.find(PRINCIPAL_MARKER)?;
+    let rest = &path[idx + PRINCIPAL_MARKER.len()..];
     let id = rest.split('/').next()?;
     if id.is_empty() {
         return None;
@@ -182,6 +188,7 @@ pub(crate) fn unquote(value: &str) -> String {
 
 /// Split an ICS body into unfolded logical lines.
 /// Also normalises lone `\n` line endings (rustical stores CRLF).
+#[must_use]
 pub fn unfold(ics: &str) -> Vec<String> {
     let normalized = ics.replace("\r\n", "\n");
     let mut logical: Vec<String> = vec![];
@@ -192,11 +199,10 @@ pub fn unfold(ics: &str) -> Vec<String> {
         if let Some(stripped) = raw_line
             .strip_prefix(' ')
             .or_else(|| raw_line.strip_prefix('\t'))
+            && let Some(last) = logical.last_mut()
         {
-            if let Some(last) = logical.last_mut() {
-                last.push_str(stripped);
-                continue;
-            }
+            last.push_str(stripped);
+            continue;
         }
         logical.push(raw_line.to_owned());
     }
@@ -204,6 +210,7 @@ pub fn unfold(ics: &str) -> Vec<String> {
 }
 
 /// Parse all lines of an ICS body into [`Line`]s.
+#[must_use]
 pub fn parse_lines(ics: &str) -> Vec<Line> {
     unfold(ics).iter().map(|l| Line::parse(l)).collect()
 }
@@ -283,7 +290,7 @@ pub fn parse_event(ics: &str) -> Option<EventInfo> {
             continue; // property of a nested component (VALARM, …)
         }
         match line.name.as_str() {
-            "UID" => info.uid = line.value.to_owned(),
+            "UID" => line.value.clone_into(&mut info.uid),
             "ORGANIZER" => info.organizer = line.as_email(),
             "ATTENDEE" => {
                 if let Some(email) = line.as_email() {
@@ -300,9 +307,9 @@ pub fn parse_event(ics: &str) -> Option<EventInfo> {
             "SUMMARY" => info.summary = Some(unescape_text(&line.value)),
             "DTSTART" => info.dtstart = Some(line),
             "DTEND" => info.dtend = Some(line),
-            "DURATION" => info.duration = Some(line.value.to_owned()),
+            "DURATION" => info.duration = Some(line.value.clone()),
             "RRULE" => info.rrule = true,
-            "URL" if info.url.is_none() => info.url = Some(line.value.to_owned()),
+            "URL" if info.url.is_none() => info.url = Some(line.value.clone()),
             _ => {}
         }
     }
@@ -325,7 +332,7 @@ fn unescape_text(value: &str) -> String {
     while let Some(ch) = chars.next() {
         if ch == '\\' {
             match chars.next() {
-                Some('n') | Some('N') => out.push('\n'),
+                Some('n' | 'N') => out.push('\n'),
                 Some(escaped @ (',' | ';' | '\\')) => out.push(escaped),
                 Some(other) => {
                     out.push('\\');
@@ -361,6 +368,7 @@ fn is_noise_attendee_param(param: &str) -> bool {
 /// Build a canonical representation of the scheduling-relevant content of an
 /// ICS body. Two objects with the same canonical form must not trigger new
 /// invitations when one replaces the other.
+#[must_use]
 pub fn canonical_scheduling_form(ics: &str) -> Vec<String> {
     let mut out = vec![];
     for line in parse_lines(ics) {
@@ -413,7 +421,10 @@ pub fn add_method(ics: &str, method: &str) -> String {
             break;
         }
     }
-    let mut out = lines.clone();
+    // `lines` is a local `Vec` from `unfold`, not a borrowed one, so it can be
+    // consumed. The clone the first draft had here copied the whole calendar to
+    // insert one line.
+    let mut out = lines;
     match insert_at {
         Some(at) => out.insert(at, format!("METHOD:{method}")),
         None => out.push(format!("METHOD:{method}")),
@@ -421,11 +432,12 @@ pub fn add_method(ics: &str, method: &str) -> String {
     out.join("\r\n")
 }
 
-/// Rewrite principal-URL CAL-ADDRESSes to their `mailto:` form so outgoing
-/// iTIP messages (inbox REQUEST/CANCEL copies, iMIP attachments) carry an
-/// ORGANIZER/ATTENDEE remote systems can address. `mailto:` and bare values
-/// pass through unchanged. Line folding is lost (unfolded lines are
-/// universally parsed; RustiCal re-folds on serialization).
+/// Rewrite principal-URL CAL-ADDRESSes to their `mailto:` form.
+///
+/// So outgoing iTIP messages (inbox REQUEST/CANCEL copies, iMIP attachments)
+/// carry an ORGANIZER/ATTENDEE remote systems can address. `mailto:` and bare
+/// values pass through unchanged. Line folding is lost (unfolded lines are
+/// universally parsed; `RustiCal` re-folds on serialization).
 #[must_use]
 pub fn normalize_caladdresses(ics_body: &str) -> String {
     let mut out: Vec<String> = vec![];
@@ -463,6 +475,7 @@ pub fn normalize_caladdresses(ics_body: &str) -> String {
 /// * `X-APPLE-*` and `X-WR-*` custom properties
 /// * `ACKNOWLEDGED` inside VALARM (not valid per RFC 5545)
 /// * Empty `URL;VALUE=URI:` properties
+#[must_use]
 pub fn strip_apple_properties(ics_body: &str) -> String {
     let mut out = Vec::new();
     let mut in_valarm = false;
@@ -477,11 +490,9 @@ pub fn strip_apple_properties(ics_body: &str) -> String {
                 in_valarm = false;
                 out.push(line);
             }
-            _ if parsed.name.starts_with("X-APPLE-") || parsed.name.starts_with("X-WR-") => {
-                continue;
-            }
-            _ if in_valarm && parsed.name == "ACKNOWLEDGED" => continue,
-            _ if parsed.name == "URL" && parsed.value.trim().is_empty() => continue,
+            _ if parsed.name.starts_with("X-APPLE-") || parsed.name.starts_with("X-WR-") => {}
+            _ if in_valarm && parsed.name == "ACKNOWLEDGED" => {}
+            _ if parsed.name == "URL" && parsed.value.trim().is_empty() => {}
             _ => out.push(line),
         }
     }
@@ -555,9 +566,9 @@ fn rebuild_line(line: &Line, new_value: &str) -> String {
     let mut out = line.name.clone();
     for (k, v) in &line.params {
         if v.contains(',') || v.contains(';') || v.contains('"') || v.contains(' ') {
-            out.push_str(&format!(";{k}=\"{v}\""));
+            let _ = write!(out, ";{k}=\"{v}\"");
         } else {
-            out.push_str(&format!(";{k}={v}"));
+            let _ = write!(out, ";{k}={v}");
         }
     }
     out.push(':');
@@ -612,15 +623,15 @@ fn rewrite_attendee_line(line: &Line, partstat: &str) -> String {
     for (k, v) in &line.params {
         if k == "PARTSTAT" {
             has_partstat = true;
-            out.push_str(&format!(";PARTSTAT={partstat}"));
+            let _ = write!(out, ";PARTSTAT={partstat}");
         } else if v.contains(',') || v.contains(';') || v.contains('"') || v.contains(' ') {
-            out.push_str(&format!(";{k}=\"{v}\""));
+            let _ = write!(out, ";{k}=\"{v}\"");
         } else {
-            out.push_str(&format!(";{k}={v}"));
+            let _ = write!(out, ";{k}={v}");
         }
     }
     if !has_partstat {
-        out.push_str(&format!(";PARTSTAT={partstat}"));
+        let _ = write!(out, ";PARTSTAT={partstat}");
     }
     out.push(':');
     out.push_str(&line.value);
@@ -638,27 +649,27 @@ pub fn build_reply(
     sequence: u32,
 ) -> String {
     let dtstamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-    let attendee = match attendee_cn {
-        Some(cn) => {
+    let attendee = attendee_cn.map_or_else(
+        || format!("ATTENDEE;PARTSTAT={partstat}:mailto:{attendee_email}"),
+        |cn| {
             let quoted = if cn.contains(',') || cn.contains(';') || cn.contains('"') {
                 format!("\"{cn}\"")
             } else {
                 cn.to_owned()
             };
             format!("ATTENDEE;CN={quoted};PARTSTAT={partstat}:mailto:{attendee_email}")
-        }
-        None => format!("ATTENDEE;PARTSTAT={partstat}:mailto:{attendee_email}"),
-    };
+        },
+    );
     let mut out = String::new();
     out.push_str("BEGIN:VCALENDAR\r\n");
     out.push_str("VERSION:2.0\r\n");
     out.push_str("PRODID:-//Omnical//Scheduling//EN\r\n");
     out.push_str("METHOD:REPLY\r\n");
     out.push_str("BEGIN:VEVENT\r\n");
-    out.push_str(&format!("UID:{uid}\r\n"));
-    out.push_str(&format!("SEQUENCE:{sequence}\r\n"));
-    out.push_str(&format!("DTSTAMP:{dtstamp}\r\n"));
-    out.push_str(&format!("ORGANIZER:mailto:{organizer}\r\n"));
+    let _ = write!(out, "UID:{uid}\r\n");
+    let _ = write!(out, "SEQUENCE:{sequence}\r\n");
+    let _ = write!(out, "DTSTAMP:{dtstamp}\r\n");
+    let _ = write!(out, "ORGANIZER:mailto:{organizer}\r\n");
     out.push_str(&attendee);
     out.push_str("\r\n");
     out.push_str("END:VEVENT\r\n");
@@ -705,7 +716,7 @@ pub fn humanize_dtstart(line: Option<&Line>) -> String {
     }
     if let Some(tzid) = line.param("TZID") {
         let Ok(tz) = tzid.parse::<chrono_tz::Tz>() else {
-            return format!("{} ({tzid})", value);
+            return format!("{value} ({tzid})");
         };
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S") {
             let local = naive.and_local_timezone(tz).earliest();
@@ -716,13 +727,13 @@ pub fn humanize_dtstart(line: Option<&Line>) -> String {
                     .replace("  ", " ");
             }
         }
-        return format!("{} ({tzid})", value);
+        return format!("{value} ({tzid})");
     }
-    if let Some(rest) = value.strip_suffix('Z') {
-        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(rest, "%Y%m%dT%H%M%S") {
-            let utc = naive.and_utc();
-            return format!("{} (UTC)", utc.format("%A, %B %e, %Y at %H:%M"));
-        }
+    if let Some(rest) = value.strip_suffix('Z')
+        && let Ok(naive) = chrono::NaiveDateTime::parse_from_str(rest, "%Y%m%dT%H%M%S")
+    {
+        let utc = naive.and_utc();
+        return format!("{} (UTC)", utc.format("%A, %B %e, %Y at %H:%M"));
     }
     value.to_owned()
 }

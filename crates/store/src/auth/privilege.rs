@@ -3,7 +3,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 /// Per-member privilege level inside a shared group (Omnical §17.9.2 /
-/// PLAN_SHARING §10). Grants:
+/// `PLAN_SHARING` §10). Grants:
 /// - [`Privilege::View`] — read-only access to the group's collections
 /// - [`Privilege::Edit`] — full CRUD on the group's collections (the old
 ///   "membership = full r/w" level)

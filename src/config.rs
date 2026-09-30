@@ -243,6 +243,46 @@ impl Default for NextcloudLoginConfig {
     }
 }
 
+/// The appliance panel (item 14, §9.4): Data / Network / Firmware.
+///
+/// **Disabled by default, and the default has to mean absent.** A self-hosted
+/// install that upgrades must not acquire a panel that can replace its database
+/// and flash its firmware because a new config section was added — the same
+/// reasoning §6.6.2 gives for `admin_host` being empty. An operator opts in by
+/// setting `enabled = true` **and** naming a database, because the panel's one
+/// dangerous action needs a target and a panel that guesses its target is worse
+/// than no panel.
+///
+/// The paths are absolute and configured, never derived from a `Host` header or
+/// a tenant id. That is what keeps "the panel touches one database" a property
+/// rather than an intention.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct ApplianceConfig {
+    /// Master switch. `false` — the default — means no appliance panel is
+    /// mounted at all, on any host.
+    pub enabled: bool,
+    /// The database the Data section manages. **Required** when `enabled`.
+    ///
+    /// On a tenancy install this is `<data_root>/tenants/<tenant-id>/db.sqlite3`
+    /// (§3.4) — the *tenant's* store, named explicitly by the operator. The
+    /// panel never derives it from a slug and never enumerates tenants; a
+    /// restore names the file it will replace, and an operator who wants a
+    /// different one edits this line.
+    pub database: String,
+    /// Where restore points are listed from. Defaults to `backups/` beside the
+    /// database, which is where `cmd_backup` and `rustical backup-all` write.
+    pub backup_dir: String,
+    /// Where firmware images are listed from. Defaults to `/tmp` on a
+    /// development host and is normally set to the directory an operator drops
+    /// an image into. There is no default on an appliance: an image directory
+    /// that does not exist lists nothing, which is the correct behaviour.
+    pub firmware_dir: String,
+    /// The filesystem whose free space gates a flash. Defaults to `/`, which is
+    /// the overlay on `OpenWrt`.
+    pub overlay_mount: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct MaintenanceConfig {
@@ -735,8 +775,7 @@ impl TenancyConfig {
                 return Err(format!(
                     "[tenancy] admin_host = {offender:?} is also base_domain. Every tenant \
                      resolves under base_domain, so serving the panel from the apex would put a \
-                     cross-tenant control surface one hostname away from every customer.",
-                    offender = offender
+                     cross-tenant control surface one hostname away from every customer."
                 ));
             }
         }
@@ -837,6 +876,10 @@ pub struct Config {
     pub registration: RegistrationConfig,
     #[serde(default)]
     pub maintenance: MaintenanceConfig,
+    /// The appliance panel. Absent from every existing config, and
+    /// `enabled = false` when present, so a self-hosted install is unchanged.
+    #[serde(default)]
+    pub appliance: ApplianceConfig,
 }
 
 impl Config {
@@ -870,6 +913,7 @@ impl Config {
             subscriptions: SubscriptionsConfig::default(),
             registration: RegistrationConfig::default(),
             maintenance: MaintenanceConfig::default(),
+            appliance: ApplianceConfig::default(),
         }
     }
 
@@ -883,4 +927,92 @@ impl Config {
         let path = options.get_filename().to_path_buf();
         (!path.as_os_str().is_empty()).then_some(path)
     }
+
+    /// The appliance panel's paths, resolved, or a refusal naming what to set.
+    ///
+    /// **A startup refusal, not a warning.** An enabled panel with no database
+    /// would render a Data section with nothing to restore into, and its one
+    /// button would be a restore with no target. Booting into that state and
+    /// discovering it at the moment an operator needs a restore is the worst
+    /// time to find out.
+    ///
+    /// # Errors
+    /// A message naming the missing or nonsensical setting.
+    pub fn appliance_paths(&self) -> Result<AppliancePaths, String> {
+        let appliance = &self.appliance;
+        if !appliance.enabled {
+            return Err("[appliance] enabled = false, so there is no appliance panel".to_owned());
+        }
+        if appliance.database.trim().is_empty() {
+            return Err(
+                "[appliance] enabled = true needs a database — the file the Data section's \
+                 restore will replace. Set [appliance] database to an absolute path."
+                    .to_owned(),
+            );
+        }
+        let database = std::path::PathBuf::from(&appliance.database);
+        if !database.is_absolute() {
+            return Err(format!(
+                "[appliance] database = {:?} is not absolute. The panel must name one specific \
+                 database, and a relative path resolves against whatever directory the service \
+                 happens to be started in",
+                appliance.database
+            ));
+        }
+        // The default is the directory `cmd_backup` writes to, so an operator
+        // who has been backing up by hand sees their archives with no extra
+        // configuration.
+        let backup_dir = if appliance.backup_dir.trim().is_empty() {
+            database
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("/"))
+                .join("backups")
+        } else {
+            std::path::PathBuf::from(&appliance.backup_dir)
+        };
+        if !backup_dir.is_absolute() {
+            return Err(format!(
+                "[appliance] backup_dir = {:?} is not absolute",
+                appliance.backup_dir
+            ));
+        }
+        // The single most important check here. A backup directory that contains
+        // the live database means the restore-point listing would offer the live
+        // database as something to restore *over itself*, and a safety copy
+        // would be written into the directory being listed.
+        if backup_dir
+            == database
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("/"))
+        {
+            return Err(format!(
+                "[appliance] backup_dir ({}) is the directory holding the live database. Restore \
+                 points and the live database must not share a directory",
+                backup_dir.display()
+            ));
+        }
+        Ok(AppliancePaths {
+            database,
+            backup_dir,
+            firmware_dir: std::path::PathBuf::from(if appliance.firmware_dir.trim().is_empty() {
+                "/tmp"
+            } else {
+                appliance.firmware_dir.as_str()
+            }),
+            overlay_mount: std::path::PathBuf::from(if appliance.overlay_mount.trim().is_empty() {
+                "/"
+            } else {
+                appliance.overlay_mount.as_str()
+            }),
+        })
+    }
+}
+
+/// The appliance panel's resolved paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliancePaths {
+    pub database: std::path::PathBuf,
+    pub backup_dir: std::path::PathBuf,
+    pub firmware_dir: std::path::PathBuf,
+    pub overlay_mount: std::path::PathBuf,
 }
