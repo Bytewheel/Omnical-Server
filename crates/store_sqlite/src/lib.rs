@@ -172,7 +172,25 @@ pub async fn create_db_pool(db_url: &str, migrate: bool) -> Result<Pool<Sqlite>,
     let db = SqlitePool::connect_with(
         options
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .create_if_missing(true),
+            .create_if_missing(true)
+            // §18.26: a pool is rebuilt on every cache miss, and the measurement
+            // says the rebuild is **I/O-bound** — ~3.7 ms of CPU warm, ~14 ms with
+            // a cold file, against ~102 ms for a real miss under a loaded page
+            // cache. The gap is re-reading the tenant's file, not constructing
+            // anything.
+            //
+            // `mmap_size` attacks that directly and, crucially, it costs
+            // **address space rather than anonymous RSS**: the mapped pages are
+            // file-backed and the kernel reclaims them under pressure. That is
+            // why this is set and `cache_size` is *not* — SQLite's own page
+            // cache is anonymous memory, and §7.2 established that memory follows
+            // residency, so a larger `cache_size` across 50 resident pools is
+            // real anonymous memory bought for a benchmark.
+            //
+            // 256 MiB of address space per connection. A tenant store is not
+            // going to exceed that, and a mapping is lazy: it costs nothing until
+            // a page is touched.
+            .pragma("mmap_size", "268435456"),
     )
     .await?;
     if migrate {
