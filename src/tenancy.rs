@@ -71,7 +71,7 @@ pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> 
         base_domain = %config.tenancy.base_domain,
         default_tenant = %config.tenancy.default_tenant,
         max_cached_tenants = config.tenancy.max_cached_tenants,
-        admin_host = %config.tenancy.normalised_admin_host(),
+        admin_hosts = ?config.tenancy.normalised_admin_hosts(),
         "tenancy enabled: requests will be dispatched by Host"
     );
 
@@ -92,8 +92,8 @@ pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> 
     // thing in the process that can be handed the panel's stores, which is how
     // "the panel never opens a tenant's database" stays true: `AdminPanel`
     // holds two control-plane trait objects and has no path to a `StoreBundle`.
-    let admin_host = config.tenancy.normalised_admin_host();
-    let panel = if admin_host.is_empty() {
+    let admin_hosts = config.tenancy.normalised_admin_hosts();
+    let panel = if admin_hosts.is_empty() {
         info!("no admin_host configured, so there is no admin panel");
         None
     } else {
@@ -110,7 +110,7 @@ pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> 
                 panel,
                 admins,
                 config.tenancy.platform_admins.clone(),
-                &admin_host,
+                admin_hosts.clone(),
                 // Already validated by `TenancyConfig::validate`, called at the
                 // top of this function, so this cannot fail. Propagated rather
                 // than `expect`ed because a `.expect` here would be a panic on a
@@ -142,7 +142,7 @@ pub async fn serve_dispatch(config: &Config) -> anyhow::Result<TenancyAwareApp> 
     Ok(TenancyAwareApp::Hosted(Arc::new(Tenancy::with_readiness(
         dispatch,
         panel,
-        &admin_host,
+        admin_hosts,
         readiness,
     ))))
 }

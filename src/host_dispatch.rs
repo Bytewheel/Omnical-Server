@@ -519,6 +519,22 @@ pub fn normalise_host(raw: &str) -> String {
     host.trim_end_matches('.').to_ascii_lowercase()
 }
 
+/// Normalise a list of admin hosts the same way [`normalise_host`] normalises
+/// one, dropping entries that reduce to nothing and consecutive duplicates.
+///
+/// Deduplication is `dedup` rather than a `HashSet` so the order an operator
+/// wrote is the order everything downstream reports — including the order a
+/// refusal names them in.
+pub(crate) fn normalise_host_list(raw: &[String]) -> Vec<String> {
+    let mut hosts: Vec<String> = raw
+        .iter()
+        .map(|host| normalise_host(host))
+        .filter(|host| !host.is_empty())
+        .collect();
+    hosts.dedup();
+    hosts
+}
+
 // `HostDispatch` deliberately does **not** implement `tower::Service`, and the
 // reason is the orphan rule: the only way to hand a `'static` future to
 // `Service::call(&mut self, ..)` is to own the dispatcher, and
@@ -568,23 +584,32 @@ pub struct Tenancy {
     /// self-hosted install acquires a cross-tenant control surface by upgrading
     /// and nothing announces it.
     panel: Option<Router>,
-    admin_host: String,
+    /// Every host the panel answers on, already normalised. Empty means no
+    /// panel — see the `panel` field. A `Vec` rather than a `String` because an
+    /// appliance commonly needs two names for the same box (its own hostname
+    /// and one routable), and comparing against only the first would leave the
+    /// second quietly serving tenants instead of the panel.
+    admin_hosts: Vec<String>,
 }
 
 impl Tenancy {
     /// The dispatcher plus an optional panel.
     ///
     /// # Panics
-    /// Never. Takes the admin host already normalised so that this decision and
-    /// the one that selected the panel use the same string; a mismatch would
+    /// Never. Takes the admin hosts already normalised so that this decision and
+    /// the one that selected the panel use the same strings; a mismatch would
     /// mean a panel nothing can reach, which §6.6.2 makes a startup refusal's
     /// job to prevent rather than a panic's.
     #[must_use]
-    pub fn new(dispatch: Arc<HostDispatch>, panel: Option<Router>, admin_host: &str) -> Self {
+    pub fn new(
+        dispatch: Arc<HostDispatch>,
+        panel: Option<Router>,
+        admin_hosts: Vec<String>,
+    ) -> Self {
         Self {
             dispatch,
             panel,
-            admin_host: normalise_host(admin_host),
+            admin_hosts: normalise_host_list(&admin_hosts),
             readiness: None,
         }
     }
@@ -595,12 +620,12 @@ impl Tenancy {
     pub fn with_readiness(
         dispatch: Arc<HostDispatch>,
         panel: Option<Router>,
-        admin_host: &str,
+        admin_hosts: Vec<String>,
         readiness: Arc<crate::readiness::ReadinessProbe>,
     ) -> Self {
         Self {
             readiness: Some(readiness),
-            ..Self::new(dispatch, panel, admin_host)
+            ..Self::new(dispatch, panel, admin_hosts)
         }
     }
 
@@ -712,14 +737,15 @@ impl Service<HttpRequest> for TenancyAwareApp {
                     return Box::pin(async move { Ok(crate::source_offer::source_offer().await) });
                 }
                 if let Some(panel) = &tenancy.panel
-                    && !tenancy.admin_host.is_empty()
+                    && !tenancy.admin_hosts.is_empty()
                 {
                     let host = request
                         .headers()
                         .get(axum::http::header::HOST)
                         .and_then(|h| h.to_str().ok())
                         .unwrap_or_default();
-                    if normalise_host(host) == tenancy.admin_host {
+                    let host = normalise_host(host);
+                    if !host.is_empty() && tenancy.admin_hosts.iter().any(|admin| admin == &host) {
                         let mut panel = panel.clone();
                         return Box::pin(async move { panel.call(request).await });
                     }

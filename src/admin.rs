@@ -69,12 +69,27 @@ pub async fn assert_admin_host_unclaimed(
     store: &SqliteTenantStore,
     tenancy: &TenancyConfig,
 ) -> anyhow::Result<()> {
-    let admin = tenancy.normalised_admin_host();
-    if admin.is_empty() {
-        return Ok(());
+    // Every configured host is reserved, not just `admin_host`. Adding a second
+    // name must not be a way to put the panel on a hostname a tenant already
+    // claims — otherwise the second host is an unreserved control surface that
+    // `validate_admin` never sees, because it only knows about configuration.
+    for admin in tenancy.normalised_admin_hosts() {
+        assert_one_admin_host_unclaimed(store, tenancy, &admin).await?;
     }
 
-    if store.is_host_claimed(&admin).await? {
+    Ok(())
+}
+
+/// One host's reservation check.
+///
+/// Split out so the loop reads as the policy it is, and so a refusal names the
+/// host that actually caused it rather than whichever one happened to be first.
+async fn assert_one_admin_host_unclaimed(
+    store: &SqliteTenantStore,
+    tenancy: &TenancyConfig,
+    admin: &str,
+) -> anyhow::Result<()> {
+    if store.is_host_claimed(admin).await? {
         // `get_any_tenant_by_host`, not `get_tenant_by_host`: the latter filters
         // on `status = 'active'`, and a *suspended* tenant's hostname is still
         // a claim. A refusal that cannot name the tenant is half a refusal.
@@ -156,10 +171,16 @@ pub async fn warn_about_allowlist_gaps(store: &SqliteTenantStore, tenancy: &Tena
 /// # Errors
 /// A refusal naming the reserved host, if `host` is the `admin_host`.
 pub fn refuse_reserved_admin_host(tenancy: &TenancyConfig, host: &str) -> anyhow::Result<()> {
-    if tenancy.is_admin_host(host) {
-        let admin = tenancy.normalised_admin_host();
+    // Name the host that actually matched rather than the first configured one.
+    // With `admin_hosts` holding several entries, reporting `admin_host` here
+    // would name a host that was never the problem — and an operator reading
+    // "that one is reserved" while holding a different name in `--host` has
+    // been told to go and change something that was already fine.
+    let normalised = crate::host_dispatch::normalise_host(host);
+    let matched = tenancy.normalised_admin_hosts();
+    if let Some(admin) = matched.iter().find(|admin| *admin == &normalised) {
         return Err(anyhow::anyhow!(
-            "[tenancy] {host:?} is admin_host ({admin:?}) and is reserved. The admin panel is \
+            "[tenancy] {host:?} is an admin_host ({admin:?}) and is reserved. The admin panel is \
              selected before tenant dispatch, so a tenant claiming it would be silently \
              unreachable. Pick a different --host."
         ));

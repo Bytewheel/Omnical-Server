@@ -4,7 +4,8 @@
 //!
 //! A **control-plane** router, mounted ahead of `HostDispatch` (see
 //! [`TenancyAwareApp`](crate::host_dispatch::TenancyAwareApp)) and reachable on
-//! **exactly one host**, `[tenancy] admin_host`.
+//! **only the configured hosts**, `[tenancy] admin_host` and
+//! `[tenancy] admin_hosts`.
 //!
 //! The ordering is the design rather than a detail. Two properties follow from
 //! it, and both are the point of the item:
@@ -302,10 +303,14 @@ pub struct AdminPanel {
     admins: Arc<dyn AdminCredentialStore>,
     /// `[tenancy] platform_admins` (§6.6.3). Authoritative.
     allowlist: Vec<String>,
-    /// The reserved panel host, normalised. Checked by `tenant create`'s form so
-    /// a collision cannot be *introduced* through the panel either — the CLI's
-    /// refusal and this are the same rule at two doors.
-    admin_host: String,
+    /// The reserved panel hosts, normalised. Checked by `tenant create`'s form
+    /// so a collision cannot be *introduced* through the panel either — the
+    /// CLI's refusal and this are the same rule at two doors.
+    ///
+    /// Every host, not just the first: with `admin_hosts` holding several
+    /// entries, checking only one would leave the panel form as a way to claim
+    /// the hostname the startup reservation is protecting.
+    admin_hosts: Vec<String>,
     /// `[tenancy] trusted_proxies`, parsed (C5, §7.3.4). Empty means no peer's
     /// `X-Forwarded-For` is believed, which is the fail-closed default and the
     /// whole security property of this rate limiter.
@@ -328,14 +333,18 @@ impl AdminPanel {
         store: Arc<dyn TenantStore>,
         admins: Arc<dyn AdminCredentialStore>,
         allowlist: Vec<String>,
-        admin_host: &str,
+        admin_hosts: Vec<String>,
         trusted_proxies: Vec<IpNet>,
     ) -> Self {
         Self {
             store,
             admins,
             allowlist,
-            admin_host: normalise_host(admin_host),
+            admin_hosts: admin_hosts
+                .iter()
+                .map(|host| normalise_host(host))
+                .filter(|host| !host.is_empty())
+                .collect(),
             trusted_proxies,
             limiter: Arc::new(AdminRateLimiter::new()),
         }
@@ -754,8 +763,8 @@ async fn create_tenant(
     // enforced only for the tool an operator is told to use, and the browser
     // would be the way around it.
     let host = form.host.trim();
-    if !host.is_empty() && !panel.admin_host.is_empty() && panel.admin_host == normalise_host(host)
-    {
+    let host = normalise_host(host);
+    if !host.is_empty() && panel.admin_hosts.iter().any(|admin| admin == &host) {
         return render_create_failure(
             &session,
             &admin,

@@ -386,6 +386,21 @@ pub struct TenancyConfig {
     /// path. Absence has to mean absence, or a self-hosted install acquires a
     /// cross-tenant control surface by upgrading and nothing announces it.
     pub admin_host: String,
+    /// Further hosts the panel also answers on.
+    ///
+    /// Additive rather than a change of type: `admin_host` stays a `String`, so
+    /// every existing config, test and rendered deployment keeps working
+    /// untouched and a single-host install is still the common case. An
+    /// appliance typically needs two — its own hostname and one routable name
+    /// — and making that a config change alone would have meant either widening
+    /// this to a list (breaking every config that sets it) or encoding a second
+    /// host in a string where `normalise_host` cannot see the boundary.
+    ///
+    /// The panel is still reserved: every host here is checked against
+    /// `tenant_hosts` at startup exactly as `admin_host` is, so adding one
+    /// cannot make a tenant unreachable on that hostname.
+    #[serde(default)]
+    pub admin_hosts: Vec<String>,
     /// Platform-admin **names**, and nothing else: no hash, no secret, so this
     /// list is reviewable in version control and a rename is a one-line deploy
     /// (§6.6.3).
@@ -639,7 +654,26 @@ impl TenancyConfig {
         // every other key behaves here: an operator mid-migration may have set
         // `platform_admins` before deciding on a host, and that is a normal
         // order of operations rather than a mistake.
-        if self.admin_host.is_empty() {
+        //
+        // Tested against the *normalised* list, not `admin_host`, because a
+        // config that sets only `admin_hosts` has an empty `admin_host` and
+        // must still be held to every rule below. Checking the raw field is
+        // what would let `admin_hosts = [""]` skip validation entirely.
+        let hosts = self.normalised_admin_hosts();
+        // A host that was configured but reduces to nothing used to be a
+        // startup refusal. `normalised_admin_hosts` drops those entries, so
+        // without this the drop would turn a loud misconfiguration into a
+        // silently absent panel — the exact failure mode the emptiness guard
+        // below exists to prevent, reached by the other road.
+        for raw in std::iter::once(&self.admin_host).chain(self.admin_hosts.iter()) {
+            if !raw.is_empty() && normalise_host(raw).is_empty() {
+                return Err(format!(
+                    "[tenancy] admin_host = {raw:?} normalises to nothing, so it can never match a \
+                     Host header."
+                ));
+            }
+        }
+        if hosts.is_empty() {
             return Ok(());
         }
 
@@ -691,22 +725,20 @@ impl TenancyConfig {
         // (§6.6.1's `ADMIN.EXAMPLE.COM:8443`). Catching the mismatch at boot is
         // the difference between an obvious refusal and an operator staring at
         // a 404 wondering which side of the split is misconfigured.
-        if self.normalised_admin_host().is_empty() {
-            return Err(format!(
-                "[tenancy] admin_host = {:?} normalises to nothing, so it can never match a Host \
-                 header.",
-                self.admin_host
-            ));
-        }
-        if !self.base_domain.is_empty()
-            && self.normalised_admin_host() == normalise_host(&self.base_domain)
-        {
-            return Err(format!(
-                "[tenancy] admin_host = {:?} is also base_domain. Every tenant resolves under \
-                 base_domain, so serving the panel from the apex would put a cross-tenant control \
-                 surface one hostname away from every customer.",
-                self.admin_host
-            ));
+        //
+        // Checked for **every** host, not just `admin_host`: adding a second
+        // name is exactly the change that could put the panel on the apex
+        // while the first host sat safely outside `base_domain`.
+        if !self.base_domain.is_empty() {
+            let apex = normalise_host(&self.base_domain);
+            if let Some(offender) = hosts.iter().find(|host| *host == &apex) {
+                return Err(format!(
+                    "[tenancy] admin_host = {offender:?} is also base_domain. Every tenant \
+                     resolves under base_domain, so serving the panel from the apex would put a \
+                     cross-tenant control surface one hostname away from every customer.",
+                    offender = offender
+                ));
+            }
         }
         Ok(())
     }
@@ -741,13 +773,39 @@ impl TenancyConfig {
         normalise_host(&self.admin_host)
     }
 
-    /// Is `host` the admin host? An empty `admin_host` matches nothing, so
-    /// "unset" and "set to something no request carries" behave identically —
-    /// which is what makes absence mean absence.
+    /// Every host the panel answers on, normalised the same way, in a stable
+    /// order and deduplicated.
+    ///
+    /// `admin_host` comes first so the single-host case is byte-identical to
+    /// what it always was — every error message that interpolates
+    /// `normalised_admin_host()` keeps reading the same for a one-host config,
+    /// which is the overwhelming majority and the one in the existing tests.
+    #[must_use]
+    pub fn normalised_admin_hosts(&self) -> Vec<String> {
+        let mut hosts: Vec<String> = std::iter::once(&self.admin_host)
+            .chain(self.admin_hosts.iter())
+            .map(|host| normalise_host(host))
+            .filter(|host| !host.is_empty())
+            .collect();
+        hosts.dedup();
+        hosts
+    }
+
+    /// Is `host` one of the admin hosts? An empty configuration matches
+    /// nothing, so "unset" and "set to something no request carries" behave
+    /// identically — which is what makes absence mean absence.
     #[must_use]
     pub fn is_admin_host(&self, host: &str) -> bool {
-        let admin = self.normalised_admin_host();
-        !admin.is_empty() && admin == normalise_host(host)
+        let host = normalise_host(host);
+        // An empty `Host` header must never match, even against a configured
+        // host: `normalise_host("")` is `""`, and a config whose host list
+        // contains an entry that also normalises to `""` was already refused by
+        // `validate_admin`.
+        !host.is_empty()
+            && self
+                .normalised_admin_hosts()
+                .iter()
+                .any(|admin| admin == &host)
     }
 }
 

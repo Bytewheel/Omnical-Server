@@ -890,3 +890,159 @@ fn tenancy_from_config(
     let _ = fixture;
     parsed.tenancy
 }
+
+// ---------------------------------------------------------------------------
+// §6.6.2 with more than one host (`[tenancy] admin_hosts`)
+// ---------------------------------------------------------------------------
+
+/// The appliance case: the box answers on its own hostname *and* on a routable
+/// name, and both must reach the panel. A single-host check would leave the
+/// second name serving tenants, which is the opposite of what was configured.
+#[test]
+fn every_configured_host_is_an_admin_host() {
+    let tenancy = rustical::config::TenancyConfig {
+        enabled: true,
+        control_db_url: "sqlite://c".to_owned(),
+        base_domain: "t3.gg".to_owned(),
+        admin_host: "omnical.lan".to_owned(),
+        admin_hosts: vec!["admin.omnical.lan".to_owned()],
+        platform_admins: vec!["ops".to_owned()],
+        admin_single_instance_acknowledged: true,
+        ..Default::default()
+    };
+
+    assert!(tenancy.is_admin_host("omnical.lan"), "the first host");
+    assert!(
+        tenancy.is_admin_host("admin.omnical.lan"),
+        "the second host"
+    );
+
+    // Normalisation is applied to both sides, so a port, a trailing dot or
+    // different case still lands on the panel.
+    assert!(
+        tenancy.is_admin_host("ADMIN.Omnical.LAN:8443"),
+        "case + port"
+    );
+    assert!(tenancy.is_admin_host("omnical.lan."), "trailing dot");
+
+    // And a host that is merely similar is not swept in by the list.
+    assert!(!tenancy.is_admin_host("omnical.lan.evil.example"), "suffix");
+    assert!(!tenancy.is_admin_host("notomnical.lan"), "prefix");
+    assert!(!tenancy.is_admin_host("t3.gg"), "an ordinary tenant host");
+
+    tenancy.validate().expect("both hosts are valid");
+}
+
+/// The `base_domain` collision must be checked against **every** host. Checking
+/// only `admin_host` is the failure this test exists for: the first host sits
+/// safely outside `base_domain` and the second one is the apex, which is the
+/// configuration most likely to be written by hand.
+#[test]
+fn the_second_host_may_not_be_base_domain() {
+    let tenancy = rustical::config::TenancyConfig {
+        enabled: true,
+        control_db_url: "sqlite://c".to_owned(),
+        base_domain: "t3.gg".to_owned(),
+        admin_host: "omnical.lan".to_owned(),
+        admin_hosts: vec!["t3.gg".to_owned()],
+        platform_admins: vec!["ops".to_owned()],
+        admin_single_instance_acknowledged: true,
+        ..Default::default()
+    };
+    let err = tenancy.validate().expect_err("the apex must be refused");
+    assert!(
+        err.contains("t3.gg"),
+        "the refusal must name the offending host: {err}"
+    );
+}
+
+/// `admin_hosts` on its own is a complete configuration. A test that only ever
+/// set both keys would pass while the `admin_hosts`-only path stayed broken.
+#[test]
+fn admin_hosts_alone_configures_a_panel() {
+    let tenancy = rustical::config::TenancyConfig {
+        enabled: true,
+        control_db_url: "sqlite://c".to_owned(),
+        base_domain: "t3.gg".to_owned(),
+        admin_host: String::new(),
+        admin_hosts: vec!["omnical.lan".to_owned()],
+        platform_admins: vec!["ops".to_owned()],
+        admin_single_instance_acknowledged: true,
+        ..Default::default()
+    };
+    tenancy.validate().expect("admin_hosts alone is enough");
+    assert!(tenancy.is_admin_host("omnical.lan"));
+    assert_eq!(
+        tenancy.normalised_admin_hosts(),
+        vec!["omnical.lan".to_owned()],
+        "the list must not carry a phantom empty entry for the unset admin_host"
+    );
+}
+
+/// The `admin_single_instance_acknowledged` and `platform_admins` refusals are
+/// about the panel existing *at all*, so a config that reaches them only
+/// through `admin_hosts` must not slip past on an empty `admin_host`.
+#[test]
+fn a_panel_configured_only_through_admin_hosts_is_still_held_to_the_rules() {
+    let unacknowledged = rustical::config::TenancyConfig {
+        enabled: true,
+        control_db_url: "sqlite://c".to_owned(),
+        base_domain: "t3.gg".to_owned(),
+        admin_host: String::new(),
+        admin_hosts: vec!["omnical.lan".to_owned()],
+        platform_admins: vec!["ops".to_owned()],
+        admin_single_instance_acknowledged: false,
+        ..Default::default()
+    };
+    let err = unacknowledged
+        .validate()
+        .expect_err("the acknowledgement is still required");
+    assert!(err.contains("admin_single_instance_acknowledged"), "{err}");
+
+    let no_admins = rustical::config::TenancyConfig {
+        admin_single_instance_acknowledged: true,
+        platform_admins: Vec::new(),
+        ..unacknowledged
+    };
+    let err = no_admins
+        .validate()
+        .expect_err("platform_admins is required");
+    assert!(err.contains("platform_admins"), "{err}");
+}
+
+/// `normalised_admin_hosts` drops entries that reduce to nothing, so a host
+/// that was configured but cannot match any `Host` header has to be refused
+/// rather than silently dropped — otherwise a typo turns into an absent panel.
+#[test]
+fn a_configured_host_that_normalises_to_nothing_is_refused() {
+    let tenancy = rustical::config::TenancyConfig {
+        enabled: true,
+        control_db_url: "sqlite://c".to_owned(),
+        base_domain: "t3.gg".to_owned(),
+        admin_host: "omnical.lan".to_owned(),
+        admin_hosts: vec!["   ".to_owned()],
+        platform_admins: vec!["ops".to_owned()],
+        admin_single_instance_acknowledged: true,
+        ..Default::default()
+    };
+    let err = tenancy
+        .validate()
+        .expect_err("whitespace is not a hostname");
+    assert!(err.contains("normalises to nothing"), "{err}");
+}
+
+/// Absence has to keep meaning absence: with neither key set, nothing matches
+/// and every other key is inert — including on a request carrying no `Host`.
+#[test]
+fn no_admin_hosts_at_all_is_still_no_panel() {
+    let tenancy = rustical::config::TenancyConfig {
+        enabled: true,
+        control_db_url: "sqlite://c".to_owned(),
+        base_domain: "t3.gg".to_owned(),
+        ..Default::default()
+    };
+    tenancy.validate().expect("no host, no rules");
+    assert!(tenancy.normalised_admin_hosts().is_empty());
+    assert!(!tenancy.is_admin_host("omnical.lan"));
+    assert!(!tenancy.is_admin_host(""), "an empty Host must never match");
+}
