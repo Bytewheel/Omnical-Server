@@ -119,8 +119,15 @@ pub struct SqliteCalendarStore {
 }
 
 impl SqliteCalendarStore {
+    /// The pool this store's queries run on.
+    ///
+    /// Public so a process-level probe can reuse it rather than opening a
+    /// second pool against the same file — which is what `store_sqlite`'s
+    /// module doc argues against, and what would double the connections a
+    /// single-tenant install holds open. Clone the `Pool` (refcounted); this
+    /// borrows.
     #[must_use]
-    pub(crate) fn db_pool(&self) -> &SqlitePool {
+    pub fn db_pool(&self) -> &SqlitePool {
         &self.db
     }
 

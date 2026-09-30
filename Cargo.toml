@@ -24,6 +24,19 @@ publish = true
 [features]
 debug = ["opentelemetry"]
 frontend-dev = ["rustical_frontend/dev"]
+# Serve `/healthz` and `/readyz` on a **single-tenant** install, not just on a
+# tenancy-enabled one.
+#
+# Default **off**, and that is the point rather than an oversight. These paths
+# are served by `TenancyAwareApp::Hosted`, so a single-tenant process has never
+# had them — and an appliance whose watchdog already probes by some other means
+# (the router's uses `rustical health`, i.e. a `/ping` GET and an exit code)
+# must not acquire two new unauthenticated endpoints just because a build flag
+# was flipped somewhere upstream. Absence has to mean absence.
+#
+# Turn it on where a prober wants the paths rather than the CLI. The flag gates
+# the *endpoints*; it never changes what `/readyz` concludes, only who can ask.
+single-tenant-probes = []
 opentelemetry = [
   "dep:opentelemetry",
   "dep:opentelemetry-otlp",

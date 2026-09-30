@@ -197,6 +197,38 @@ pub async fn get_store_bundle(
 /// [`get_store_bundle`]: the tuple's element order is checked by nothing, and
 /// two of its fields are `Arc<dyn …>` over the same pool.
 #[allow(clippy::missing_errors_doc, clippy::type_complexity)]
+/// The pool a single-tenant process's readiness probe runs its one query on.
+///
+/// **This is a second pool against the same file**, which deserves an
+/// explanation rather than a justification. `store_sqlite`'s module doc argues
+/// against that, and it is right about the case it means: tenant stores, where a
+/// pool per cache miss multiplied across 50 residents. Here it is one extra
+/// connection for one probe, on the single install that has no control plane to
+/// borrow one from.
+///
+/// The alternative was to thread the pool out of `get_data_stores`, and that is
+/// worse: it widens a public tuple return and forces four unrelated CLI call
+/// sites to change, for a dependency that only exists under a feature flag. The
+/// concrete `SqliteCalendarStore` is erased to `Arc<impl CalendarStore>` in that
+/// return type, which is *why* the pool cannot simply be handed over.
+///
+/// `create_if_missing` is **not** used, and that is load-bearing: a readiness
+/// probe must never be the thing that creates a database, or a typo'd `db_url`
+/// becomes a fresh empty file that answers "ready" for a server holding nothing.
+#[cfg(feature = "single-tenant-probes")]
+async fn single_tenant_pool_for_probe(config: &DataStoreConfig) -> Result<sqlx::SqlitePool> {
+    let DataStoreConfig::Sqlite(SqliteDataStoreConfig { db_url, .. }) = config;
+    let options: sqlx::sqlite::SqliteConnectOptions = db_url
+        .parse()
+        .map_err(|error| anyhow::anyhow!("data_store.sqlite.db_url is unusable: {error}"))?;
+    Ok(sqlx::SqlitePool::connect_with(
+        options
+            .create_if_missing(false)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal),
+    )
+    .await?)
+}
+
 pub async fn get_data_stores(
     migrate: bool,
     config: &DataStoreConfig,
@@ -366,7 +398,24 @@ pub async fn cmd_serve(
     } else {
         // Byte-for-byte the pre-tenancy path. No `HostDispatch`, no control
         // plane, no cache: this arm does not touch any of them.
-        TenancyAwareApp::Single(app)
+        //
+        // The one exception is opt-in and additive: with
+        // `single-tenant-probes`, `/healthz` and `/readyz` are answered ahead of
+        // the router, reusing the pool `cal_store` already holds rather than
+        // opening a second one against the same file.
+        #[cfg(feature = "single-tenant-probes")]
+        {
+            TenancyAwareApp::SingleProbed {
+                router: app,
+                readiness: std::sync::Arc::new(crate::readiness::SingleTenantReadiness::new(
+                    single_tenant_pool_for_probe(&config.data_store).await?,
+                )),
+            }
+        }
+        #[cfg(not(feature = "single-tenant-probes"))]
+        {
+            TenancyAwareApp::Single(app)
+        }
     };
 
     // C5, §7.3.4: the *router* is built once and the make-service is built per

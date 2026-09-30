@@ -553,6 +553,17 @@ pub(crate) fn normalise_host_list(raw: &[String]) -> Vec<String> {
 /// path with no dispatch layer in front of it.
 pub enum TenancyAwareApp {
     Single(Router),
+    /// A single-tenant install that also serves `/healthz` and `/readyz`.
+    ///
+    /// A separate variant rather than a field on `Single`, so that the default
+    /// build's `Single` arm is byte-for-byte what it always was. The probes are
+    /// behind `single-tenant-probes`, and an install that has not asked for them
+    /// does not get two new unauthenticated endpoints by accident.
+    #[cfg(feature = "single-tenant-probes")]
+    SingleProbed {
+        router: Router,
+        readiness: Arc<crate::readiness::SingleTenantReadiness>,
+    },
     Hosted(Arc<Tenancy>),
 }
 
@@ -656,6 +667,8 @@ impl TenancyAwareApp {
     pub fn has_admin_panel(&self) -> bool {
         match self {
             Self::Single(_) => false,
+            #[cfg(feature = "single-tenant-probes")]
+            Self::SingleProbed { .. } => false,
             Self::Hosted(tenancy) => tenancy.has_panel(),
         }
     }
@@ -665,6 +678,11 @@ impl Clone for TenancyAwareApp {
     fn clone(&self) -> Self {
         match self {
             Self::Single(r) => Self::Single(r.clone()),
+            #[cfg(feature = "single-tenant-probes")]
+            Self::SingleProbed { router, readiness } => Self::SingleProbed {
+                router: router.clone(),
+                readiness: Arc::clone(readiness),
+            },
             Self::Hosted(t) => Self::Hosted(t.clone()),
         }
     }
@@ -682,6 +700,28 @@ impl Service<HttpRequest> for TenancyAwareApp {
     fn call(&mut self, request: HttpRequest) -> Self::Future {
         match self {
             Self::Single(router) => {
+                let mut router = router.clone();
+                Box::pin(async move { router.call(request).await })
+            }
+            // The two probes, for the same structural reason the `Hosted` arm
+            // serves them ahead of dispatch: each is a question about the
+            // *process*, so neither may fall through to the tenant/DAV router
+            // and answer whatever that route happens to say.
+            #[cfg(feature = "single-tenant-probes")]
+            Self::SingleProbed { router, readiness } => {
+                if request.uri().path() == HEALTH_PATH {
+                    let mut health = health_router();
+                    return Box::pin(async move { health.call(request).await });
+                }
+                // With the opposite dependency rule to `/healthz`: readiness is
+                // allowed to be strict, because a false negative sends traffic
+                // to a process that *can* serve it. §7.4.
+                if request.uri().path() == READY_PATH {
+                    let readiness = Arc::clone(readiness);
+                    return Box::pin(async move {
+                        Ok(crate::readiness::readyz_single(axum::extract::State(readiness)).await)
+                    });
+                }
                 let mut router = router.clone();
                 Box::pin(async move { router.call(request).await })
             }

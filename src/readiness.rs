@@ -233,3 +233,82 @@ pub async fn readyz(State(probe): State<Arc<ReadinessProbe>>) -> Response {
     )
         .into_response()
 }
+
+// ---------------------------------------------------------------------------
+// Single-tenant readiness (`single-tenant-probes`)
+// ---------------------------------------------------------------------------
+
+/// Readiness for a **single-tenant** install, which is a different dependency
+/// shape from the tenancy case rather than a smaller version of it.
+///
+/// The tenancy probe checks a control plane and then a set of tenant stores,
+/// because on that install a request needs both. A single-tenant process has no
+/// control plane at all: every request needs exactly one thing, the one SQLite
+/// pool. So this reports that one check and says so, rather than reusing
+/// `Readiness`'s two fields and reporting `control_plane=ok` for a control plane
+/// that does not exist — which would be a green result for a check that never
+/// ran, the exact defect this codebase keeps finding.
+///
+/// The single query is `SELECT 1 FROM principals LIMIT 1`: it proves the pool
+/// is open, the file is readable, and the schema is migrated. A bare
+/// `SELECT 1` would pass on an unmigrated database, which is precisely the
+/// state where the process must not be advertised as ready.
+pub struct SingleTenantReadiness {
+    db: sqlx::SqlitePool,
+}
+
+impl std::fmt::Debug for SingleTenantReadiness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // No pool details: this type reaches a log line.
+        f.debug_struct("SingleTenantReadiness")
+            .finish_non_exhaustive()
+    }
+}
+
+impl SingleTenantReadiness {
+    #[must_use]
+    pub const fn new(db: sqlx::SqlitePool) -> Self {
+        Self { db }
+    }
+
+    /// Never panics and never errors: a probe that cannot answer is not ready.
+    pub async fn check(&self) -> Check {
+        let query = sqlx::query_scalar::<_, i64>("SELECT 1 FROM principals LIMIT 1");
+        match tokio::time::timeout(PROBE_TIMEOUT, query.fetch_one(&self.db)).await {
+            Ok(Ok(_)) => Check::Ok,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "readiness: the data store did not answer");
+                Check::Failed
+            }
+            Err(_) => {
+                tracing::warn!("readiness: the data store did not answer within {PROBE_TIMEOUT:?}");
+                Check::Failed
+            }
+        }
+    }
+}
+
+/// `/readyz` for a single-tenant install.
+///
+/// The body names the one dependency it checked. It deliberately does not print
+/// `control_plane=` or `tenant_stores=`: there is no control plane, and a
+/// prober reading those keys should not conclude a control plane was verified.
+pub async fn readyz_single(State(probe): State<Arc<SingleTenantReadiness>>) -> Response {
+    let check = probe.check().await;
+    let ready = check == Check::Ok;
+    let body = format!(
+        "{}\ndata_store={}\n",
+        if ready { "ready" } else { "not ready" },
+        check.as_str(),
+    );
+    (
+        if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}

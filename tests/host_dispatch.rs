@@ -589,3 +589,153 @@ async fn a_control_plane_failure_is_a_500_not_a_404() {
         "the 500 body must not leak a path: {body:?}"
     );
 }
+
+/// §7.4's readiness on a **single-tenant** install is feature-gated, and the
+/// gate has to be tested in both directions.
+///
+/// A test that only ran with the feature on would pass while a build that
+/// ignores the flag shipped the endpoints anyway — which is the actual risk of
+/// a "just expose the probe" change: two new unauthenticated endpoints appear on
+/// a box whose watchdog already has a working means, and nothing announces it.
+/// So the default build is pinned to answer 404 on both paths.
+#[cfg(not(feature = "single-tenant-probes"))]
+#[tokio::test]
+async fn single_tenant_probes_are_absent_unless_the_feature_is_on() {
+    let app = TenancyAwareApp::Single(
+        axum::Router::new().route("/whoami", axum::routing::get(|| async { "single" })),
+    );
+    for path in ["/healthz", "/readyz"] {
+        let mut svc = app.clone();
+        let request = Request::builder()
+            .uri(format!("http://appliance.test{path}"))
+            .body(Body::empty())
+            .expect("a request");
+        let response = svc.call(request).await.expect("infallible");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::NOT_FOUND,
+            "{path} answered on a single-tenant install without `single-tenant-probes`; the flag \
+             must gate the endpoint, not merely the code path that builds it"
+        );
+    }
+
+    // And the install still serves its own routes, so the gate did not cost the
+    // router anything.
+    let mut svc = app.clone();
+    let request = Request::builder()
+        .uri("http://appliance.test/whoami")
+        .body(Body::empty())
+        .expect("a request");
+    assert_eq!(
+        svc.call(request).await.expect("infallible").status(),
+        axum::http::StatusCode::OK
+    );
+}
+
+/// With the feature on, both paths are answered by the `SingleProbed` arm
+/// rather than falling through to the tenant router — and `/readyz` names the
+/// one dependency it actually checked.
+///
+/// The `data_store=` key is the assertion that matters. The tenancy `/readyz`
+/// prints `control_plane=` and `tenant_stores=`; a single-tenant build
+/// reporting either would be claiming to have checked a control plane that does
+/// not exist, which is a green result for a check that never ran.
+#[cfg(feature = "single-tenant-probes")]
+#[tokio::test]
+async fn single_tenant_probes_answer_when_the_feature_is_on() {
+    use rustical_store_sqlite::create_db_pool;
+
+    let dir = tempfile::tempdir().expect("a tempdir");
+    let db_url = format!("sqlite://{}", dir.path().join("db.sqlite3").display());
+    let pool = create_db_pool(&db_url, true)
+        .await
+        .expect("a migrated pool");
+    // One principal, so the probe's `SELECT 1 FROM principals LIMIT 1` has a
+    // table to read and the schema is genuinely migrated.
+    sqlx::query("INSERT INTO principals (id, principal_type) VALUES ('ops@t3.gg','INDIVIDUAL')")
+        .execute(&pool)
+        .await
+        .expect("a principal");
+
+    let app = TenancyAwareApp::SingleProbed {
+        router: axum::Router::new().route("/whoami", axum::routing::get(|| async { "single" })),
+        readiness: std::sync::Arc::new(rustical::readiness::SingleTenantReadiness::new(
+            pool.clone(),
+        )),
+    };
+
+    // `/healthz` — liveness, no dependency, 200.
+    let mut svc = app.clone();
+    let response = svc
+        .call(
+            Request::builder()
+                .uri("http://appliance.test/healthz")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("infallible");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+    // `/readyz` — readiness, and the store answers.
+    let mut svc = app.clone();
+    let response = svc
+        .call(
+            Request::builder()
+                .uri("http://appliance.test/readyz")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("infallible");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("a body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("data_store=ok"), "{body}");
+    assert!(
+        !body.contains("control_plane=") && !body.contains("tenant_stores="),
+        "a single-tenant /readyz must not claim to have checked a tenancy \
+         dependency that does not exist: {body}"
+    );
+
+    // A broken store must read as *not ready*, or the flag has bought a probe
+    // that always says yes. Closing the pool is the honest way to break it: the
+    // failure is "cannot reach the store", which is the case the timeout and
+    // error arms exist for, rather than a mock standing in for one.
+    pool.close().await;
+    let mut svc = app;
+    let response = svc
+        .call(
+            Request::builder()
+                .uri("http://appliance.test/readyz")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("infallible");
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "a probe that cannot reach its store must not report ready"
+    );
+
+    // The install's own routes still work — the probes are additive.
+    let mut svc = TenancyAwareApp::SingleProbed {
+        router: axum::Router::new().route("/whoami", axum::routing::get(|| async { "single" })),
+        readiness: std::sync::Arc::new(rustical::readiness::SingleTenantReadiness::new(
+            create_db_pool(&db_url, false).await.expect("a pool"),
+        )),
+    };
+    let response = svc
+        .call(
+            Request::builder()
+                .uri("http://appliance.test/whoami")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("infallible");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+}
