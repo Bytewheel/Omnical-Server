@@ -414,16 +414,8 @@ impl HostDispatch {
             return not_found();
         };
 
-        let tenant = match self.resolve(&host).await {
-            Ok(Some((tenant, rule))) => {
-                // `let _ =` deliberately: these are side-effecting span
-                // recorders that warn on their own if no span declared the
-                // fields, and a `must_use` on the return would only add a second
-                // way to be ignored.
-                let _ = crate::tenant_telemetry::tag_dispatch(rule);
-                let _ = crate::tenant_telemetry::tag_span(&tenant);
-                tenant
-            }
+        let (tenant, rule) = match self.resolve(&host).await {
+            Ok(Some(found)) => found,
             Ok(None) => {
                 // Unknown host, suspended tenant, and unclaimed host all land
                 // here identically — deliberately.
@@ -440,28 +432,56 @@ impl HostDispatch {
             }
         };
 
-        let router = match self.router_for(&tenant).await {
-            Ok(router) => router,
-            Err(e) => {
-                error_500(&e);
-                return server_error();
-            }
+        // The dispatch rule and the tenant tags are recorded on a span created
+        // **here**, because at this point there is no other one to record them
+        // on: the tenant's `http-request` span is created further down, by that
+        // router's `TraceLayer`, and a span cannot be tagged before it exists.
+        //
+        // This is why the calls used to warn on every request. `tag_dispatch`
+        // and `tag_span` were called from the dispatch loop, where the only
+        // span in scope was whatever the server had — which declares neither
+        // field. `in_tenant_span` is the helper that declares them, and it had
+        // no production caller at all, so nothing ever wrapped a real request
+        // in it. The warning was not a missing declaration: `app.rs` declares
+        // both fields on `http-request` already. It was the tag landing one
+        // layer too early to reach it.
+        //
+        // The tags therefore end up on `tenant_request`, which spans the whole
+        // tenant dispatch including the inner router call, rather than on the
+        // inner `http-request`. That is the more useful place anyway: the
+        // dispatch decision is made out here, and a span covering the dispatch
+        // is the one that can carry it.
+        let response = crate::tenant_telemetry::in_tenant_span_async(&tenant, rule, async {
+            let router = match self.router_for(&tenant).await {
+                Ok(router) => router,
+                Err(e) => {
+                    error_500(&e);
+                    return Err(());
+                }
+            };
+            // `Service::call` takes `&mut self`, and an `Arc` cannot hand out a
+            // mutable reference to what it points at — so the `Router` itself
+            // is cloned, not the `Arc`. That is still the cheap pointer copy
+            // §3.3 step 3 promises: an axum `Router` is Arc-backed internally,
+            // so cloning one bumps a refcount and shares every route. It is
+            // *not* a deep copy of the routing table.
+            let mut inner = (*router).clone();
+            Ok(inner.call(request).await.unwrap_or_else(|e| {
+                // `Router`'s error type is `Infallible`, so this arm is
+                // unreachable in practice. It exists because "unreachable" should
+                // still produce a response rather than a panic inside a serve
+                // loop.
+                error_500(&format!("the tenant router returned an error: {e}"));
+                server_error()
+            }))
+        })
+        .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(()) => return server_error(),
         };
 
-        // `Service::call` takes `&mut self`, and an `Arc` cannot hand out a
-        // mutable reference to what it points at — so the `Router` itself is
-        // cloned, not the `Arc`. That is still the cheap pointer copy §3.3
-        // step 3 promises: an axum `Router` is Arc-backed internally, so
-        // cloning one bumps a refcount and shares every route. It is *not* a
-        // deep copy of the routing table.
-        let mut inner = (*router).clone();
-        inner.call(request).await.unwrap_or_else(|e| {
-            // `Router`'s error type is `Infallible`, so this arm is unreachable
-            // in practice. It exists because "unreachable" should still produce
-            // a response rather than a panic inside a serve loop.
-            error_500(&format!("the tenant router returned an error: {e}"));
-            server_error()
-        })
+        response
     }
 }
 

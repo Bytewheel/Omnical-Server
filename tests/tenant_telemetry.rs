@@ -293,17 +293,40 @@ fn every_resolve_rule_is_named() {
 
 #[test]
 fn host_dispatch_tags_on_every_resolved_request() {
-    // If the tagging call is ever deleted from the dispatch loop, every other
+    // If the tagging path is ever deleted from the dispatch loop, every other
     // test in this file still passes — they call the helpers directly. This one
     // is the only thing that notices.
+    //
+    // **This assertion changed, and the change is the point.** It used to grep
+    // for the literal `tag_span(&tenant)` in `handle`, which passed while the
+    // production path recorded nothing: those calls ran with no span in scope,
+    // so both warned and both dropped their fields. Grepping for call text
+    // cannot tell a call that works from a call that is a no-op.
+    //
+    // It now pins the *mechanism* instead — the dispatch loop wrapping its work
+    // in the async span that declares the fields. That is what makes tagging
+    // possible at all, and `the_async_span_records_the_tags_across_an_await`
+    // pins that the mechanism actually records.
     let src = include_str!("../src/host_dispatch.rs");
     assert!(
-        src.contains("tag_span(&tenant)"),
-        "the dispatch loop no longer tags the tenant — spans would be unattributable"
+        src.contains("in_tenant_span_async(&tenant, rule"),
+        "the dispatch loop no longer wraps tenant work in the span that declares \
+         the telemetry fields — tags would be recorded on nothing"
     );
+    // The rule used to be *recorded* onto a span after the fact. It is now a
+    // declared field of the span created around the dispatch, so it cannot be
+    // lost the way a `Span::record` on an undeclared field could. Asserting the
+    // span declares it is the stronger statement; `tag_dispatch` remains for
+    // callers that tag onto a span they did not create.
     assert!(
-        src.contains("tag_dispatch(rule)"),
-        "the dispatch loop no longer tags which rule fired"
+        src.contains("in_tenant_span_async(&tenant, rule"),
+        "the resolved rule must reach the span that wraps the dispatch"
+    );
+    let telemetry = include_str!("../src/tenant_telemetry.rs");
+    assert!(
+        telemetry.contains("omnical.dispatch = rule"),
+        "the async span must declare the dispatch rule as a field, not record \
+         it afterwards — a record onto an undeclared field is a silent no-op"
     );
 }
 
@@ -326,4 +349,56 @@ fn a_404_is_not_tagged_with_a_tenant() {
         "something tags the requested host; that is a customer-enumeration oracle"
     );
     assert!(!out.is_empty());
+}
+
+/// The async helper must record the tags **across an `.await`**.
+///
+/// This is the whole point of the async variant, and it is a trap in the sync
+/// one: `in_tenant_span` holds the span guard only while the closure *runs*, so
+/// a closure that returns a future exits the span before that future is ever
+/// polled. Nothing would be recorded and no test would fail — which is how the
+/// production path stayed broken while every test in this file stayed green.
+///
+/// The event inside the span matters as much as the assertion: a span on its own
+/// writes nothing, so without an event these assertions would pass for the
+/// wrong reason.
+#[tokio::test]
+async fn the_async_span_records_the_tags_across_an_await() {
+    use rustical::tenant_telemetry::in_tenant_span_async;
+
+    let t = tenant("acme");
+    let id = t.id.as_str().to_owned();
+    let out = Arc::new(Mutex::new(String::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .without_time()
+        .with_target(false)
+        .with_writer(Capture(Arc::clone(&out)))
+        .finish();
+
+    let out = {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        in_tenant_span_async(&t, "explicit-host", async {
+            // A real yield point: the bug being pinned is a guard that drops
+            // across one.
+            tokio::task::yield_now().await;
+            assert!(
+                current_span_accepts_tenant(),
+                "the async span must still be current after an await, or the \
+                 tags land on nothing"
+            );
+            assert!(tag_span(&t), "tag_span must accept inside the async span");
+            assert!(tag_dispatch("explicit-host"), "…and so must tag_dispatch");
+            tracing::info!("handled a request");
+        })
+        .await;
+        out.lock().expect("the capture lock").clone()
+    };
+
+    assert!(out.contains("acme"), "no tenant slug recorded:\n{out}");
+    assert!(out.contains(&id), "no tenant id recorded:\n{out}");
+    assert!(
+        out.contains("explicit-host"),
+        "no dispatch rule recorded:\n{out}"
+    );
 }

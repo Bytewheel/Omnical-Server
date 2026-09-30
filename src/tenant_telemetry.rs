@@ -149,3 +149,32 @@ pub const fn otel_compiled_in() -> bool {
 pub fn tenant_fields_directive() -> String {
     format!("rustical={TENANT_ID_FIELD}=info")
 }
+
+/// The async half of [`in_tenant_span`].
+///
+/// Separate because the sync version is **wrong** for a future: `span.enter()`
+/// returns a guard that drops when the *closure returns*, and a closure
+/// returning a future returns before that future is ever polled. The span
+/// would be entered and exited with nothing observed inside it, which is
+/// precisely the silent-no-op the sync version's own doc warns about one layer
+/// up.
+///
+/// `Instrument` attaches the span to the future itself, so it is entered for
+/// every poll and stays correct across `.await`.
+pub async fn in_tenant_span_async<T, F>(tenant: &Tenant, rule: &'static str, f: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    // Literal field names for the same reason as the sync version: the
+    // `tracing` macros take identifiers. `field_names_agree_with_the_constants`
+    // keeps this list and the constants in step.
+    let span = tracing::info_span!(
+        "tenant_request",
+        tenant = %tenant.slug.as_str(),
+        omnical.tenant_id = %tenant.id.as_str(),
+        omnical.tenant_slug = %tenant.slug.as_str(),
+        omnical.dispatch = rule,
+    );
+    use tracing::Instrument as _;
+    f.instrument(span).await
+}
