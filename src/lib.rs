@@ -47,6 +47,7 @@ pub use commands::*;
 pub mod config;
 pub mod export;
 pub mod host_dispatch;
+pub mod quota;
 pub mod readiness;
 pub mod register;
 pub mod rsvp;
