@@ -82,8 +82,29 @@ async fn main() -> Result<()> {
             cmd_health(config.http, health_args).await
         }
         Command::SupportBundle(bundle_args) => {
+            // `--no-config` must work on a device that has **no config at all**,
+            // which is not an edge case: it is the state of every freshly flashed
+            // appliance before §9.3's setup wizard completes, and it is exactly
+            // when somebody needs a bundle. Parsing the config first turned that
+            // into "missing field `data_store`" — a support bundle you cannot
+            // produce on the one machine that most needs it.
+            let config = if bundle_args.no_config {
+                match load_config(&args.config_file).await {
+                    Ok(config) => config,
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "--no-config was given and the config could not be read; the bundle \
+                             will describe the defaults rather than this install"
+                        );
+                        Config::default_config()
+                    }
+                }
+            } else {
+                parse_config().await?
+            };
             rustical::commands::support_bundle::cmd_support_bundle(
-                parse_config().await?,
+                config,
                 &config_file,
                 bundle_args,
             )

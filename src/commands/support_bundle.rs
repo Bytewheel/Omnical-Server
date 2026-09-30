@@ -193,6 +193,22 @@ fn build_bundle_text(config: &Config, raw_toml: &str, health: Option<&str>) -> R
     writeln!(out)?;
     writeln!(out, "generated:  {}", now_rfc3339())?;
     writeln!(out, "version:    {}", env!("CARGO_PKG_VERSION"))?;
+    // The commit, and only when there is one. §10.3's gate compares this against
+    // the published tarball's `git rev-parse HEAD`, which is the whole of the
+    // AGPL §13 check — so the bundle, which is what a support request attaches,
+    // is also the artefact that proves which source the running code is in.
+    let sha = crate::build_provenance::build_sha();
+    if sha.is_empty() {
+        writeln!(out, "commit:     (unknown — built without a repository)")?;
+    } else {
+        writeln!(out, "commit:     {sha}")?;
+    }
+    if crate::build_provenance::build_dirty() {
+        writeln!(
+            out,
+            "build:      DIRTY — this binary is not from any published commit"
+        )?;
+    }
     writeln!(
         out,
         "platform:   {}/{}",

@@ -40,6 +40,7 @@ use tracing::{info, warn};
 
 pub mod admin;
 pub mod app;
+pub mod build_provenance;
 pub mod commands;
 mod tasks;
 pub use commands::*;
@@ -51,6 +52,7 @@ pub mod register;
 pub mod rsvp;
 pub mod setup_mode;
 mod setup_tracing;
+pub mod source_offer;
 pub mod store_bundle;
 pub mod tenancy;
 pub mod tenant_overrides;

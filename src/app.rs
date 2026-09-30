@@ -247,6 +247,20 @@ where
     let mut router = Router::new()
         // endpoint to be used by healthcheck to see if rustical is online
         .route("/ping", axum::routing::get(async || "Pong!"))
+        // §10 (item 19): the AGPL §13 source offer.
+        //
+        // Mounted on the single-tenant path as well as the tenancy path, because
+        // the appliance (§9) runs single-tenant and §10.2.4 is explicit that it
+        // is an AGPL-licensed product too. A compliance page that 404s on the
+        // model we actually ship hardware on would be a compliance page that is
+        // not there.
+        //
+        // Unauthenticated: the obligation is to every user interacting over a
+        // network. It serves no tenant data.
+        .route(
+            crate::host_dispatch::SOURCE_PATH,
+            axum::routing::get(crate::source_offer::source_offer),
+        )
         .merge(caldav_router(
             "/caldav",
             auth_provider.clone(),

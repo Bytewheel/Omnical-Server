@@ -108,6 +108,13 @@ pub const HEALTH_PATH: &str = "/healthz";
 /// deliberately does not check.
 pub const READY_PATH: &str = "/readyz";
 
+/// The AGPL §13 source offer (§10.1, item 19).
+///
+/// Unauthenticated, on every host, and mounted ahead of tenant resolution. The
+/// obligation is to *every user interacting with a modified version over a
+/// network*, so gating it behind an account would defeat it.
+pub const SOURCE_PATH: &str = "/frontend/source";
+
 /// The liveness router. Deliberately a separate `Router` rather than a special
 /// case inside the dispatch loop, so it cannot be reached by a path that
 /// dispatch also handles and the two can never disagree about which is which.
@@ -695,6 +702,14 @@ impl Service<HttpRequest> for TenancyAwareApp {
                     return Box::pin(async move {
                         Ok(crate::readiness::readyz(axum::extract::State(probe)).await)
                     });
+                }
+                // §10 (item 19): the AGPL §13 source offer. Unauthenticated and
+                // ahead of `HostDispatch` on **every** host, unlike the panel —
+                // a compliance obligation a prospective customer cannot read
+                // without an account is not met by existing. It serves no tenant
+                // data: a static page over build-time constants.
+                if request.uri().path() == SOURCE_PATH {
+                    return Box::pin(async move { Ok(crate::source_offer::source_offer().await) });
                 }
                 if let Some(panel) = &tenancy.panel
                     && !tenancy.admin_host.is_empty()
