@@ -35,7 +35,7 @@
 use crate::config::RegistrationConfig;
 use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
 use axum::Router;
-use axum::extract::{Form, State};
+use axum::extract::{Form, Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum_extra::TypedHeader;
@@ -186,12 +186,61 @@ pub fn register_router<AS: AddressbookStore, CS: CalendarStore>(
         })
 }
 
+/// The query on `GET /register?code=…`.
+///
+/// `code` is the invite the user was emailed. It has been in the URL all along
+/// and the form ignored it, so an invited user had to **read a code out of their
+/// email and type it into a field that already had it in the address bar** — a
+/// 12-character base-31 string, single-use, case-sensitive, with `0`/`1`/`I`/`L`/
+/// `O`/`U` deliberately absent from the alphabet and therefore confusable by eye.
+/// Every one of those six omissions is a way to get a valid code *wrong*.
+///
+/// The value is attacker-controllable: any URL can carry any `code`. So it is
+/// length-bounded before it is echoed, and HTML-escaped at the point of
+/// rendering. Prefilling a field with unescaped input on an unauthenticated page
+/// is reflected XSS, and `/register` is exactly that page.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct RegisterQuery {
+    /// The invite code from the URL, if any.
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+/// Longest code `generate_invite_code` can produce, plus slack.
+///
+/// `CODE_LENGTH` is 12 in `commands::invites.rs`. The bound is not decorative:
+/// without it, `?code=` with a megabyte of text is a megabyte echoed into every
+/// rendered form, on a page anyone can reach.
+const MAX_PREFILLED_CODE: usize = 64;
+
+/// A `?code=` value that is safe to put in the form, or `None`.
+///
+/// Trimmed, length-capped, and **not** otherwise validated here — shape
+/// validation belongs to `redeem_invite`, which is the only thing that can say
+/// whether a code is valid. Rejecting a wrong-shaped code here would turn "that
+/// invite is not valid" into "that is not an invite", which is a worse error and
+/// a second place for the alphabet to drift.
+fn prefill_code(raw: Option<&str>) -> Option<String> {
+    let code = raw.map(str::trim).filter(|c| !c.is_empty())?;
+    if code.chars().count() > MAX_PREFILLED_CODE {
+        // Too long to be one of ours. Left blank rather than echoed: the form
+        // still works, and the user is not shown 4 KB of someone else's query
+        // string.
+        return None;
+    }
+    Some(code.to_owned())
+}
+
 /// The public registration form. Fresh CSRF token into the session on every
 /// GET; an already-logged-in visitor is bounced to their account page.
-#[instrument(skip(state, session))]
+///
+/// `?code=` is read and pre-filled (§`RegisterQuery`) so an invited user does not
+/// retype what the link already carries.
+#[instrument(skip(state, session, query))]
 async fn route_get_register<AS: AddressbookStore, CS: CalendarStore>(
     State(state): State<RegisterState<AS, CS>>,
     session: Session,
+    Query(query): Query<RegisterQuery>,
 ) -> Response {
     if let Ok(Some(user)) = session.get::<String>("user").await {
         return Redirect::to(&format!("/frontend/user/{user}")).into_response();
@@ -202,13 +251,15 @@ async fn route_get_register<AS: AddressbookStore, CS: CalendarStore>(
         // effort here); the POST will reject the mismatched token.
         warn!("registration: could not persist CSRF token");
     }
-    render_form(
-        None,
-        &RegisterFormFieldValues::default(),
-        &state.context.config,
-        &csrf,
-    )
-    .into_response()
+    // Bound to a local so the borrow outlives the `values` struct: binding the
+    // `Option<String>`'s `as_deref()` inline would borrow a temporary that dies
+    // at the end of the statement.
+    let invite = prefill_code(query.code.as_deref());
+    let values = RegisterFormFieldValues {
+        invite: invite.as_deref().unwrap_or_default(),
+        ..RegisterFormFieldValues::default()
+    };
+    render_form(None, &values, &state.context.config, &csrf).into_response()
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -228,10 +279,15 @@ pub struct RegisterForm {
 }
 
 /// Echo back the submitted values on validation errors (except secrets).
+///
+/// `invite` is included, and that is the whole point of it: an invited user who
+/// mistypes their password confirmation would otherwise come back to a form with
+/// the code gone and be asked to go and find the email again.
 #[derive(Default)]
 struct RegisterFormFieldValues<'a> {
     email: &'a str,
     displayname: &'a str,
+    invite: &'a str,
 }
 
 #[derive(Debug)]
@@ -280,6 +336,9 @@ async fn route_post_register<AS: AddressbookStore, CS: CalendarStore>(
     let values = RegisterFormFieldValues {
         email: &email,
         displayname,
+        // Echoed back on a validation error so a rejected submission does not
+        // cost the user their place in the email.
+        invite: form.invite.trim(),
     };
 
     if let Err(err) = validate(&state, &session, &form, &email).await {
@@ -448,7 +507,11 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
                     StatusCode::BAD_REQUEST,
                     render_form(
                         Some(INVALID_INVITE_MSG),
-                        &RegisterFormFieldValues { email, displayname },
+                        &RegisterFormFieldValues {
+                            email,
+                            displayname,
+                            invite: "",
+                        },
                         &state.context.config,
                         "",
                     ),
@@ -510,7 +573,11 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
                 StatusCode::BAD_REQUEST,
                 render_form(
                     Some("An account with that email address already exists."),
-                    &RegisterFormFieldValues { email, displayname },
+                    &RegisterFormFieldValues {
+                        email,
+                        displayname,
+                        invite: "",
+                    },
                     &state.context.config,
                     "",
                 ),
@@ -796,11 +863,28 @@ fn render_form(
         format!(r#"<p class="error" role="alert">{}</p>"#, escape_html(msg))
     });
     let invite_html = if config.invite_required {
-        r#"<label>Invitation code
-            <input type="text" name="invite" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="e.g. abC3dEf7Gh12">
-            </label>"#
+        // `escaped` and NOT `raw`: this value came off the query string on an
+        // unauthenticated page, so an unescaped `"` would close the attribute and
+        // an unescaped `<` would start a tag.
+        let escaped = escape_html(values.invite);
+        let (value_attr, help) = if escaped.is_empty() {
+            (String::new(), "")
+        } else {
+            (
+                format!(" value=\"{escaped}\""),
+                // Said out loud, because a field the user did not type looks like a
+                // bug otherwise — and because they should be able to check it
+                // against their email before pressing the button.
+                "<div class=\"muted\">Pre-filled from your invitation link. Check it matches your email before continuing.</div>",
+            )
+        };
+        format!(
+            r#"<label>Invitation code
+            <input type="text" name="invite" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="e.g. abC3dEf7Gh12"{value_attr}>
+            {help}</label>"#
+        )
     } else {
-        ""
+        String::new()
     };
     render_page(&format!(
         r#"<h1>Create your account</h1>
@@ -1040,6 +1124,19 @@ mod tests {
             }
             let token = html.split("name=\"csrf\" value=\"").nth(1).unwrap();
             *self.csrf.lock().unwrap() = token.split('"').next().unwrap().to_owned();
+        }
+
+        /// `GET /register?<query>`, returning the raw HTML.
+        ///
+        /// Takes the query as a literal rather than encoding it, so a test can ask
+        /// for the hostile values directly and read what actually comes back.
+        async fn get_html(&self, query: &str) -> String {
+            let req = Request::get(format!("/register?{query}"))
+                .body(AxBody::empty())
+                .unwrap();
+            let resp = self.router.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            body_to_string(resp.into_body()).await
         }
 
         async fn post(&self, fields: &[(&str, &str)]) -> Response {
@@ -1465,5 +1562,165 @@ mod tests {
             .unwrap();
         let resp = rig.router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    // ── §7.5's invite flow: `?code=` is read and pre-filled ──────────────────
+    //
+    // An invited user used to have to read a 12-character base-31 code out of
+    // their email and type it into a field that already had it in the address
+    // bar. The alphabet deliberately omits `0`, `1`, `I`, `L`, `O` and `U` —
+    // six ways to mistype a valid code, which is exactly what an invited user
+    // does.
+
+    #[tokio::test]
+    async fn the_code_in_the_url_is_prefilled() {
+        let rig = TestRig::new(base_config()).await;
+        let html = rig.get_html("code=abC3dEf7Gh12").await;
+        assert!(
+            html.contains(r#"value="abC3dEf7Gh12""#),
+            "the invite code was not pre-filled:\n{html}"
+        );
+        // …and it must NOT still be asking for it to be typed.
+        assert!(
+            !html.contains(r#"placeholder="e.g. abC3dEf7Gh12""#)
+                || html.contains(r#"value="abC3dEf7Gh12""#),
+            "the placeholder should be replaced by a value when a code is present"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prefilled_code_still_has_to_be_valid() {
+        // Prefilling must not bypass `redeem_invite`. A code from the URL is
+        // still redeemed exactly as a typed one is.
+        let rig = TestRig::new(base_config()).await;
+        rig.get_form().await;
+        let (status, _body) = rig
+            .post_status(&[
+                ("email", "invited@example.com"),
+                ("password", "correct horse battery staple"),
+                ("password_confirm", "correct horse battery staple"),
+                ("invite", "no-such-code-xyz"),
+            ])
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a pre-filled but invalid code must still be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_valid_prefilled_code_registers_without_typing_it() {
+        // The end-to-end property: the code the user was emailed is the code that
+        // registers them, with no retyping.
+        //
+        // `get_form()` first, deliberately. It captures the session cookie *and*
+        // the CSRF token, and a raw GET does not — so posting straight after one
+        // fails with 400 "This form has expired", which is CSRF working correctly
+        // and would look like the prefilled code being wrong.
+        let rig = TestRig::new(base_config()).await;
+        rig.invite_store
+            .add_invite("prefill-code", &None, &None, "test", &None, &None, &None)
+            .await
+            .unwrap();
+        rig.get_form().await;
+
+        // What the browser would now render, with the code filled in.
+        let html = rig.get_html("code=prefill-code").await;
+        assert!(
+            html.contains(r#"value="prefill-code""#),
+            "the code was not pre-filled:\n{html}"
+        );
+
+        let (status, body) = rig
+            .post_status(&[
+                ("email", "prefill@example.com"),
+                ("password", "correct horse battery staple"),
+                ("password_confirm", "correct horse battery staple"),
+                ("invite", "prefill-code"),
+            ])
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a prefilled valid code did not register:\n{body}"
+        );
+        assert!(
+            rig.principal_store
+                .get_principal("prefill@example.com")
+                .await
+                .unwrap()
+                .is_some(),
+            "the principal was not created"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_prefilled_code_is_escaped_and_bounded() {
+        // The value came off a query string on an *unauthenticated* page, so an
+        // unescaped `"` closes the attribute and an unescaped `<` starts a tag.
+        // This is reflected XSS on `/register` if it is ever unescaped, so it is
+        // pinned rather than trusted.
+        let rig = TestRig::new(base_config()).await;
+        let html = rig
+            .get_html("code=%22%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E")
+            .await;
+        assert!(
+            !html.contains("<script>alert(1)</script>"),
+            "the code was reflected unescaped:\n{html}"
+        );
+        assert!(
+            !html.contains(r#"<input type="text" name="invite" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="e.g. abC3dEf7Gh12" value="">"#)
+                || !html.contains("<script>"),
+            "the attribute was closed early"
+        );
+
+        // And bounded: without a length cap, a megabyte of query string is a
+        // megabyte echoed into the form on a page anyone can reach.
+        let long = "a".repeat(4096);
+        let html = rig.get_html(&format!("code={long}")).await;
+        assert!(
+            !html.contains(&long),
+            "an over-long ?code= was echoed in full ({} bytes of it)",
+            html.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_submission_keeps_the_code() {
+        // The trap this avoids: a password typo sends the user back to a form with
+        // the invite blanked, and they go and find the email again.
+        let rig = TestRig::new(base_config()).await;
+        rig.get_form().await;
+        let (status, body) = rig
+            .post_status(&[
+                ("email", "typo@example.com"),
+                ("password", "correct horse battery staple"),
+                ("password_confirm", "does not match"),
+                ("invite", "abC3dEf7Gh12"),
+            ])
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body.contains(r#"value="abC3dEf7Gh12""#),
+            "a rejected submission lost the invite code, sending the user back to their email:\n{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_code_in_the_url_leaves_the_field_empty_and_marks_the_hostile_one_not_special() {
+        let rig = TestRig::new(base_config()).await;
+        let html = rig.get_html("").await;
+        assert!(
+            !html.contains(r#"name="invite" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="e.g. abC3dEf7Gh12" value=""#),
+            "an empty ?code= should leave the field with no value attribute at all"
+        );
+        // Whitespace-only is the same as absent: a link with a trailing space in it
+        // should not produce a value attribute full of nothing.
+        let html = rig.get_html("code=%20%20").await;
+        assert!(
+            !html.contains(r#"placeholder="e.g. abC3dEf7Gh12" value=""#),
+            "a whitespace-only code produced a value attribute"
+        );
     }
 }
