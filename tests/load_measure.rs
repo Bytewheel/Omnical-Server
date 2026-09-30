@@ -178,6 +178,7 @@ async fn run(
     tenancy: bool,
     tenants: usize,
     max_cached: usize,
+    warm_all: bool,
 ) -> (Stats, Option<u64>) {
     let dir = tempfile::tempdir().expect("a temp dir");
     std::fs::create_dir_all(dir.path().join("data")).expect("the data directory");
@@ -250,9 +251,23 @@ async fn run(
     // The gate says "p99 **DAV** latency within 2x the single-tenant baseline",
     // which is a baseline that serves DAV.
     const DAV_PATH: &str = "/.well-known/caldav";
-    let warm_path = DAV_PATH;
-    for host in hosts.iter().take(tenants) {
-        let _ = drive(socket, host, warm_path, 1).await;
+    // **Warm the working set, not the whole fleet** — unless `warm_all`, which
+    // is the churn case and a different question entirely.
+    //
+    // Warming all `tenants` and then spreading `CONCURRENCY` clients over
+    // `hosts[c % tenants]` (tenants 0..49) means that at `max_cached_tenants = 64`
+    // the warmup left tenants 136..199 in the LRU, so **every tenant the
+    // measurement then touched had just been evicted**. That is 50 cold requests
+    // out of 1000 — 5%, precisely where p95 and p99 live — and it is what produced
+    // the "6.7x, the documented default fails the gate" figure that §7.2 and
+    // §18.24 recorded. It was this harness, not the cache.
+    let warm: Vec<&String> = if warm_all {
+        hosts.iter().take(tenants).collect()
+    } else {
+        hosts.iter().take(CONCURRENCY.min(tenants)).collect()
+    };
+    for host in warm {
+        let _ = drive(socket, host, DAV_PATH, 1).await;
     }
 
     let stats = Arc::new(Mutex::new(Stats {
@@ -300,37 +315,43 @@ async fn run(
 
 /// **§7.2's gate.** Run with `--ignored`; see the module docs.
 ///
-/// # What it found, and why it measures two configurations
+/// # Correction, 2026-09-29: the original "finding" was this harness's own bug
 ///
-/// The gate **failed** on the first honest run, and the failure is the finding:
+/// The first version of this file reported that §7.2's documented
+/// `max_cached_tenants = 64` **failed** §7.2's gate at 200 tenants — p99 6.7× the
+/// single-tenant DAV baseline — and §7.2 and §18.24 recorded that. It was wrong.
 ///
-/// | `max_cached_tenants` | p99 baseline (1 tenant, DAV) | p99 across 200 | ratio | gate |
-/// |---|---|---|---|---|
-/// | 64 — §7.2's documented default | 16 ms | 120 ms | **7.5×** | **fails** |
-/// | 256 — every tenant resident | 16 ms | 14 ms | **1.1×** | passes |
+/// The warmup loop touched all 200 tenants and then spread 50 clients over
+/// tenants 0..49. At 64 slots the warmup left tenants 136..199 in the LRU, so
+/// **every tenant the measurement then touched had just been evicted**: 50 cold
+/// requests out of 1000, which is 5%, which is exactly where p95 and p99 live.
+/// The number was real and it was not the property it was reported as.
 ///
-/// Dispatch is not the problem. With every pool resident the ratio is ~1.1×, so
-/// `HostDispatch`'s resolution and routing cost essentially nothing per tenant.
-/// The p99 at 64 is **pool construction**, and it lands on the request path: a
-/// tenant whose pool was evicted by the LRU pays to rebuild it — a new SQLite
-/// connection, a migration check, a whole DAV router — on the first request after
-/// eviction.
+/// Measured properly — `tests/cache_decision.rs`, which reports steady state and
+/// churn separately and sweeps the bound:
 ///
-/// So §7.2's stated limit (*"`max_cached_tenants` (64) bounds resident pools"*) is
-/// **wrong for the 200 tenants its own gate names**. At 200 tenants and 64 slots
-/// the working set does not fit, and the miss cost is a request.
+/// | `max_cached_tenants` | steady-state p99 | RSS | churn p99 |
+/// |---|---|---|---|
+/// | 16 | 119 ms | 73 MiB | 139 ms |
+/// | 32 | 109 ms | 77 MiB | 189 ms |
+/// | **64** (§7.2's default) | **4 ms** | 74 MiB | 170 ms |
+/// | 128 | 5 ms | 74 MiB | 243 ms |
+/// | 256 | 9 ms | 74 MiB | 4 ms |
 ///
-/// # Why both configurations are asserted, in opposite directions
+/// **The gate passes at §7.2's documented default.** The real constraint is not
+/// the tenant count at all: it is that the bound must be **at least the
+/// concurrent working set**, because the bound is a ceiling and RSS is set by
+/// what is actually resident. 32 slots thrash with 50 concurrent clients; 64 do
+/// not.
 ///
-/// A test that simply failed would be deleted, and with it the finding. So:
-/// * the **256-slot** configuration asserts the gate **passes** — that is the
-///   shape we recommend shipping, and it must not regress;
-/// * the **64-slot** configuration asserts the gate **still fails**, and says so
-///   as a *known* finding with a pointer at §7.2.
+/// Two things survive from the original finding, and both are worth more than
+/// the false one:
 ///
-/// If someone fixes the eviction cost — a pool that outlives its tenant's
-/// inactivity, a warm-standby pool, a cheaper miss — the 64-slot assertion fails
-/// and tells them to update the plan rather than silently delete the test.
+/// * **A cold tenant returning after idle pays ~170 ms** for pool construction.
+///   That is real, and it is the case that would justify making the miss cheap.
+/// * **RSS is flat at ~74 MiB across 16 and 256 slots.** The bound is a ceiling,
+///   not an allocation, so raising it costs nothing until the pools are genuinely
+///   resident — and then it costs ~0.93 MiB a pool.
 #[test]
 #[ignore = "a load test; run explicitly and record the number with the machine"]
 fn p99_within_two_times_the_single_tenant_baseline_across_tenants() {
@@ -340,7 +361,7 @@ fn p99_within_two_times_the_single_tenant_baseline_across_tenants() {
         .expect("a runtime");
 
     runtime.block_on(async {
-        eprintln!("=== §7.2 load measurement ===");
+        eprintln!("=== §7.2 load measurement (steady state) ===");
         eprintln!(
             "machine: {} / {} cpus",
             std::env::consts::OS,
@@ -349,13 +370,17 @@ fn p99_within_two_times_the_single_tenant_baseline_across_tenants() {
             )
             .expect("a count")
         );
-        eprintln!("shape:   {TENANTS} tenants x {CONCURRENCY} clients x {PER_CLIENT} requests");
+        eprintln!(
+            "shape:   {TENANTS} tenants, {CONCURRENCY} concurrent clients on {PER_CLIENT} \
+             requests each, working set = the {CONCURRENCY} tenants the clients touch"
+        );
 
         // 1 tenant, serving the same DAV path. `/ping` is a static string with no
         // resolution, no pool and no router, so a baseline of it measures nothing
-        // — the first version of this harness used one and reported an 8.23x
+        // — the very first version of this harness used one and reported an 8.23×
         // ratio that was almost entirely the baseline being free.
-        let (baseline, baseline_rss) = run("single-tenant", false, 1, CACHE_UNDER_TEST).await;
+        let (baseline, baseline_rss) =
+            run("single-tenant", false, 1, CACHE_UNDER_TEST, false).await;
         eprintln!("baseline (1 tenant, DAV): {}", baseline.summary());
         eprintln!("baseline RSS:            {} MiB", rss_str(baseline_rss));
         let base_p99 = percentile(baseline.latencies_ms.clone(), 0.99) as f64;
@@ -364,8 +389,9 @@ fn p99_within_two_times_the_single_tenant_baseline_across_tenants() {
             "the baseline produced no timings; the ratio is meaningless"
         );
 
-        for (cache, expect_pass) in [(CACHE_UNDER_TEST, true), (DOCUMENTED_CACHE, false)] {
-            let (multi, multi_rss) = run(&format!("cache-{cache}"), true, TENANTS, cache).await;
+        for (cache, expect_pass) in [(DOCUMENTED_CACHE, true), (CACHE_UNDER_TEST, true)] {
+            let (multi, multi_rss) =
+                run(&format!("cache-{cache}"), true, TENANTS, cache, false).await;
             let multi_p99 = percentile(multi.latencies_ms.clone(), 0.99) as f64;
             let ratio = multi_p99 / base_p99;
             eprintln!("--- {TENANTS} tenants, max_cached_tenants = {cache} ---");
@@ -378,39 +404,35 @@ fn p99_within_two_times_the_single_tenant_baseline_across_tenants() {
                 "{} requests failed; a load number with errors in it is not a latency number",
                 multi.errors
             );
-
             if expect_pass {
                 assert!(
                     ratio <= 2.0,
-                    "§7.2's gate: with every pool resident the p99 across {TENANTS} tenants is \
-                     {ratio:.2}x the single-tenant DAV baseline ({multi_p99:.0}ms vs \
-                     {base_p99:.0}ms). This configuration is supposed to pass, so something \
-                     other than the cache is now costing a request."
-                );
-            } else {
-                // A KNOWN FAILING CONFIGURATION, asserted as such.
-                assert!(
-                    ratio > 2.0,
-                    "\n§7.2's documented default (max_cached_tenants = {DOCUMENTED_CACHE}) now \
-                     PASSES the gate at {ratio:.2}x.\n\nThat is good news and it means one of two \
-                     things: the eviction cost has been fixed, or the default was raised. Either \
-                     way PLAN_DEPLOYMENTS.md §7.2 must be updated — it currently records this \
-                     configuration as the one that fails, and a stale record of a finding is worse \
-                     than none."
-                );
-                eprintln!(
-                    "  (known finding: §7.2 records {DOCUMENTED_CACHE} slots as failing at 200 \
-                     tenants — see the module docs)"
+                    "§7.2's gate: in steady state, p99 across {TENANTS} tenants is {ratio:.2}x \
+                     the single-tenant DAV baseline ({multi_p99:.0}ms vs {base_p99:.0}ms) with \
+                     max_cached_tenants = {cache}.\n\nThe bound must be at least the concurrent \
+                     working set ({CONCURRENCY} tenants here), not the tenant count: RSS is set \
+                     by what is resident, not by the ceiling."
                 );
             }
-
             if let (Some(b), Some(m)) = (baseline_rss, multi_rss) {
                 eprintln!(
-                    "  marginal RSS per tenant: {:.2} MiB",
-                    m.saturating_sub(b) as f64 / TENANTS as f64
+                    "  RSS across {} resident pools: {} MiB",
+                    TENANTS,
+                    m.saturating_sub(b)
                 );
             }
         }
+
+        // The finding that survived: a tenant returning after idle.
+        let (cold, _rss) = run("churn", true, TENANTS, DOCUMENTED_CACHE, true).await;
+        let cold_p99 = percentile(cold.latencies_ms.clone(), 0.99);
+        eprintln!("--- churn: the whole fleet touched, then the working set ---");
+        eprintln!("  {}", cold.summary());
+        eprintln!("  cold-tenant p99: {cold_p99}ms at max_cached_tenants = {DOCUMENTED_CACHE}");
+        // Not asserted as a pass or a failure: it is a cost with no agreed budget,
+        // and inventing one here would be the same mistake as the original.
+        // §7.2 has no target for it; adding one is the owner's call.
+        assert!(cold_p99 > 0, "the churn run produced no timings");
     });
 }
 
@@ -427,8 +449,8 @@ fn the_per_tenant_pool_cost_is_recordable() {
         .build()
         .expect("a runtime");
     runtime.block_on(async {
-        let (_, one) = run("pool-cost-1", true, 1, 256).await;
-        let (_, many) = run("pool-cost-200", true, TENANTS, 256).await;
+        let (_, one) = run("pool-cost-1", true, 1, 256, true).await;
+        let (_, many) = run("pool-cost-200", true, TENANTS, 256, true).await;
         let (Some(one), Some(many)) = (one, many) else {
             eprintln!("RSS is unavailable on this platform; nothing to record");
             return;
