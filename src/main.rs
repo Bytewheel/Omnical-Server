@@ -39,6 +39,17 @@ async fn main() -> Result<()> {
             cmd_guest_shares(guest_share_args, parse_config().await?).await
         }
         Command::Tenant(tenant_args) => cmd_tenants(tenant_args, parse_config().await?).await,
+        // §7.5 item 20a. The control plane is opened here so "unreadable" is one
+        // error rather than a loop that measures nothing and exits 0.
+        Command::TenantUsage(usage_args) => {
+            let config = parse_config().await?;
+            let control = rustical::tenancy::open_control_plane(&format!(
+                "sqlite://{}",
+                config.tenancy.control_db_url.trim_start_matches("file:")
+            ))
+            .await?;
+            rustical::commands::tenant_usage::cmd_tenant_usage(config, &control, usage_args).await
+        }
         Command::Backup(backup_args) => {
             cmd_backup(backup_args, parse_config().await?, &config_file)
                 .await

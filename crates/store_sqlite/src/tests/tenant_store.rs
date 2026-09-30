@@ -623,6 +623,7 @@ async fn the_control_plane_holds_no_calendar_data() {
     let expected = [
         "_sqlx_migrations",
         "control_admin_audit",
+        "control_tenant_usage",
         "platform_admins",
         "sqlite_sequence",
         "tenant_hosts",
@@ -631,11 +632,15 @@ async fn the_control_plane_holds_no_calendar_data() {
     assert_eq!(
         tables, expected,
         "the control plane holds the cross-tenant index, the audit trail, the admin \
-         credentials and nothing else"
+         credentials, the usage snapshots (§7.5 item 20a) and nothing else"
     );
     // And the §6.6 tables must be there: an absent audit trail would make every
     // other assertion in this file pass while row 33 is unimplemented.
-    for required in ["control_admin_audit", "platform_admins"] {
+    for required in [
+        "control_admin_audit",
+        "platform_admins",
+        "control_tenant_usage",
+    ] {
         assert!(
             tables.iter().any(|t| t == required),
             "the control plane must contain {required}; found {tables:?}"

@@ -265,6 +265,28 @@ pub trait TenantStore: Send + Sync + 'static {
     /// # Errors
     /// - [`Error::NotFound`] if the id is unknown.
     /// - [`Error::ReadOnly`] if the store does not implement tenancy.
+    /// Record a usage snapshot for a tenant (§7.5 item 20a).
+    ///
+    /// **Replaces** any previous snapshot for the tenant rather than appending,
+    /// so the table is bounded by the tenant count and not by uptime. History,
+    /// if it is ever wanted, belongs in a metrics exporter rather than in a
+    /// table somebody queries from a request path.
+    ///
+    /// Every count is nullable, and `None` means **not measured** — which is a
+    /// different fact from zero, and the difference between an honest panel and
+    /// one that tells a customer they are at their limit when nothing is known
+    /// about them.
+    async fn record_usage(&self, usage: &crate::tenant_usage::TenantUsage) -> Result<(), Error>;
+
+    /// The stored snapshot for one tenant, or `None` when it has never run.
+    async fn usage_for(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<crate::tenant_usage::TenantUsage>, Error>;
+
+    /// Every stored snapshot.
+    async fn all_usage(&self) -> Result<Vec<crate::tenant_usage::TenantUsage>, Error>;
+
     async fn set_quota(
         &self,
         _id: &TenantId,

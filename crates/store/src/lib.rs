@@ -19,6 +19,7 @@ mod subscription_store;
 pub mod synctoken;
 pub mod tenant;
 pub mod tenant_store;
+pub mod tenant_usage;
 
 #[cfg(test)]
 pub mod tests;

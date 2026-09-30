@@ -57,6 +57,7 @@ pub mod store_bundle;
 pub mod tenancy;
 pub mod tenant_overrides;
 pub mod tenant_telemetry;
+pub mod tenant_usage;
 // Shared with the frontend crate so the portal prints byte-identical
 // export URLs to the CLI (PLAN.md §17.8.4).
 pub use rustical_frontend::url_builder;
@@ -91,6 +92,9 @@ pub enum Command {
     Backup(commands::BackupArgs),
     /// §7.4: one archive per tenant, the payoff of C7.
     BackupAll(commands::backup::BackupAllArgs),
+    /// §7.5 item 20a: measure one tenant, or all of them, into the control plane.
+    #[command(about = "Measure tenant usage into the control plane (PLAN_DEPLOYMENTS.md §7.5)")]
+    TenantUsage(commands::tenant_usage::TenantUsageArgs),
     #[command(about = "Restore a backup archive, verifying it first (§8.4)")]
     Restore(commands::RestoreArgs),
     #[command(about = "Interactive first-run setup wizard (PLAN_DEPLOYMENTS.md §8.2)")]

@@ -278,6 +278,10 @@ struct AdminTenantPage {
     csrf: String,
     tenant: TenantRow,
     quota: Vec<(String, String)>,
+    /// §7.5 item 20a. Read from `control_tenant_usage` — one row in a store the
+    /// panel already holds open. **Not** from the tenant's database, and row 37a
+    /// is the test that makes that a property rather than an intention.
+    usage: Vec<(String, String)>,
     error: Option<String>,
 }
 
@@ -620,11 +624,23 @@ async fn tenant_page(
             Vec::new()
         }
     };
+    let usage = match panel.store.usage_for(tenant.id.as_str()).await {
+        Ok(snapshot) => usage_rows(snapshot.as_ref()),
+        Err(e) => {
+            // An unreadable usage table must not take the tenant page down: the
+            // operator came here to see the tenant, and an error page that
+            // hides the hostname because a *measurement* table is broken is a
+            // worse outcome than "not measured".
+            warn!(%e, "admin panel: could not read the usage snapshot");
+            usage_rows(None)
+        }
+    };
     AdminTenantPage {
         admin,
         csrf: session_csrf(&session).await,
         tenant: TenantRow::new(&tenant, hosts),
         quota,
+        usage,
         error: None,
     }
     .into_response()
@@ -647,6 +663,62 @@ fn quota_rows(quota: &TenantQuota) -> Vec<(String, String)> {
         ("Calendars".to_owned(), show(quota.calendars)),
         ("Storage (MiB)".to_owned(), show(quota.megabytes)),
     ]
+}
+
+/// Usage rows for the tenant page.
+///
+/// **"not measured" is not "0", and this function is where that is decided.** A
+/// usage figure rendered as zero tells a customer they are at their limit when
+/// nothing at all is known about them, and the failure is invisible: the number
+/// looks like a number. Every absent dimension renders as words.
+///
+/// `quota_rows` above uses "unlimited" for an absent *quota*, which is the
+/// opposite case and deliberately reads differently — a limit that is not set is
+/// a fact, and a measurement that was not taken is not.
+fn usage_rows(
+    snapshot: Option<&rustical_store::tenant_usage::TenantUsage>,
+) -> Vec<(String, String)> {
+    let Some(s) = snapshot else {
+        return vec![("Usage".to_owned(), "not measured yet".to_owned())];
+    };
+    let show =
+        |value: Option<i64>| value.map_or_else(|| "not measured".to_owned(), |v| v.to_string());
+    let mut rows = vec![
+        ("Principals used".to_owned(), show(s.principals)),
+        ("Calendars used".to_owned(), show(s.calendars)),
+        ("Address books used".to_owned(), show(s.addressbooks)),
+        ("Objects".to_owned(), show(s.object_count)),
+    ];
+    if let Some(bytes) = s.bytes_on_disk {
+        rows.push(("Storage".to_owned(), format_mib(bytes)));
+    } else {
+        rows.push(("Storage".to_owned(), "not measured".to_owned()));
+    }
+    rows.push(("Measured".to_owned(), s.measured_at.clone()));
+    if !s.is_measured() {
+        rows.push((
+            "Note".to_owned(),
+            "nothing has been counted for this tenant yet — these are not zeros".to_owned(),
+        ));
+    }
+    rows
+}
+
+/// Bytes as MiB, rounded, because the quota is in MiB and a panel showing bytes
+/// against a limit in MiB makes the reader do arithmetic.
+fn format_mib(bytes: i64) -> String {
+    const MIB: i64 = 1024 * 1024;
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a display value, not a count"
+    )]
+    let mib = (bytes / MIB) as f64;
+    let exact = bytes as f64 / MIB as f64;
+    if (mib - exact).abs() < 0.01 {
+        format!("{mib:.0} MiB")
+    } else {
+        format!("{exact:.2} MiB")
+    }
 }
 
 #[derive(Debug, Default, serde::Deserialize)]

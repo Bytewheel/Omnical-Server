@@ -190,6 +190,40 @@ async fn audit(
     Ok(())
 }
 
+/// One row of `control_tenant_usage`, as SQLite returns it.
+///
+/// A local struct rather than deriving `FromRow` onto
+/// [`TenantUsage`](rustical_store::tenant_usage::TenantUsage): the column names
+/// and the field names are the same, but keeping the row type local means the
+/// store's table layout and the public type can diverge without a migration
+/// silently changing what callers see.
+#[derive(Debug, sqlx::FromRow)]
+struct UsageRow {
+    tenant_id: String,
+    measured_at: String,
+    actor: String,
+    principals: Option<i64>,
+    calendars: Option<i64>,
+    addressbooks: Option<i64>,
+    bytes_on_disk: Option<i64>,
+    object_count: Option<i64>,
+}
+
+impl From<UsageRow> for rustical_store::tenant_usage::TenantUsage {
+    fn from(r: UsageRow) -> Self {
+        Self {
+            tenant_id: r.tenant_id,
+            measured_at: r.measured_at,
+            actor: r.actor,
+            principals: r.principals,
+            calendars: r.calendars,
+            addressbooks: r.addressbooks,
+            bytes_on_disk: r.bytes_on_disk,
+            object_count: r.object_count,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl TenantStore for SqliteTenantStore {
     #[instrument(skip(self, new_tenant))]
@@ -440,6 +474,75 @@ impl TenantStore for SqliteTenantStore {
     }
 
     #[instrument(skip(self))]
+    // ── usage snapshots (§7.5 item 20a) ────────────────────────────────────
+    //
+    // An UPSERT rather than insert-or-update in application code: the panel and
+    // the job can read and write this table, and two code paths doing
+    // "read then write" is a lost update waiting for a busy night. SQLite's
+    // `ON CONFLICT ... DO UPDATE` is one statement and one transaction.
+
+    async fn record_usage(
+        &self,
+        usage: &rustical_store::tenant_usage::TenantUsage,
+    ) -> Result<(), rustical_store::Error> {
+        sqlx::query(
+            "INSERT INTO control_tenant_usage \
+                (tenant_id, measured_at, actor, principals, calendars, addressbooks, \
+                 bytes_on_disk, object_count) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(tenant_id) DO UPDATE SET \
+                measured_at = excluded.measured_at, \
+                actor = excluded.actor, \
+                principals = excluded.principals, \
+                calendars = excluded.calendars, \
+                addressbooks = excluded.addressbooks, \
+                bytes_on_disk = excluded.bytes_on_disk, \
+                object_count = excluded.object_count",
+        )
+        .bind(&usage.tenant_id)
+        .bind(&usage.measured_at)
+        .bind(&usage.actor)
+        .bind(usage.principals)
+        .bind(usage.calendars)
+        .bind(usage.addressbooks)
+        .bind(usage.bytes_on_disk)
+        .bind(usage.object_count)
+        .execute(&self.pool)
+        .await
+        .map_err(Error::from)?;
+        Ok(())
+    }
+
+    async fn usage_for(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<rustical_store::tenant_usage::TenantUsage>, rustical_store::Error> {
+        let row = sqlx::query_as::<_, UsageRow>(
+            "SELECT tenant_id, measured_at, actor, principals, calendars, addressbooks, \
+                    bytes_on_disk, object_count \
+             FROM control_tenant_usage WHERE tenant_id = ?",
+        )
+        .bind(tenant_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::from)?;
+        Ok(row.map(Into::into))
+    }
+
+    async fn all_usage(
+        &self,
+    ) -> Result<Vec<rustical_store::tenant_usage::TenantUsage>, rustical_store::Error> {
+        let rows = sqlx::query_as::<_, UsageRow>(
+            "SELECT tenant_id, measured_at, actor, principals, calendars, addressbooks, \
+                    bytes_on_disk, object_count \
+             FROM control_tenant_usage ORDER BY tenant_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::from)?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     async fn set_quota(
         &self,
         id: &TenantId,

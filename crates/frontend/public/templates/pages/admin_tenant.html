@@ -1,13 +1,16 @@
 {% extends "layouts/admin.html" %}
 
 {#
-  One tenant, and its quota **limits** — never its usage.
+  One tenant, its quota **limits**, and its usage — read from a snapshot, never
+  from the tenant's database.
 
-  §6.6.6 draws that line explicitly: showing usage means counting rows in a
+  §6.6.6 drew that line explicitly: showing usage means counting rows in a
   tenant's store, which would be the first thing in the whole design to read
-  across the tenant boundary. A deferred `rustical tenant usage` job writes a
-  snapshot to the control plane, and this page reads that; the panel itself
-  never opens a tenant's database.
+  across the tenant boundary. So the crossing is done by a *job* on a schedule
+  (§7.5 item 20a) which writes one row into the control plane, and this page
+  reads that row. The panel still never opens a tenant's database — which is
+  what `tests/tenant_usage.rs`'s `the_panel_never_opens_a_tenant_database` pins
+  by making the store unreadable and asserting this page still renders.
 #}
 
 {% block title %}Omnical administration — {{ tenant.slug }}{% endblock %}
@@ -41,12 +44,27 @@
 
 <h2>Quota limits</h2>
 <p>
-  Limits only. Usage is deliberately not shown: measuring it would mean reading
-  a tenant's own database, and the admin panel never opens one.
+  Limits only. The usage figures below come from a scheduled snapshot, not from
+  reading this tenant's database — the admin panel never opens one.
 </p>
 <table>
   <tbody>
   {% for (label, value) in quota %}
+    <tr><th>{{ label }}</th><td>{{ value }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Usage</h2>
+{#
+  "not measured" is not "0", and the difference is the whole point of this
+  section. A zero here would tell a customer they are at their limit when nothing
+  is known about them, and the failure is invisible because the number looks like
+  a number. `usage_rows` in admin.rs decides it, and the wording is asserted.
+#}
+<table class="usage">
+  <tbody>
+  {% for (label, value) in usage %}
     <tr><th>{{ label }}</th><td>{{ value }}</td></tr>
   {% endfor %}
   </tbody>
