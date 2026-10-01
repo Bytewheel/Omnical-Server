@@ -1,3 +1,4 @@
+use crate::calendar::prop::SupportedCalendarComponentSet;
 use axum::{
     body::Body,
     response::{IntoResponse, Response},
@@ -15,6 +16,13 @@ pub enum Precondition {
     #[error("calendar-timezone error: {0}")]
     #[xml(ns = "rustical_dav::namespace::NS_CALDAV")]
     CalendarTimezone(&'static str),
+    /// RFC 4791 §5.3.2: the object being written is not one of the types in
+    /// the target calendar's `CALDAV:supported-calendar-component-set`. The
+    /// precondition element repeats the set the calendar does accept, so the
+    /// client can pick a compatible one instead of guessing.
+    #[error("supported-calendar-component-set: {0} not supported")]
+    #[xml(ns = "rustical_dav::namespace::NS_CALDAV")]
+    SupportedCalendarComponentSet(SupportedCalendarComponentSet),
 }
 
 impl IntoResponse for Precondition {

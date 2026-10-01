@@ -1,4 +1,8 @@
-use super::{ResponseExtractString, calendar::mkcalendar_template, get_app};
+use super::{
+    ResponseExtractString,
+    calendar::{mkcalendar_template, mkcalendar_template_with_components},
+    get_app,
+};
 use axum::body::Body;
 use headers::{Authorization, HeaderMapExt};
 use http::{Request, StatusCode};
@@ -215,4 +219,228 @@ async fn test_put_special_characters(
         let body = response.extract_string().await;
         similar_asserts::assert_eq!(body.replace("\r", ""), ical);
     }
+}
+
+/// Create a calendar via MKCALENDAR with an explicit component set.
+async fn mkcalendar_with_components(
+    app: &axum::Router,
+    url: &str,
+    meta: &CalendarMetadata,
+    components: &[&str],
+) {
+    let mut request = Request::builder()
+        .method("MKCALENDAR")
+        .uri(url)
+        .body(Body::from(mkcalendar_template_with_components(
+            meta, components,
+        )))
+        .unwrap();
+    request
+        .headers_mut()
+        .typed_insert(Authorization::basic("user", "pass"));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+/// PUT an ics file at `{url}/{object_id}.ics` and return the response.
+async fn put_ics(
+    app: &axum::Router,
+    url: &str,
+    object_id: &str,
+    ical: &str,
+) -> axum::response::Response {
+    let mut request = Request::builder()
+        .method("PUT")
+        .uri(format!("{url}/{object_id}.ics"))
+        .header("If-None-Match", "*")
+        .header("Content-Type", "text/calendar")
+        .body(Body::from(ical.to_owned()))
+        .unwrap();
+    request
+        .headers_mut()
+        .typed_insert(Authorization::basic("user", "pass"));
+    app.clone().oneshot(request).await.unwrap()
+}
+
+/// RFC 4791 §5.3.2: a VJOURNAL PUT into an event-only calendar is rejected
+/// with 403 and a `CALDAV:supported-calendar-component-set` precondition
+/// naming the types the calendar does accept.
+#[rstest]
+#[tokio::test]
+async fn test_put_component_not_supported(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    let app = get_app(context.clone());
+
+    let calendar_meta = CalendarMetadata {
+        displayname: Some("Calendar".to_string()),
+        description: Some("Description".to_string()),
+        color: Some("#00FF00".to_string()),
+        order: 0,
+    };
+    let url = "/caldav/principal/user/calendar";
+    mkcalendar_with_components(&app, url, &calendar_meta, &["VEVENT"]).await;
+
+    let journal = include_str!("resources/ical_journal.ics");
+    let response = put_ics(&app, url, "journal-entry", journal).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = response.extract_string().await;
+    insta::assert_snapshot!(body, @r#"
+    <?xml version="1.0" encoding="utf-8"?>
+    <error xmlns="DAV:">
+        <supported-calendar-component-set xmlns="urn:ietf:params:xml:ns:caldav">
+            <comp xmlns="urn:ietf:params:xml:ns:caldav" name="VEVENT"/>
+        </supported-calendar-component-set>
+    </error>
+    "#);
+}
+
+/// The same calendar accepts the components it does declare.
+#[rstest]
+#[tokio::test]
+async fn test_put_component_supported(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    let app = get_app(context.clone());
+
+    let calendar_meta = CalendarMetadata {
+        displayname: Some("Calendar".to_string()),
+        description: Some("Description".to_string()),
+        color: Some("#00FF00".to_string()),
+        order: 0,
+    };
+    let url = "/caldav/principal/user/calendar";
+    mkcalendar_with_components(&app, url, &calendar_meta, &["VEVENT", "VJOURNAL"]).await;
+
+    let journal = include_str!("resources/ical_journal.ics");
+    let response = put_ics(&app, url, "journal-entry", journal).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // and it round-trips
+    let mut request = Request::builder()
+        .method("GET")
+        .uri(format!("{url}/journal-entry.ics"))
+        .body(Body::empty())
+        .unwrap();
+    request
+        .headers_mut()
+        .typed_insert(Authorization::basic("user", "pass"));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.extract_string().await;
+    assert!(
+        body.contains("BEGIN:VJOURNAL") && body.contains("SUMMARY:Staff meeting minutes"),
+        "journal did not round-trip: {body}"
+    );
+}
+
+/// The rejected object must not have been stored: a subsequent PUT of a
+/// *supported* component at the same URI still succeeds (If-None-Match: *
+/// would fail if the first PUT had written anything).
+#[rstest]
+#[tokio::test]
+async fn test_put_component_not_supported_writes_nothing(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    let app = get_app(context.clone());
+
+    let calendar_meta = CalendarMetadata {
+        displayname: Some("Calendar".to_string()),
+        description: Some("Description".to_string()),
+        color: Some("#00FF00".to_string()),
+        order: 0,
+    };
+    let url = "/caldav/principal/user/calendar";
+    mkcalendar_with_components(&app, url, &calendar_meta, &["VEVENT"]).await;
+
+    let journal = include_str!("resources/ical_journal.ics");
+    let response = put_ics(&app, url, "shared-id", journal).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let event = include_str!("resources/ical_thunderbird.ics");
+    let response = put_ics(&app, url, "shared-id", event).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "the rejected journal must not occupy the URI"
+    );
+}
+
+/// An entry stored before its component type was removed from the calendar's
+/// set stays editable — otherwise dropping VJOURNAL would freeze every entry
+/// already written.
+#[rstest]
+#[tokio::test]
+async fn test_overwrite_survives_component_removal(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    let app = get_app(context.clone());
+
+    let calendar_meta = CalendarMetadata {
+        displayname: Some("Calendar".to_string()),
+        description: Some("Description".to_string()),
+        color: Some("#00FF00".to_string()),
+        order: 0,
+    };
+    let url = "/caldav/principal/user/calendar";
+    mkcalendar_with_components(&app, url, &calendar_meta, &["VEVENT", "VJOURNAL"]).await;
+
+    let journal = include_str!("resources/ical_journal.ics");
+    let response = put_ics(&app, url, "journal-entry", journal).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // PROPPATCH the component set down to VEVENT only
+    let mut request = Request::builder()
+        .method("PROPPATCH")
+        .uri(url)
+        .header("Content-Type", "application/xml")
+        .body(Body::from(
+            r#"<propertyupdate xmlns="DAV:" xmlns:CAL="urn:ietf:params:xml:ns:caldav">
+                <set>
+                    <prop>
+                        <CAL:supported-calendar-component-set>
+                            <CAL:comp name="VEVENT"/>
+                        </CAL:supported-calendar-component-set>
+                    </prop>
+                </set>
+            </propertyupdate>"#,
+        ))
+        .unwrap();
+    request
+        .headers_mut()
+        .typed_insert(Authorization::basic("user", "pass"));
+    let response = app.clone().oneshot(request).await.unwrap();
+    // 207 Multi-Status: WebDAV reports per-property results, even when all
+    // properties applied.
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+
+    // The already-stored journal can still be overwritten …
+    let edited = journal.replace("Staff meeting minutes", "Staff meeting minutes (edited)");
+    let mut request = Request::builder()
+        .method("PUT")
+        .uri(format!("{url}/journal-entry.ics"))
+        .header("Content-Type", "text/calendar")
+        .body(Body::from(edited))
+        .unwrap();
+    request
+        .headers_mut()
+        .typed_insert(Authorization::basic("user", "pass"));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // … but a *new* journal is still refused.
+    let response = put_ics(&app, url, "another-entry", journal).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }

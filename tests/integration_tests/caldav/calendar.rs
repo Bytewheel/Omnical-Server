@@ -8,14 +8,29 @@ use rustical_store::{CalendarMetadata, calendar_store::CalendarReadStore};
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
 use tower::ServiceExt;
 
-pub fn mkcalendar_template(
-    CalendarMetadata {
+/// An MKCALENDAR body declaring exactly `components` (RFC 4791 §5.3.1). Tests
+/// that exercise the component-set enforcement need a calendar that does *not*
+/// accept the component they PUT.
+pub fn mkcalendar_template_with_components(meta: &CalendarMetadata, components: &[&str]) -> String {
+    let comps = components
+        .iter()
+        .map(|comp| format!("<CAL:comp name=\"{comp}\"/>"))
+        .collect::<Vec<_>>()
+        .join("\n                ");
+    mkcalendar_template_impl(meta, &comps)
+}
+
+pub fn mkcalendar_template(meta: &CalendarMetadata) -> String {
+    mkcalendar_template_with_components(meta, &["VEVENT", "VTODO", "VJOURNAL"])
+}
+
+fn mkcalendar_template_impl(meta: &CalendarMetadata, components: &str) -> String {
+    let CalendarMetadata {
         displayname,
         order: _order,
         description,
         color,
-    }: &CalendarMetadata,
-) -> String {
+    } = meta;
     format!(
         r#"
 <?xml version='1.0' encoding='UTF-8' ?>
@@ -30,9 +45,7 @@ pub fn mkcalendar_template(
             <CAL:calendar-description>{description}</CAL:calendar-description>
             <n0:calendar-color xmlns:n0="http://apple.com/ns/ical/">{color}</n0:calendar-color>
             <CAL:supported-calendar-component-set>
-                <CAL:comp name="VEVENT"/>
-                <CAL:comp name="VTODO"/>
-                <CAL:comp name="VJOURNAL"/>
+                {components}
             </CAL:supported-calendar-component-set>
             <CAL:calendar-timezone><![CDATA[BEGIN:VCALENDAR
 PRODID:-//Example Corp.//CalDAV Client//EN

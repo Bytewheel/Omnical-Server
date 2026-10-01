@@ -1,0 +1,12 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Example Corp.//CalDAV Client//EN
+BEGIN:VJOURNAL
+UID:19970901T130000Z-123405@example.com
+DTSTAMP:19970901T130000Z
+DTSTART;VALUE=DATE:19970901
+SUMMARY:Staff meeting minutes
+DESCRIPTION:1. Staff meeting: project plans were reviewed.
+2. Telephone Conference: sales representative called.
+END:VJOURNAL
+END:VCALENDAR

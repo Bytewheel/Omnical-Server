@@ -369,6 +369,12 @@ struct CalendarPage {
     /// The same URL with the `webcal://` scheme — display variant only, the
     /// stored token keeps working over plain https (§17.15).
     subscribe_url_webcal: Option<String>,
+    /// Whether this calendar declares `VJOURNAL` in its
+    /// `CALDAV:supported-calendar-component-set`. Gates the journaling
+    /// client instructions: the server refuses a journal PUT into a calendar
+    /// that does not declare the type (RFC 4791 §5.3.2), so the setup steps
+    /// only apply when the calendar accepts journals.
+    supports_journal: bool,
 }
 
 impl DefaultLayoutData for CalendarPage {
@@ -405,12 +411,16 @@ pub async fn route_calendar<CS: CalendarStore>(
         .as_ref()
         .map(|s| export_url(&base_url, &s.token, s.kind));
     let subscribe_url_webcal = subscribe_url.as_deref().map(webcal_variant);
+    let supports_journal = calendar
+        .components
+        .contains(&rustical_ical::CalendarObjectType::Journal);
     Ok(CalendarPage {
         calendar,
         user,
         caldav_url: format!("{base_url}/caldav"),
         subscribe_url,
         subscribe_url_webcal,
+        supports_journal,
     }
     .into_response())
 }

@@ -93,19 +93,16 @@ pub async fn put_event<C: CalendarStore>(
         .get(http::header::USER_AGENT)
         .and_then(|val| val.to_str().ok());
 
-    // Fetch the previous object for the precondition checks below and for
-    // implicit scheduling (it compares old vs. new attendees)
-    let existing = if if_match.is_some() || if_none_match.is_some() || scheduler.is_some() {
-        match cal_store
-            .get_object(&principal, &calendar_id, &object_id, false)
-            .await
-        {
-            Ok(existing) => Some(existing),
-            Err(rustical_store::Error::NotFound) => None,
-            Err(err) => Err(err)?,
-        }
-    } else {
-        None
+    // Fetch the previous object for the precondition checks below, for the
+    // RFC 4791 §5.3.2 component-set check, and for implicit scheduling (it
+    // compares old vs. new attendees).
+    let existing = match cal_store
+        .get_object(&principal, &calendar_id, &object_id, false)
+        .await
+    {
+        Ok(existing) => Some(existing),
+        Err(rustical_store::Error::NotFound) => None,
+        Err(err) => Err(err)?,
     };
 
     if if_match.is_some() || if_none_match.is_some() {
@@ -166,6 +163,15 @@ pub async fn put_event<C: CalendarStore>(
         object = import(&body)?;
     }
 
+    check_component_supported(
+        cal_store.as_ref(),
+        &principal,
+        &calendar_id,
+        &object,
+        existing.as_ref(),
+    )
+    .await?;
+
     let etag = object.get_etag();
     // The scheduler must see the final (normalised + stamped) form — the
     // stored copy is the regenerated `get_ics()` of the object below.
@@ -196,6 +202,39 @@ pub async fn put_event<C: CalendarStore>(
         HeaderValue::from_str(&etag).expect("Contains no invalid characters"),
     );
     Ok((StatusCode::CREATED, headers).into_response())
+}
+
+/// RFC 4791 §5.3.2: refuse an object whose component type the target
+/// calendar does not declare in `CALDAV:supported-calendar-component-set`.
+///
+/// Without this the server would silently store (say) a `VJOURNAL` in an
+/// event-only calendar — a combination no client asked for and none can
+/// interpret, since such clients never sync a journal-less collection's
+/// contents expecting entries.
+///
+/// Overwriting an object already stored as the *same* component type stays
+/// allowed even if the type was later removed from the set, so un-ticking
+/// `VJOURNAL` never freezes entries that are already on the server.
+async fn check_component_supported<C: CalendarStore>(
+    cal_store: &C,
+    principal: &str,
+    calendar_id: &str,
+    object: &CalendarObject,
+    existing: Option<&CalendarObject>,
+) -> Result<(), Error> {
+    let object_type = object.get_object_type();
+    if existing.is_some_and(|old| old.get_object_type() == object_type) {
+        return Ok(());
+    }
+    let calendar = cal_store
+        .get_calendar(principal, calendar_id, false)
+        .await?;
+    if calendar.components.contains(&object_type) {
+        return Ok(());
+    }
+    Err(Error::PreconditionFailed(
+        Precondition::SupportedCalendarComponentSet(calendar.components.into()),
+    ))
 }
 
 /// Omnical: default the organizer to the event creator. khal-lineage

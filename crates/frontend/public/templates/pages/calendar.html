@@ -56,4 +56,39 @@
     </ul>
   </div>
 </details>
+
+{% if supports_journal %}
+<details class="client-help" open>
+  <summary>Journaling — notes &amp; diaries on this calendar</summary>
+  <div class="client-help-body">
+    <p class="description">This calendar supports <code>VJOURNAL</code> entries: dated text notes such as meeting minutes, a work log, or a private diary. A journal entry occupies no time on a calendar and never turns into a meeting invitation, so it won't show up in free/busy or attendee lists.</p>
+    <h4>Android — jtx Board (the app that supports journals)</h4>
+    <ol>
+      <li>Install <strong>jtx Board</strong>, and install <strong>DAVx⁵</strong> if you don't have it (jtx Board syncs through it).</li>
+      <li>In DAVx⁵ → CalDAV tab → tap your account → check this calendar to mark it for sync. This calendar already declares <code>VJOURNAL</code>, so DAVx⁵ will pick it up as a journal-capable collection.</li>
+      <li>Run a sync, then open jtx Board. This calendar appears under its own section, and you can create <em>Journals</em> (with a date) and <em>Notes</em> (no date) there.</li>
+      <li>In jtx Board you can also <strong>link</strong> a note or journal to a task with <code>RELATED-TO</code> — useful for a meeting's minutes next to the follow-up tasks.</li>
+    </ol>
+    <h4>Linux desktop — Evolution</h4>
+    <ol>
+      <li>Evolution → File → New → Memo List…</li>
+      <li>Choose <strong>CalDAV</strong> as the type, then paste the calendar URL: <code>{{ caldav_url }}/{{ calendar.principal }}/{{ calendar.id }}/</code></li>
+      <li>Enter your username and the same app token you use for the calendar, then click Find Calendars to let Evolution pick the URL, and click OK.</li>
+      <li>Evolution stores memos as <code>VJOURNAL</code>, so entries you write in the Memo List appear in your other devices' journal apps and vice versa.</li>
+    </ol>
+    <h4>What won't work</h4>
+    <ul>
+      <li><strong>Apple Calendar (iPhone/iPad/Mac), Google Calendar, Outlook</strong> — none of them implement <code>VJOURNAL</code>. They will sync this calendar's events and tasks fine and simply ignore journal entries. Entries written in jtx Board or Evolution stay on the server, they just won't display in these apps.</li>
+      <li><strong>Thunderbird</strong> — supports <code>VEVENT</code> and <code>VTODO</code> but not <code>VJOURNAL</code>, so journals won't appear there either.</li>
+      <li><strong>The read-only subscribe link</strong> is a plain ICS feed and works in any app that accepts one, but clients that don't understand <code>VJOURNAL</code> still won't show the entries.</li>
+    </ul>
+    <h4>Importing and exporting</h4>
+    <ul>
+      <li>Use <strong>Import calendar</strong> on the <a href="/frontend/user/{{ user.id }}/calendar">Calendars tab</a> to upload an <code>.ics</code> file containing journal entries — the calendar will pick up <code>VJOURNAL</code> support from the file.</li>
+      <li>The <strong>Download</strong> button on the Calendars tab exports every entry, journals included, in one <code>.ics</code> file.</li>
+      <li>Unchecking <code>VJOURNAL</code> in the calendar's Edit form stops new journal entries from being written. Entries already stored stay readable and can still be edited.</li>
+    </ul>
+  </div>
+</details>
+{% endif %}
 {%endblock %}

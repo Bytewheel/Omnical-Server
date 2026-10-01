@@ -37,6 +37,15 @@ impl From<SupportedCalendarComponentSet> for Vec<CalendarObjectType> {
     }
 }
 
+impl std::fmt::Display for SupportedCalendarComponentSet {
+    /// Human-readable form for error messages: the `CALDAV:comp name=`
+    /// values joined by commas.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<_> = self.comp.iter().map(|comp| comp.name.as_str()).collect();
+        f.write_str(&names.join(", "))
+    }
+}
+
 #[derive(Debug, Clone, XmlSerialize, XmlDeserialize, PartialEq, Eq, From, Into)]
 pub struct SupportedCollation(#[xml(ty = "text")] pub TextCollation);
 
