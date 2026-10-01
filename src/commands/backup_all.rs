@@ -70,9 +70,26 @@ impl AllTenantsReport {
 /// Resolved once and passed in rather than re-derived, so the job and the server
 /// cannot disagree about where a tenant's file lives — which is the failure that
 /// would produce a backup of the wrong file.
+///
+/// **There is no local copy of the store path here, and there used to be.** This
+/// function used to build `{data_root}/{tenant_id}.sqlite3`, while the store the
+/// server actually opens is `{data_root}/tenants/{tenant_id}/db.sqlite3`
+/// (`TenancyConfig::tenant_db_path`). That is precisely the mistake
+/// `NEXT_AGENT_ITEM14_PANEL.md` warns about under "Decisions taken" — the tenant
+/// store is `data_root/tenants/{uuid}/db.sqlite3`, not `data_root/{slug}.sqlite3`
+/// — and it was made a second time, by someone who had read that section.
+///
+/// The symptom on the deployed appliance was not a crash. It was
+/// `FAIL omnical: no database at /usr/local/share/rustical/<uuid>.sqlite3`,
+/// reported for a tenant whose data was sitting right there under
+/// `tenants/<uuid>/db.sqlite3` — which, combined with bug 1, is why the
+/// appliance had **no working backup path at all** and the panel's Data section
+/// listed zero restore points.
 #[must_use]
 pub fn tenant_store_path(data_root: &Path, tenant_id: &str) -> PathBuf {
-    data_root.join(format!("{tenant_id}.sqlite3"))
+    PathBuf::from(crate::config::TenancyConfig::tenant_db_path(
+        data_root, tenant_id,
+    ))
 }
 
 /// Back up every tenant, one archive each.

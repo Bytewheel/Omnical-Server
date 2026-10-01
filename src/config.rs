@@ -194,6 +194,149 @@ pub struct SqliteDataStoreConfig {
     pub skip_broken: bool,
 }
 
+impl SqliteDataStoreConfig {
+    /// **The one place that turns `db_url` into a filesystem path.**
+    ///
+    /// Every caller that needs the file rather than a connection needs this:
+    /// `rustical backup`/`restore`/`upgrade`, the setup wizard's default data
+    /// directory, and the appliance panel. Two copies of this question is how
+    /// `file:` came to be handled correctly in one of them (`resolve_database_path`
+    /// refused it) and wrongly in the other (`sqlite_db_path` returned
+    /// `"file:/usr/local/share/rustical/db.sqlite3"` as if the colon were part
+    /// of a filename), which on the deployed appliance means `backup` reports
+    /// "nothing to back up" while the wizard would have opened a second,
+    /// differently-named database. One definition, so it cannot drift.
+    ///
+    /// # Why sqlx is not enough on its own
+    ///
+    /// `SqliteConnectOptions::get_filename` strips a `sqlite://` or `sqlite:`
+    /// scheme, splits off the query string and percent-decodes — all of which we
+    /// want, because the server opens the URL through the very same parse and a
+    /// hand-rolled prefix chop would disagree with it about `%20` in a filename.
+    ///
+    /// What it does *not* strip is `file:`, because `file:` is not a scheme sqlx
+    /// knows: it falls through into the filename whole. SQLite itself then
+    /// consumes it, because it passes the filename to `sqlite3_open_v2` with URI
+    /// handling on. Measured against sqlx 0.9 and SQLite, with the file each URL
+    /// actually created:
+    ///
+    /// ```text
+    /// file:/srv/db.sqlite3        sqlx filename = "file:/srv/db.sqlite3"   opens /srv/db.sqlite3
+    /// file:///srv/db.sqlite3      sqlx filename = "file:///srv/db.sqlite3" opens /srv/db.sqlite3
+    /// file:/srv/a%20b.db          sqlx filename = "file:/srv/a b.db"        opens /srv/a b.db
+    /// sqlite:/srv/db.sqlite3      sqlx filename = "/srv/db.sqlite3"         opens /srv/db.sqlite3
+    /// ```
+    ///
+    /// So the `file:` prefix is stripped **here**, after sqlx has done the part it
+    /// is good at. Stripping it before parsing would break the percent-decoding
+    /// above, and ignoring it is the bug this function exists to remove.
+    ///
+    /// # Errors
+    ///
+    /// `Err` with the reason, never with a guessed path:
+    ///
+    /// - `db_url` does not parse as a SQLite URL at all;
+    /// - it names an in-memory database (`:memory:`, `?mode=memory`). sqlx
+    ///   invents a synthetic `file:sqlx-in-memory-N` filename for those; checked
+    ///   *before* the `file:` strip, or the caller is handed a path that does not
+    ///   exist under a name sqlx made up;
+    /// - the `file:` form has an authority (`file://host/path`), which SQLite
+    ///   rejects outright with "invalid uri authority" — reported here rather
+    ///   than turned into a plausible-looking relative path;
+    /// - what remains is empty, still carries a `:`, or is not UTF-8. A surviving
+    ///   colon means the scheme is somebody else's (`postgres://`, `mysql://` —
+    ///   both of which sqlx happily parses and hands back whole), and that is
+    ///   exactly the case the old guard in `resolve_database_path` was written
+    ///   for. It is kept, and it now fires for the right reason.
+    pub fn database_file(&self) -> Result<PathBuf, &'static str> {
+        let options: sqlx::sqlite::SqliteConnectOptions = self
+            .db_url
+            .parse()
+            .map_err(|_| "data_store.sqlite.db_url is not a usable SQLite URL")?;
+
+        // sqlx has no public getter for `in_memory`, and its marker is a
+        // filename, so ask the URL the same way sqlx's parser does rather than
+        // pattern-matching `sqlx-in-memory-`. `tests/config_db_url.rs` pins this
+        // against sqlx itself, so a sqlx that changes its mind fails the build
+        // rather than shipping a wrong path.
+        if names_an_in_memory_database(&self.db_url) {
+            return Err("data_store.sqlite.db_url is an in-memory database");
+        }
+
+        let raw = options
+            .get_filename()
+            .to_str()
+            .ok_or("data_store.sqlite.db_url is not valid UTF-8")?;
+
+        // Not a scheme sqlx strips, so it arrives intact. URI schemes are
+        // case-insensitive; sqlx's own `trim_start_matches` is not, which is
+        // another reason this is not delegated.
+        //
+        // The `//` handling is scoped to the `file:` branch on purpose: only a
+        // URL with a scheme has an authority component. A path handed to SQLite
+        // directly may well start with two slashes (`sqlite:////srv/db` reduces
+        // to `//srv/db` above), and that is an ordinary Linux path, not a host.
+        let path = match strip_prefix_ignore_ascii_case(raw, "file:") {
+            Some(rest) => match rest.strip_prefix("//") {
+                // `file:///x` is the empty authority plus an absolute path.
+                Some(after_authority) => match after_authority.find('/') {
+                    Some(0) => after_authority,
+                    _ => {
+                        return Err(
+                            "data_store.sqlite.db_url names a file:// host, which SQLite rejects",
+                        );
+                    }
+                },
+                None => rest,
+            },
+            None => raw,
+        };
+
+        if path.is_empty() {
+            return Err("data_store.sqlite.db_url names no file");
+        }
+        if path.contains(':') {
+            return Err(
+                "data_store.sqlite.db_url is not a file path — it is another backend's URL",
+            );
+        }
+        if path.contains('\0') {
+            return Err("data_store.sqlite.db_url contains a NUL byte");
+        }
+        Ok(PathBuf::from(path))
+    }
+}
+
+/// `true` when `db_url` is one of the spellings sqlx turns into a purely
+/// in-memory database, and therefore names no file.
+///
+/// Deliberately mirrors `sqlx_sqlite`'s parser rather than inspecting
+/// `get_filename()`: the parser is what decides, and its rules are small and
+/// explicit — `:memory:` as the whole database part, or `mode=memory` in the
+/// query.
+fn names_an_in_memory_database(db_url: &str) -> bool {
+    let rest = db_url
+        .trim_start()
+        .trim_start_matches("sqlite://")
+        .trim_start_matches("sqlite:");
+    let mut parts = rest.splitn(2, '?');
+    let database = parts.next().unwrap_or_default();
+    if database == ":memory:" {
+        return true;
+    }
+    parts.next().is_some_and(|params| {
+        params
+            .split('&')
+            .any(|pair| pair == "mode=memory" || pair == "mode=memory%20")
+    })
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = value.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &value[prefix.len()..])
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
@@ -533,14 +676,67 @@ impl TenancyConfig {
     /// The **id**, not the slug: a slug can be renamed when a customer rebrands,
     /// and renaming a directory that a running server has open is a different
     /// class of problem from renaming a row.
+    ///
+    /// **No `self`, on purpose.** The shape depends on nothing in the
+    /// configuration, and taking `&self` invited the specific bug this had: a
+    /// caller that only had a `data_root` in hand had to reach for a
+    /// `TenancyConfig` it did not otherwise need, and two of them (`backup-all`
+    /// and the usage job) instead wrote their own `{data_root}/{id}.sqlite3` —
+    /// a second answer, wrong, in a file the server never reads. So the deployed
+    /// appliance's `backup-all` reported `no database at
+    /// /usr/local/share/rustical/<uuid>.sqlite3` for a tenant whose data was
+    /// sitting right there under `tenants/<uuid>/db.sqlite3`.
+    ///
+    /// Four definitions of this path is what it took to get that wrong: this
+    /// one, `ensure_tenant_store_dir` (which the server actually uses, and which
+    /// now calls this), and the two wrong copies, both now deleted.
     #[must_use]
-    pub fn tenant_db_path(&self, data_root: &std::path::Path, tenant_id: &str) -> String {
+    pub fn tenant_db_path(data_root: &std::path::Path, tenant_id: &str) -> String {
         data_root
             .join("tenants")
             .join(tenant_id)
             .join("db.sqlite3")
             .to_string_lossy()
             .into_owned()
+    }
+
+    /// The directory holding a tenant's store, created if absent.
+    ///
+    /// §3.4 writes the convention as `<data_root>/tenants/<tenant_id>/db.sqlite3`,
+    /// and the missing half of that sentence is that **SQLite will not create
+    /// the directory**. `create_db_pool` sets `create_if_missing(true)`, which
+    /// creates a *file*, not the two directories above it — so without this, the
+    /// very first request for a brand-new tenant fails with
+    /// `unable to open database file` (SQLite code 14) and every subsequent one
+    /// fails the same way. A tenant that cannot serve is worse than a tenant
+    /// that does not exist, because the 500 looks like our bug rather than a
+    /// missing `mkdir`.
+    ///
+    /// This is the copy the **server** uses, and it now takes its filename from
+    /// `tenant_db_path` rather than joining `db.sqlite3` itself, so the layout
+    /// has exactly one definition.
+    ///
+    /// `create_dir_all`, not `create_dir`, because the parent may not exist on
+    /// a first install.
+    ///
+    /// # Errors
+    /// The `io::Error` from `create_dir_all`, with the path in the message.
+    pub fn ensure_tenant_store_dir(
+        &self,
+        data_root: &std::path::Path,
+        tenant_id: &TenantId,
+    ) -> Result<std::path::PathBuf, String> {
+        let dir = data_root.join("tenants").join(tenant_id.as_str());
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            format!(
+                "could not create the store directory {}: {e}",
+                dir.display()
+            )
+        })?;
+        Ok(std::path::PathBuf::from(Self::tenant_db_path(
+            data_root,
+            tenant_id.as_str(),
+        )))
     }
 
     /// Where tenant store files live: `[tenancy] data_root`, else the directory
@@ -592,38 +788,6 @@ impl TenancyConfig {
             || Err(format!("could not derive a tenant data_root from {path}")),
             |parent| Ok(parent.to_path_buf()),
         )
-    }
-
-    /// Create a tenant's store directory and return the path to its database.
-    ///
-    /// §3.4 writes the convention as `<data_root>/tenants/<tenant_id>/db.sqlite3`,
-    /// and the missing half of that sentence is that **SQLite will not create
-    /// the directory**. `create_db_pool` sets `create_if_missing(true)`, which
-    /// creates a *file*, not the two directories above it — so without this, the
-    /// very first request for a brand-new tenant fails with
-    /// `unable to open database file` (SQLite code 14) and every subsequent one
-    /// fails the same way. A tenant that cannot serve is worse than a tenant
-    /// that does not exist, because the 500 looks like our bug rather than a
-    /// missing `mkdir`.
-    ///
-    /// `create_dir_all`, not `create_dir`, because the parent may not exist on a
-    /// first install.
-    ///
-    /// # Errors
-    /// The `io::Error` from `create_dir_all`, with the path in the message.
-    pub fn ensure_tenant_store_dir(
-        &self,
-        data_root: &std::path::Path,
-        tenant_id: &TenantId,
-    ) -> Result<std::path::PathBuf, String> {
-        let dir = data_root.join("tenants").join(tenant_id.as_str());
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            format!(
-                "could not create the store directory {}: {e}",
-                dir.display()
-            )
-        })?;
-        Ok(dir.join("db.sqlite3"))
     }
 
     /// Reject a tenancy configuration that cannot work, with a message that
@@ -917,15 +1081,12 @@ impl Config {
         }
     }
 
-    /// The SQLite file this config points at, or `None` for an in-memory
-    /// database. `db_url` may be a `sqlite://` URL with options, so it is
-    /// parsed the same way the server parses it rather than string-matched.
+    /// The SQLite file this config points at, or `None` when `db_url` names no
+    /// file at all (an in-memory database, or a URL some other backend owns).
     #[must_use]
     pub fn sqlite_db_path(&self) -> Option<std::path::PathBuf> {
-        let DataStoreConfig::Sqlite(SqliteDataStoreConfig { db_url, .. }) = &self.data_store;
-        let options: sqlx::sqlite::SqliteConnectOptions = db_url.parse().ok()?;
-        let path = options.get_filename().to_path_buf();
-        (!path.as_os_str().is_empty()).then_some(path)
+        let DataStoreConfig::Sqlite(sqlite) = &self.data_store;
+        sqlite.database_file().ok()
     }
 
     /// The appliance panel's paths, resolved, or a refusal naming what to set.

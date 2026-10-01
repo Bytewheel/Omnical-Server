@@ -10,8 +10,33 @@ use std::path::PathBuf;
 use rustical::commands::backup_all::{
     AllTenantsReport, TenantOutcome, back_up_all_tenants, summarise, tenant_store_path,
 };
+use rustical::config::TenancyConfig;
 use rustical_store::tenant_store::TenantStore;
 use rustical_store_sqlite::SqliteTenantStore;
+
+/// Create a tenant store **the way the server does**.
+///
+/// The layout used to have four definitions and two of them were wrong, so a
+/// fixture that built its own path would have gone on passing (or failing) for
+/// reasons that had nothing to do with the code under test. Going through
+/// `ensure_tenant_store_dir` means this file cannot disagree with production
+/// about where a tenant's database lives — and it creates the directory, which
+/// the flat `{data_root}/{id}.sqlite3` layout never needed and the real one
+/// always does.
+async fn create_tenant_store(
+    config: &TenancyConfig,
+    data_root: &std::path::Path,
+    id: &rustical_store::tenant::TenantId,
+) -> PathBuf {
+    let path = config
+        .ensure_tenant_store_dir(data_root, id)
+        .expect("the tenant store directory is created");
+    let pool = rustical_store_sqlite::create_db_pool(&format!("sqlite://{}", path.display()), true)
+        .await
+        .expect("a tenant store");
+    pool.close().await;
+    path
+}
 
 fn report(entries: &[(&str, Option<&str>)]) -> AllTenantsReport {
     AllTenantsReport {
@@ -74,16 +99,40 @@ fn an_empty_control_plane_is_a_success_with_nothing_in_it() {
 
 // ── the paths ───────────────────────────────────────────────────────────────
 
+/// §3.4's convention, and the bug this test used to get backwards.
+///
+/// The store is `<data_root>/tenants/<id>/db.sqlite3`. This command once built
+/// `<data_root>/<id>.sqlite3` instead — a second definition of a fact that
+/// already had an owner — and on the deployed appliance `backup-all` reported
+/// `no database at /usr/local/share/rustical/<uuid>.sqlite3` for a tenant whose
+/// data was sitting right there. This is the test that now pins the real layout,
+/// and it asserts the shape rather than a path built by the code under test, so
+/// it cannot agree with a regression by construction.
 #[test]
-fn a_tenant_store_path_is_the_id_under_the_data_root() {
-    // §3.4: the file name is the tenant **id**, not the slug, because the slug
-    // can be reused after a delete and a restored archive must not land on top of
-    // the wrong tenant's data.
-    let root = PathBuf::from("/var/lib/omnical/tenants");
+fn a_tenant_store_path_is_a_directory_per_tenant_under_the_data_root() {
+    let root = PathBuf::from("/var/lib/omnical");
     assert_eq!(
         tenant_store_path(&root, "T-abc123"),
-        PathBuf::from("/var/lib/omnical/tenants/T-abc123.sqlite3")
+        PathBuf::from("/var/lib/omnical/tenants/T-abc123/db.sqlite3")
     );
+    // The directory is named by the tenant **id**, and only the id is an
+    // argument at all: the slug can be reused after a delete, so a restored
+    // archive must not land on top of the wrong tenant's data.
+    assert!(tenant_store_path(&root, "T-abc123").starts_with(root.join("tenants")));
+}
+
+/// The two definitions that used to exist cannot both be right, so this says the
+/// job and the server agree — the failure being "a backup of the wrong file",
+/// which is the one `backup-all` exists to prevent.
+#[test]
+fn the_job_and_the_server_agree_on_where_a_tenant_store_is() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let config = TenancyConfig::default();
+    let id: rustical_store::tenant::TenantId = "acme".parse().unwrap();
+    let server = config
+        .ensure_tenant_store_dir(dir.path(), &id)
+        .expect("the tenant store directory");
+    assert_eq!(tenant_store_path(dir.path(), id.as_str()), server);
 }
 
 #[test]
@@ -102,7 +151,7 @@ fn two_tenants_never_share_an_archive_path() {
 #[tokio::test]
 async fn every_tenant_gets_its_own_archive() {
     let dir = tempfile::tempdir().expect("a temp dir");
-    let data_root = dir.path().join("tenants");
+    let data_root = dir.path().join("data");
     std::fs::create_dir_all(&data_root).unwrap();
     let control_path = dir.path().join("control.sqlite3");
     let control = SqliteTenantStore::new(
@@ -123,12 +172,7 @@ async fn every_tenant_gets_its_own_archive() {
     let mut ids = Vec::new();
     for name in ["acme", "globex", "initech"] {
         let id: rustical_store::tenant::TenantId = name.parse().expect("a valid slug");
-        let path = tenant_store_path(&data_root, id.as_str());
-        let pool =
-            rustical_store_sqlite::create_db_pool(&format!("sqlite://{}", path.display()), true)
-                .await
-                .expect("a tenant store");
-        pool.close().await;
+        create_tenant_store(&config.tenancy, &data_root, &id).await;
         control
             .create_tenant(
                 &rustical_store::tenant_store::NewTenant {
@@ -222,7 +266,7 @@ async fn a_tenant_whose_file_is_missing_is_reported_not_skipped() {
     // did not come up — must produce a FAIL line and a non-zero exit, not a
     // silently shorter report.
     let dir = tempfile::tempdir().expect("a temp dir");
-    let data_root = dir.path().join("tenants");
+    let data_root = dir.path().join("data");
     std::fs::create_dir_all(&data_root).unwrap();
     let control_path = dir.path().join("control.sqlite3");
     let control = SqliteTenantStore::new(
@@ -243,14 +287,7 @@ async fn a_tenant_whose_file_is_missing_is_reported_not_skipped() {
     for name in ["present", "missing"] {
         let id: rustical_store::tenant::TenantId = name.parse().unwrap();
         if name == "present" {
-            let path = tenant_store_path(&data_root, id.as_str());
-            let pool = rustical_store_sqlite::create_db_pool(
-                &format!("sqlite://{}", path.display()),
-                true,
-            )
-            .await
-            .expect("a tenant store");
-            pool.close().await;
+            create_tenant_store(&config.tenancy, &data_root, &id).await;
         }
         control
             .create_tenant(

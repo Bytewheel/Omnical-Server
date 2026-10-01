@@ -16,6 +16,7 @@
 
 use std::path::PathBuf;
 
+use rustical::config::TenancyConfig;
 use rustical::tenant_usage::{
     measure_tenant, read_all_usage, run_usage_job, summarise, tenant_store_path,
 };
@@ -33,7 +34,7 @@ struct Env {
 impl Env {
     async fn new() -> Self {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let data_root = dir.path().join("tenants");
+        let data_root = dir.path().join("data");
         std::fs::create_dir_all(&data_root).unwrap();
         let control = SqliteTenantStore::new(
             rustical_store_sqlite::create_control_plane_pool(
@@ -54,11 +55,16 @@ impl Env {
     async fn add_tenant(&self, slug: &str, with_data: bool) -> TenantId {
         let id: TenantId = slug.parse().expect("a valid slug");
         if with_data {
+            // Through the server's own builder, which also makes the
+            // directory. The real layout is
+            // `<data_root>/tenants/<id>/db.sqlite3`; this fixture used to build
+            // `<data_root>/<id>.sqlite3` itself, which is the same wrong answer
+            // the job had — so the test agreed with the bug.
+            let path = TenancyConfig::default()
+                .ensure_tenant_store_dir(&self.data_root, &id)
+                .expect("the tenant store directory");
             let pool = rustical_store_sqlite::create_db_pool(
-                &format!(
-                    "sqlite://{}",
-                    tenant_store_path(&self.data_root, id.as_str()).display()
-                ),
+                &format!("sqlite://{}", path.display()),
                 true,
             )
             .await
@@ -241,14 +247,22 @@ async fn the_job_can_be_asked_about_exactly_one_tenant() {
     assert_eq!(all[0].tenant_id, acme.as_str());
 }
 
+/// §3.4's layout, and the bug this test used to encode.
+///
+/// The store is `<data_root>/tenants/<id>/db.sqlite3`; the job once built
+/// `<data_root>/<id>.sqlite3`, so it measured a file that did not exist and
+/// recorded every tenant as *unmeasured* — permanently, because no amount of
+/// running would make the path appear. The panel renders "not measured" rather
+/// than `0`, which is why this showed up as a quietly empty panel rather than
+/// as an error.
 #[test]
-fn a_tenant_store_path_is_derived_from_the_id_not_the_slug() {
+fn a_tenant_store_path_is_a_directory_per_tenant_derived_from_the_id() {
     // A slug can be reused after a delete, and a snapshot written against the
     // wrong one would bill the wrong customer.
-    let root = PathBuf::from("/data/tenants");
+    let root = PathBuf::from("/data");
     assert_eq!(
         tenant_store_path(&root, "T-abc"),
-        PathBuf::from("/data/tenants/T-abc.sqlite3")
+        PathBuf::from("/data/tenants/T-abc/db.sqlite3")
     );
     assert_ne!(
         tenant_store_path(&root, "T-abc"),

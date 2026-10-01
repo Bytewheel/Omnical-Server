@@ -29,7 +29,7 @@
 //! rename, and removes the `-wal`/`-shm` sidecars before the rename. A stale
 //! sidecar from the replaced database is the one way a correct restore
 //! silently ends up corrupt.
-use crate::config::{Config, DataStoreConfig, HttpBindConfig, SqliteDataStoreConfig};
+use crate::config::{Config, HttpBindConfig};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use clap::Parser;
@@ -44,7 +44,6 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1000,20 +999,25 @@ fn loopback_normalised(address: &str) -> String {
 
 /// The database file to operate on: `--db` wins over `db_url`, which may be a
 /// `sqlite://` URL with options in the query string.
+///
+/// The `db_url` half is `SqliteDataStoreConfig::database_file`'s job and nothing
+/// here repeats it. It used to: this function parsed the URL with sqlx and then
+/// refused any filename containing a `:`, which was a correct instinct with the
+/// wrong test — sqlx does not strip a `file:` scheme, so on the deployed
+/// appliance's `db_url = "file:/usr/local/share/rustical/db.sqlite3"` the colon
+/// tripped the guard and `backup`, `restore` and `upgrade` all refused a
+/// perfectly good database. The guard's intent survives inside the single
+/// definition, where a `postgres://` URL is still refused and a `file:` URL is
+/// not.
 #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 pub fn resolve_database_path(config: &Config, db_override: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = db_override {
         return Ok(path.to_path_buf());
     }
-    let DataStoreConfig::Sqlite(SqliteDataStoreConfig { db_url, .. }) = &config.data_store;
-    let options: sqlx::sqlite::SqliteConnectOptions = db_url
-        .parse()
-        .map_err(|error| anyhow!("data_store.sqlite.db_url is unusable: {error}"))?;
-    let filename = options.get_filename();
-    if filename.as_os_str().as_bytes().contains(&b':') {
-        bail!("data_store.sqlite.db_url is not a file path ({db_url}) — nothing to back up");
-    }
-    Ok(filename.to_path_buf())
+    let crate::config::DataStoreConfig::Sqlite(sqlite) = &config.data_store;
+    sqlite
+        .database_file()
+        .map_err(|reason| anyhow!("{reason} ({}) — nothing to back up", sqlite.db_url))
 }
 
 fn require_database_file(path: &Path) -> Result<()> {

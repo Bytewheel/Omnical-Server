@@ -567,8 +567,8 @@ fn tenancy_config_is_inert_and_accepted_while_disabled() {
 fn the_store_path_is_under_data_root_and_named_by_id() {
     // §3.4's convention. Named by *id*, not slug, so a rebrand does not mean
     // renaming a directory a running server has open.
-    let config = TenancyConfig::default();
-    let path = config.tenant_db_path(std::path::Path::new("/var/lib/omnical"), "abc-123");
+    let _config = TenancyConfig::default();
+    let path = TenancyConfig::tenant_db_path(std::path::Path::new("/var/lib/omnical"), "abc-123");
     assert_eq!(path, "/var/lib/omnical/tenants/abc-123/db.sqlite3");
     assert!(!path.contains(".."));
 }

@@ -48,16 +48,25 @@ use sqlx::AssertSqlSafe;
 use sqlx::Connection as _;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 
-/// The per-tenant data root. A tenant's file is named by its **id**, not its slug,
-/// because a slug can be reused after a delete and a restored snapshot must not
-/// land on top of the wrong tenant's row.
+/// The per-tenant store file, named by the tenant's **id**, not its slug —
+/// a slug can be reused after a delete and a restored snapshot must not land on
+/// top of the wrong tenant's row.
 ///
-/// # Errors
+/// A pure path join; it never fails.
 ///
-/// Never; it is a pure path join.
+/// **This is the second of two copies of a path that already had an owner, and
+/// both were wrong.** It used to build `{data_root}/{tenant_id}.sqlite3`, while
+/// the store the server opens is `{data_root}/tenants/{tenant_id}/db.sqlite3`
+/// (`TenancyConfig::tenant_db_path`). The usage job therefore measured a file
+/// that did not exist, recorded every tenant as *unmeasured* — which the panel
+/// renders honestly, so the bug was visible rather than silent — and could never
+/// produce a usage number. `backup_all` had the same copy of the same mistake;
+/// both now call the owner.
 #[must_use]
 pub fn tenant_store_path(data_root: &Path, tenant_id: &str) -> PathBuf {
-    data_root.join(format!("{tenant_id}.sqlite3"))
+    PathBuf::from(crate::config::TenancyConfig::tenant_db_path(
+        data_root, tenant_id,
+    ))
 }
 
 /// Count one tenant's usage.
