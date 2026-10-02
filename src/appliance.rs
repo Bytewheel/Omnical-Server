@@ -283,14 +283,22 @@ pub fn free_space(path: &Path) -> Result<FreeSpace> {
     // both counted in. `f_bsize` is the preferred I/O size and is a different
     // unit on several filesystems.
     //
-    // `c_ulong` is unsigned on every platform this builds for, so no cast is
-    // needed and none is done — an `as` here would be the kind of conversion
-    // that is right on Linux and silently wrong somewhere else.
-    let block = if stats.f_frsize > 0 {
+    // The fragment size is a `c_ulong`, so it is 32-bit on the armv7 targets
+    // and 64-bit on aarch64, while `f_blocks`/`f_bavail` are `fsblkcnt_t` and
+    // 64-bit on both. Widen explicitly with `u64::from`, which is the identity
+    // on a 64-bit source and a lossless widening on a 32-bit one. An `as` here
+    // would be the kind of conversion that is right on Linux and silently
+    // wrong somewhere else.
+    //
+    // clippy is right that this is a no-op *on the host*, and wrong about the
+    // armv7 targets it does not compile for; hence the targeted allow. The
+    // alternative — dropping the conversion — is the E0308 this replaced.
+    #[allow(clippy::useless_conversion)]
+    let block = u64::from(if stats.f_frsize > 0 {
         stats.f_frsize
     } else {
         stats.f_bsize
-    };
+    });
     Ok(FreeSpace {
         total: stats.f_blocks.saturating_mul(block),
         available: stats.f_bavail.saturating_mul(block),
