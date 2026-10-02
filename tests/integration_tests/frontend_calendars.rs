@@ -6,7 +6,9 @@
 use super::{ResponseExtractString, get_app};
 use rustical_store::SubscriptionStore;
 use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType, Privilege};
-use rustical_store::{Calendar, CalendarMetadata, CalendarWriteStore, CollectionShareStore};
+use rustical_store::{
+    Calendar, CalendarMetadata, CalendarReadStore, CalendarWriteStore, CollectionShareStore,
+};
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
 use rustical_store_sqlite::{
     SqliteCollectionShareStore, SqlitePrincipalStore, SqliteSubscriptionStore,
@@ -843,6 +845,23 @@ async fn test_calendar_detail_page_shows_setup_instructions(
 ) {
     let context = context.await;
     setup_fixtures(&context).await;
+    // The journal instructions are gated on the calendar declaring VJOURNAL
+    // (the fixtures create calendars with an empty component set), so opt
+    // `personal` in — this mirrors what registration seeds.
+    let mut personal = context
+        .cal_store
+        .get_calendar("user", "personal", false)
+        .await
+        .unwrap();
+    personal.components = vec![
+        rustical_ical::CalendarObjectType::Event,
+        rustical_ical::CalendarObjectType::Journal,
+    ];
+    context
+        .cal_store
+        .update_calendar("user", "personal", personal)
+        .await
+        .unwrap();
     let sub_store = SqliteSubscriptionStore::new(context.cal_store.clone());
     let app = get_app(context);
 
@@ -885,8 +904,14 @@ async fn test_calendar_detail_page_shows_setup_instructions(
         body.contains("https://public.example/caldav"),
         "CalDAV server URL prefilled"
     );
-    assert!(body.contains("DAVx5"));
+    assert!(body.contains("HawkBook/DavX"));
     assert!(body.contains("Thunderbird"));
+    // The seeded `personal` calendar declares VJOURNAL (register.rs), so the
+    // journaling client instructions render.
+    assert!(
+        body.contains("Journaling — notes &amp; diaries on this calendar"),
+        "journaling instructions shown for a journal-capable calendar: {body}"
+    );
 
     // Detail page of a group calendar without a subscribe link (tile links
     // use the owning principal in the path): the fallback points to the

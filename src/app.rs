@@ -283,7 +283,7 @@ where
             "/.well-known/caldav",
             any(async |TypedHeader(ua): TypedHeader<UserAgent>| {
                 // This would be a use case for Aho Corasick :)
-                // For user agents see https://github.com/lennart-k/rustical/issues/180
+                // For user agents see https://github.com/Bytewheel/Omnical-Server/issues/180
                 if ua.as_str().contains("accountsd")
                     || ua.as_str().contains("remindd")
                     || ua.as_str().contains("dataaccessd")
@@ -504,7 +504,7 @@ where
             async |req: Request, next: Next| {
                 // Closes the connection if the request body might've not been fully consumed
                 // Otherwise subsequent requests reusing the connection might fail.
-                // See https://github.com/lennart-k/rustical/issues/77
+                // See https://github.com/Bytewheel/Omnical-Server/issues/77
                 let body_empty = req.body().is_end_stream();
                 let mut response = next.run(req).await;
                 if !body_empty

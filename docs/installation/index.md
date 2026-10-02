@@ -10,7 +10,7 @@ docker run \
   -v YOUR_DATA_DIR:/var/lib/rustical/ \
   -v OPTIONAL_YOUR_CONFIG_TOML:/etc/rustical/config.toml \ # (1)!
   -e RUSTICAL_CONFIG_OPTION="asd" \  # (2)!
-  ghcr.io/lennart-k/rustical
+  ghcr.io/Bytewheel/Omnical-Server
 ```
 
 1. Mount config file
@@ -26,7 +26,7 @@ Otherwise you will have to use the `rustical principals` command.
 In Docker you can run this with
 
 ```sh
-docker run --rm -it -v YOUR_DATA_DIR:/var/lib/rustical/ ghcr.io/lennart-k/rustical rustical principals
+docker run --rm -it -v YOUR_DATA_DIR:/var/lib/rustical/ ghcr.io/Bytewheel/Omnical-Server rustical principals
 ```
 
 This is also the place to set up **groups**.
@@ -46,7 +46,7 @@ Since the app tokens are random they use the faster `pbkdf2` algorithm.
 ## Manual
 
 ```sh
-cargo install --locked --git https://github.com/lennart-k/rustical
+cargo install --locked --git https://github.com/Bytewheel/Omnical-Server
 ```
 
 ## NixOS (community-maintained by [@PopeRigby](https://github.com/PopeRigby))

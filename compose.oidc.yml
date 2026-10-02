@@ -1,6 +1,6 @@
 services:
   rustical:
-    image: ghcr.io/lennart-k/rustical:latest
+    image: ghcr.io/Bytewheel/Omnical-Server:latest
     restart: unless-stopped
     environment:
       RUSTICAL_FRONTEND__ALLOW_PASSWORD_LOGIN: "false"

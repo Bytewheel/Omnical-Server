@@ -1,0 +1,25 @@
+# Ad-hoc `cargo test` / `cargo bench` in this workspace is where the disk goes.
+#
+# Measured on the dev host 2026-10-01: `rustical/target/` had reached 85 GB
+# (62 GB `deps` + 23 GB `incremental`) against a 916 GB disk at 91% full. The
+# repo's own scripts never caused it — `scripts/build-rust.sh` pins
+# CARGO_TARGET_DIR to build/cargo-target. The bloat came from running cargo
+# directly in this directory, where cargo picks the default target dir.
+#
+# Two settings, both about not spending disk that buys nothing here:
+#
+#   incremental = false — incremental compilation kept 23 GB of caches for
+#     rebuilds that this workspace does not do interactively. The scripts build
+#     with --release and one target at a time.
+#
+#   sqlx offline — matches what the scripts and CI already export, so an ad-hoc
+#     `cargo test` cannot try to reach a database and fail for a reason that has
+#     nothing to do with the code under test.
+#
+# This is a local ergonomics setting, not a build input: the release artefact
+# in out/ is byte-identical either way, and the 35 MiB size gate does not care.
+[build]
+incremental = false
+
+[env]
+SQLX_OFFLINE = "true"

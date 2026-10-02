@@ -251,7 +251,7 @@ async fn test_share_tab_removed_and_tile_blocks_live_on_calendars_tab(
     // Per-client instructions render with the client matrix (§17.15 §6).
     assert!(body.contains("Set up on your device"));
     assert!(body.contains("Google Calendar"));
-    assert!(body.contains("DAVx5"));
+    assert!(body.contains("HawkBook/DavX"));
     assert!(body.contains("not possible"));
 
     // Addressbooks tab: the share-link block lives there now.

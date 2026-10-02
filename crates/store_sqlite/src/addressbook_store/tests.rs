@@ -36,7 +36,7 @@ async fn test_sync_full(
     let id4 = "61022a0d-b478-4116-98bc-a06da19dc568";
 
     // A list of operations where objects get removed that never existed and objects get recreated
-    // https://github.com/lennart-k/rustical/issues/251
+    // https://github.com/Bytewheel/Omnical-Server/issues/251
     let operations = [
         (true, id1, 1),
         (true, id2, 2),

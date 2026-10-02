@@ -1191,7 +1191,11 @@ mod tests {
             enabled: true,
             invite_required: true,
             min_password_length: 12,
-            auto_app_tokens: vec!["vdirsyncer".to_owned(), "davx5".to_owned()],
+            auto_app_tokens: vec![
+                "vdirsyncer".to_owned(),
+                "hawkbook".to_owned(),
+                "davx5".to_owned(),
+            ],
             auto_subscription: true,
             default_group: String::new(),
             rate_limit_per_hour: 10,
@@ -1255,7 +1259,8 @@ mod tests {
             .get_app_tokens(&principal.id)
             .await
             .unwrap();
-        assert_eq!(tokens.len(), 2);
+        // vdirsyncer, hawkbook, davx5
+        assert_eq!(tokens.len(), 3);
         for name in ["personal", "tasks"] {
             rig.cal_store
                 .get_calendar(&principal.id, name, false)

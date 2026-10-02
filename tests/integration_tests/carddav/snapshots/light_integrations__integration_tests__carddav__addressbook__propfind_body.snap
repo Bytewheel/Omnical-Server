@@ -31,8 +31,8 @@ expression: body
                     </supported-report>
                 </supported-report-set>
                 <CARD:max-resource-size>10000000</CARD:max-resource-size>
-                <sync-token>github.com/lennart-k/rustical/ns/0</sync-token>
-                <CS:getctag>github.com/lennart-k/rustical/ns/0</CS:getctag>
+                <sync-token>github.com/Bytewheel/Omnical/ns/0</sync-token>
+                <CS:getctag>github.com/Bytewheel/Omnical/ns/0</CS:getctag>
                 <PUSH:transports>
                     <PUSH:web-push/>
                 </PUSH:transports>

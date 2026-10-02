@@ -14,6 +14,27 @@ test = ["dep:rstest"]
 [[bench]]
 name = "insert_calendar_object"
 harness = false
+# The `test` feature is REQUIRED, not a convenience.
+#
+# `src/lib.rs:53-56` gates the `tests` module behind `#[cfg(any(test, feature =
+# "test"))]`, and this bench's only source of a populated store is
+# `rustical_store_sqlite::tests::test_store_context`. A bench target is NOT
+# compiled with `cfg(test)` — that is a cargo rule, not an oversight — so
+# `cargo bench -p rustical_store_sqlite --bench insert_calendar_object` fails:
+#
+#     error[E0432]: unresolved import `rustical_store_sqlite::tests`
+#       --> crates/store_sqlite/benches/insert_calendar_object.rs:4:28
+#        |
+#     4 | use rustical_store_sqlite::tests::test_store_context;
+#       |                            ^^^^^ could not find `tests` in `rustical_store_sqlite`
+#
+# This is why the bench has never produced a number: it does not build without
+# the feature, and `required-features` is what makes the failure impossible
+# rather than leaving it to whoever runs it next. It also keeps the feature out
+# of the dependency graph of anything that merely depends on this crate —
+# `dep:rstest` is dev-only, and a test-support feature leaking into a normal
+# build would put rstest in front of everyone.
+required-features = ["test"]
 
 [dev-dependencies]
 rstest.workspace = true

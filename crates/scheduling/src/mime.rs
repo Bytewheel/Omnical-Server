@@ -297,7 +297,7 @@ pub fn build_guest_invite(
         out,
         "You have been given access to the calendar \"{calendar_id}\" by {owner}.\r\n\
          \r\n\
-         Add it to your CalDAV calendar app (Apple Calendar, DAVx5, ...) with:\r\n\
+         Add it to your CalDAV calendar app (Apple Calendar, HawkBook/DavX, ...) with:\r\n\
          \r\n\
          Server URL: {server_url}\r\n\
          Username: {username}\r\n\

@@ -2,8 +2,8 @@ site_name: RustiCal Documentation
 site_url: https://lennart-k.github.io/rustical/
 site_description: a CalDAV/CardDAV server
 
-repo_name: lennart-k/rustical
-repo_url: https://github.com/lennart-k/rustical
+repo_name: Bytewheel/Omnical-Server
+repo_url: https://github.com/Bytewheel/Omnical-Server
 
 theme:
   name: material

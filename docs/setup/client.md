@@ -50,9 +50,9 @@ However, some clients don't support `calendar-home-set` containing multiple path
 As a workaround `/caldav-compat` offers the same endpoints as `/caldav` with the only difference being that it does not return all calendar homes in `calendar-home-set`.
 This means that clients under this path will probably not auto-discover group calendars so you can instead add them one-by-one using the principal path `/caldav-compat/principal/<principal_id>`.
 
-## DAVx5
+## HawkBook/DavX
 
-You can set up DAVx5 through the Nextcloud login flow. Collections including group collections will automatically be discovered.
+You can set up HawkBook/DavX (our Android client, built on DAVx5) through the Nextcloud login flow. Collections including group collections will automatically be discovered.
 
 ## Apple Calendar
 

@@ -495,6 +495,7 @@ impl Default for RegistrationConfig {
             min_password_length: 12,
             auto_app_tokens: vec![
                 "vdirsyncer".to_owned(),
+                "hawkbook".to_owned(),
                 "davx5".to_owned(),
                 "thunderbird".to_owned(),
                 "apple".to_owned(),

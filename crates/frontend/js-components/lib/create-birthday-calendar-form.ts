@@ -65,7 +65,7 @@ export class CreateBirthdayCalendarForm extends LitElement {
     }
     
     // Short-term fix to ensure that calendars have a well-defined order
-    // See https://github.com/lennart-k/rustical/issues/189
+    // See https://github.com/Bytewheel/Omnical-Server/issues/189
     // Would probably be nice in the future to have some drag-and-drop functionality for ordering or at least some fields
     const order = Math.floor(Math.random() * 5000)
 

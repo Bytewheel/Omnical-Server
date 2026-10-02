@@ -137,7 +137,7 @@ impl AddressObject {
                     IcalVERSIONProperty(IcalVersion::Version2_0, vec![].into()).into(),
                     IcalCALSCALEProperty(Calscale::Gregorian, vec![].into()).into(),
                     IcalPRODIDProperty(
-                        "-//github.com/lennart-k/rustical birthday calendar//EN".to_owned(),
+                        "-//github.com/Bytewheel/Omnical birthday calendar//EN".to_owned(),
                         vec![].into(),
                     )
                     .into(),

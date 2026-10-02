@@ -33,7 +33,10 @@ pub struct RegeneratedToken {
 pub struct ProfileSection {
     pub user: Principal,
     pub app_tokens: Vec<AppToken>,
-    pub davx5_hostname: Option<String>,
+    /// Hostname for the Android deep link (the `at.bitfire.davdroid` package
+    /// and `davx5` scheme are what the stock app and our HawkBook/DavX fork
+    /// both register, so one link serves both).
+    pub hawkbook_hostname: Option<String>,
     /// `CalDAV` endpoint printed in the per-client instructions.
     pub caldav_url: String,
     /// `CardDAV` endpoint printed in the per-client instructions.
@@ -55,7 +58,7 @@ pub async fn render_profile_page<AP: AuthenticationProvider>(
     regenerated: Option<RegeneratedToken>,
 ) -> Response {
     let ua = headers.typed_get::<UserAgent>();
-    let davx5_hostname =
+    let hawkbook_hostname =
         ua.and_then(|ua| ua.as_str().contains("Android").then_some(host.to_string()));
 
     let base_url = resolve_base_url(public_url, host);
@@ -64,7 +67,7 @@ pub async fn render_profile_page<AP: AuthenticationProvider>(
         section: ProfileSection {
             user: user.clone(),
             app_tokens: auth_provider.get_app_tokens(&user.id).await.unwrap(),
-            davx5_hostname,
+            hawkbook_hostname,
             caldav_url: format!("{base_url}/caldav"),
             carddav_url: format!("{base_url}/carddav"),
             regenerated,

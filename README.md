@@ -1,5 +1,5 @@
-[![license](https://img.shields.io/github/license/lennart-k/rustical)](https://raw.githubusercontent.com/lennart-k/rustical/main/LICENSE)
-[![Coverage Status](https://coveralls.io/repos/github/lennart-k/rustical/badge.svg?branch=main)](https://coveralls.io/github/lennart-k/rustical?branch=main)
+[![license](https://img.shields.io/github/license/Bytewheel/Omnical-Server)](https://raw.githubusercontent.com/Bytewheel/Omnical-Server/main/LICENSE)
+[![Coverage Status](https://coveralls.io/repos/github/Bytewheel/Omnical-Server/badge.svg?branch=main)](https://coveralls.io/github/Bytewheel/Omnical-Server?branch=main)
 
 # RustiCal
 
@@ -16,11 +16,11 @@ a CalDAV/CardDAV server
 - easy to backup, everything saved in one SQLite database
   - also export feature in the frontend
 - Import your existing calendars in the frontend
-- **[WebDAV Push](https://github.com/bitfireAT/webdav-push/)** support, so near-instant synchronisation to DAVx5
+- **[WebDAV Push](https://github.com/bitfireAT/webdav-push/)** support, so near-instant synchronisation to HawkBook/DavX
 - lightweight (the container image contains only one binary)
 - adequately fast (I'd love to say blazingly fast™ :fire: but I don't have any benchmarks)
 - deleted calendars are recoverable
-- Nextcloud login flow (In DAVx5 you can login through the Nextcloud flow and automatically generate an app token)
+- Nextcloud login flow (In HawkBook/DavX you can login through the Nextcloud flow and automatically generate an app token)
 - Apple configuration profiles (skip copy-pasting passwords and instead generate the configuration in the frontend)
 - **OpenID Connect** support (with option to disable password login)
 - Group-based **sharing**
@@ -32,7 +32,7 @@ a CalDAV/CardDAV server
 
 ## Tested Clients
 
-- [DAVx5](https://www.davx5.com)
+- [HawkBook/DavX](https://www.davx5.com) (our Android client, built on DAVx5)
 - [Tasks.org](https://tasks.org)
 - GNOME Accounts, [GNOME Calendar](https://apps.gnome.org/Calendar/), [GNOME Contacts](https://apps.gnome.org/Contacts/)
 - [Evolution](https://flathub.org/en/apps/org.gnome.Evolution)

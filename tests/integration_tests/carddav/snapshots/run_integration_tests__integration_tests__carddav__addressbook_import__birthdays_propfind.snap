@@ -45,8 +45,8 @@ expression: body
                 </supported-report-set>
                 <CAL:min-date-time>-2621430101T000000Z</CAL:min-date-time>
                 <CAL:max-date-time>+2621421231T235959Z</CAL:max-date-time>
-                <sync-token>github.com/lennart-k/rustical/ns/1</sync-token>
-                <CS:getctag>github.com/lennart-k/rustical/ns/1</CS:getctag>
+                <sync-token>github.com/Bytewheel/Omnical/ns/1</sync-token>
+                <CS:getctag>github.com/Bytewheel/Omnical/ns/1</CS:getctag>
                 <PUSH:transports>
                     <PUSH:web-push>
                         <PUSH:vapid-public-key type="p256ecdsa">[pubkey]</PUSH:vapid-public-key>
@@ -99,7 +99,7 @@ expression: body
                 <CAL:calendar-data>BEGIN:VCALENDAR&#13;
 VERSION:2.0&#13;
 CALSCALE:GREGORIAN&#13;
-PRODID:-//github.com/lennart-k/rustical birthday calendar//EN&#13;
+PRODID:-//github.com/Bytewheel/Omnical birthday calendar//EN&#13;
 BEGIN:VEVENT&#13;
 DTSTAMP:[DTSTAMP]&#13;
 DTSTART;VALUE=DATE:19000203&#13;
@@ -142,7 +142,7 @@ END:VCALENDAR&#13;
                 <CAL:calendar-data>BEGIN:VCALENDAR&#13;
 VERSION:2.0&#13;
 CALSCALE:GREGORIAN&#13;
-PRODID:-//github.com/lennart-k/rustical birthday calendar//EN&#13;
+PRODID:-//github.com/Bytewheel/Omnical birthday calendar//EN&#13;
 BEGIN:VEVENT&#13;
 DTSTAMP:[DTSTAMP]&#13;
 DTSTART;VALUE=DATE:19000303&#13;

@@ -29,8 +29,8 @@ expression: response.serialize_to_string().unwrap()
                 </supported-report>
             </supported-report-set>
             <max-resource-size xmlns="urn:ietf:params:xml:ns:carddav">10000000</max-resource-size>
-            <sync-token xmlns="DAV:">github.com/lennart-k/rustical/ns/0</sync-token>
-            <getctag xmlns="http://calendarserver.org/ns/">github.com/lennart-k/rustical/ns/0</getctag>
+            <sync-token xmlns="DAV:">github.com/Bytewheel/Omnical/ns/0</sync-token>
+            <getctag xmlns="http://calendarserver.org/ns/">github.com/Bytewheel/Omnical/ns/0</getctag>
             <transports xmlns="https://bitfire.at/webdav-push">
                 <web-push xmlns="https://bitfire.at/webdav-push">
                     <vapid-public-key xmlns="https://bitfire.at/webdav-push" type="p256ecdsa">BPtEpPcF_eXYV3KXYOYRJvnrvdhNVFNfHzvV5GgTQQ_oXDwm-AKFJw_DLnc_d4reJc7SFiuFtYRUkCisT_4TRz</vapid-public-key>

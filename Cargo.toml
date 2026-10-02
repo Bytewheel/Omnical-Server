@@ -7,7 +7,7 @@ rust-version = "1.97"
 edition = "2024"
 description = "A CalDAV server"
 documentation = "https://lennart-k.github.io/rustical/"
-repository = "https://github.com/lennart-k/rustical"
+repository = "https://github.com/Bytewheel/Omnical-Server"
 license = "AGPL-3.0-or-later"
 
 [package]

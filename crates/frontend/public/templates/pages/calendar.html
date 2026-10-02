@@ -50,7 +50,7 @@
     <p class="description">To use the calendar in full (add, change, delete events) a CalDAV account with a credential is needed: either a guest username + app token, or your own per-calendar app token (mint one on the <a href="/frontend/user/{{ user.id }}/calendar#cal-{{ calendar.id }}">Calendars tab</a> with "Invite guest" or "Generate credentials", or use your profile's app tokens). Server: <code>{{ caldav_url }}</code></p>
     <ul>
       <li><strong>Apple iPhone/iPad/Mac</strong>: Settings → Calendar → Accounts → Add Account → Other → Add CalDAV Account → server <code>{{ caldav_url }}</code>, user = the guest username, password = the app token.</li>
-      <li><strong>Android</strong>: the built-in Google Calendar app cannot add an external CalDAV server — install <strong>DAVx5</strong> → add account → CalDAV → paste <code>{{ caldav_url }}</code> + username + app token.</li>
+      <li><strong>Android</strong>: the built-in Google Calendar app cannot add an external CalDAV server — install <strong>HawkBook/DavX</strong> → add account → CalDAV → paste <code>{{ caldav_url }}</code> + username + app token.</li>
       <li><strong>Thunderbird</strong>: Calendar → New Calendar → On the Network → paste <code>{{ caldav_url }}</code> + username + app token.</li>
       <li><strong>Google Calendar &amp; Outlook.com: not possible</strong> — neither supports adding an external CalDAV server; use the read-only subscribe link above instead.</li>
     </ul>
@@ -64,8 +64,8 @@
     <p class="description">This calendar supports <code>VJOURNAL</code> entries: dated text notes such as meeting minutes, a work log, or a private diary. A journal entry occupies no time on a calendar and never turns into a meeting invitation, so it won't show up in free/busy or attendee lists.</p>
     <h4>Android — jtx Board (the app that supports journals)</h4>
     <ol>
-      <li>Install <strong>jtx Board</strong>, and install <strong>DAVx⁵</strong> if you don't have it (jtx Board syncs through it).</li>
-      <li>In DAVx⁵ → CalDAV tab → tap your account → check this calendar to mark it for sync. This calendar already declares <code>VJOURNAL</code>, so DAVx⁵ will pick it up as a journal-capable collection.</li>
+      <li>Install <strong>jtx Board</strong>, and install <strong>HawkBook/DavX</strong> if you don't have it (jtx Board syncs through it).</li>
+      <li>In HawkBook/DavX → CalDAV tab → tap your account → check this calendar to mark it for sync. This calendar already declares <code>VJOURNAL</code>, so it will be picked up as a journal-capable collection.</li>
       <li>Run a sync, then open jtx Board. This calendar appears under its own section, and you can create <em>Journals</em> (with a date) and <em>Notes</em> (no date) there.</li>
       <li>In jtx Board you can also <strong>link</strong> a note or journal to a task with <code>RELATED-TO</code> — useful for a meeting's minutes next to the follow-up tasks.</li>
     </ol>

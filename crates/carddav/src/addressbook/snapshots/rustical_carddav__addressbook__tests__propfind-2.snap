@@ -69,12 +69,12 @@ ResponseElement {
                         ),
                         SyncToken(
                             SyncToken(
-                                "github.com/lennart-k/rustical/ns/0",
+                                "github.com/Bytewheel/Omnical/ns/0",
                             ),
                         ),
                         SyncToken(
                             Getctag(
-                                "github.com/lennart-k/rustical/ns/0",
+                                "github.com/Bytewheel/Omnical/ns/0",
                             ),
                         ),
                         DavPush(

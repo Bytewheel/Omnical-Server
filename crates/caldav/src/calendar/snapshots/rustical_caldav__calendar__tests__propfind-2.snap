@@ -155,8 +155,8 @@ END:VCALENDAR&#13;
             </supported-report-set>
             <min-date-time xmlns="urn:ietf:params:xml:ns:caldav">-2621430101T000000Z</min-date-time>
             <max-date-time xmlns="urn:ietf:params:xml:ns:caldav">+2621421231T235959Z</max-date-time>
-            <sync-token xmlns="DAV:">github.com/lennart-k/rustical/ns/12</sync-token>
-            <getctag xmlns="http://calendarserver.org/ns/">github.com/lennart-k/rustical/ns/12</getctag>
+            <sync-token xmlns="DAV:">github.com/Bytewheel/Omnical/ns/12</sync-token>
+            <getctag xmlns="http://calendarserver.org/ns/">github.com/Bytewheel/Omnical/ns/12</getctag>
             <transports xmlns="https://bitfire.at/webdav-push">
                 <web-push xmlns="https://bitfire.at/webdav-push">
                     <vapid-public-key xmlns="https://bitfire.at/webdav-push" type="p256ecdsa">BFtNHbLMxDV6FInTMCUfqFO-khwq-zge2MV6JmWTIykK6Ujz34E8mqhBHTfA2m9_fDTrT5KVPRZgD4MRtPlAoR</vapid-public-key>
