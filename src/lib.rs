@@ -290,6 +290,34 @@ pub async fn cmd_serve(
     let tenancy_enabled = config.tenancy.enabled;
     let config_for_tenancy = config.clone();
 
+    // Which database this process's *own* long-lived tasks run against: the
+    // DAV-push notifier, iMIP ingestion, and trash retention, all of which are
+    // spawned below from these stores.
+    //
+    // Under tenancy the server answers requests from the tenant store, so a
+    // bundle built over `config.data_store` is building the wrong one — and
+    // worse, silently: on an install that *copied* its store into
+    // `tenants/<id>/` rather than moving it, the platform database still holds
+    // a full set of tables, so nothing fails. Those tasks then run against a
+    // duplicate nobody is served from. Measured on the deployed appliance:
+    // inbound iMIP replies were being parsed out of IMAP and written to the
+    // platform copy while every tenant was served from its own.
+    //
+    // Resolving the same way the CLI now does makes them act on the data that
+    // actually exists. A hosted install with no `default_tenant` has no tenant
+    // to resolve, and per-tenant task spawning is a larger change than this;
+    // that case warns and keeps today's behaviour rather than refusing to boot.
+    let serve_store = match crate::tenancy::cli_data_store(&config).await {
+        Ok(store) => store,
+        Err(e) => {
+            warn!(
+                "{e}\n    continuing on the configured data_store, which no tenant is served \
+                 from: iMIP ingestion, DAV push and trash retention will not see tenant data"
+            );
+            config.data_store.clone()
+        }
+    };
+
     let (
         addr_store,
         cal_store,
@@ -305,7 +333,7 @@ pub async fn cmd_serve(
         calendar_source_store,
         share_store,
         password_reset_store,
-    ) = get_data_stores(!args.no_migrations, &config.data_store).await?;
+    ) = get_data_stores(!args.no_migrations, &serve_store).await?;
 
     if config.dav_push.enabled {
         let vapid_key = dav_push_store.get_vapid_keypair().await?;
