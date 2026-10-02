@@ -203,7 +203,9 @@ async fn main() -> Result<()> {
 /// A separate prefix is also the honest shape: this is not a configuration value,
 /// it is a selection, and it should not be settable in `config.toml` next to
 /// `[tenancy]`.
-const TENANT_ENV: &str = "OMNICAL_TENANT";
+// Defined once, in the library, because `cli_data_store` resolves the same
+// variable and two definitions of one env var is how they drift apart.
+use rustical::tenancy::TENANT_ENV;
 
 /// The tenant an operator is acting as, if one is named.
 ///

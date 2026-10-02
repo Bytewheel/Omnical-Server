@@ -33,7 +33,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::app::AppConfig;
-use crate::config::Config;
+use crate::config::{Config, DataStoreConfig, SqliteDataStoreConfig};
 use crate::host_dispatch::{HostDispatch, Tenancy, TenancyAwareApp, TenantBuilder};
 use crate::store_bundle::StoreBundleCache;
 
@@ -268,6 +268,166 @@ pub async fn open_control_plane(url: &str) -> anyhow::Result<SqliteTenantStore> 
         .await
         .map_err(|e| anyhow::anyhow!("could not open the control plane at {url}: {e}"))?;
     Ok(SqliteTenantStore::new(pool))
+}
+
+/// The environment variable that names the tenant a CLI command acts as.
+///
+/// Deliberately **not** a config key: `Config` is `deny_unknown_fields`, so
+/// adding it there makes every command fail with `unknown field`. The first
+/// version used `RUSTICAL_TENANT` and failed exactly that way, on every
+/// command. A separate prefix is also the honest shape — this is a selection,
+/// not a configuration value, and should not sit in `config.toml` next to
+/// `[tenancy]`.
+pub const TENANT_ENV: &str = "OMNICAL_TENANT";
+
+/// The explicitly selected tenant, if the operator named one.
+///
+/// Deliberately **explicit only**, with no fallback to `default_tenant`: this is
+/// what the layering of a tenant's `config_json` is keyed on, and layering the
+/// default tenant's overrides into every command that did not ask for a tenant
+/// is a separate decision. [`cli_tenant_slug`] is the one that falls back.
+#[must_use]
+pub fn tenant_selection() -> Option<String> {
+    std::env::var(TENANT_ENV)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// The tenant a CLI command should resolve its database for: the explicit
+/// selection, else `default_tenant`.
+///
+/// `None` only when tenancy is on and neither is set, which
+/// [`TenancyConfig::validate`](crate::config::TenancyConfig::validate) already
+/// refuses to boot a server for.
+#[must_use]
+pub fn cli_tenant_slug(config: &Config) -> Option<String> {
+    tenant_selection().or_else(|| {
+        let fallback = config.tenancy.default_tenant.trim();
+        (!fallback.is_empty()).then(|| fallback.to_owned())
+    })
+}
+
+/// The data store a **CLI command** must use — which, with tenancy enabled, is
+/// not `config.data_store`.
+///
+/// ## Why this exists
+///
+/// With `[tenancy] enabled = true` the server never reads
+/// `[data_store.sqlite] db_url`. [`tenant_builder`] builds a per-tenant
+/// `DataStoreConfig` pointing at `{data_root}/tenants/{id}/db.sqlite3` and
+/// calls [`get_store_bundle`](crate::get_store_bundle) with that, once per
+/// tenant. The platform database named by `db_url` holds the control plane's
+/// own tables and, on a tenancy install, **no tenant data at all**.
+///
+/// A CLI command that passed `config.data_store` was therefore mutating a file
+/// the server does not read, while reporting success. Measured on a live
+/// router: `app-token create` printed a secret, the token appeared in
+/// `app-token list`, and no row existed in the tenant database — so the secret
+/// 401'd. `regenerate` rotated a hash the server never consulted, so **the
+/// previous secret kept working**; `remove` dropped the token from `list` while
+/// the row survived in the database the server reads. A credential rotation
+/// runbook whose gate is "the old token 401s" cannot catch that, because a
+/// rotation that fails to revoke never trips its own gate.
+///
+/// And the obvious existing mechanism does not cover it: `OMNICAL_TENANT` layers
+/// a tenant's `config_json` over the global config, but
+/// [`Config::with_tenant_overrides`] overrides `scheduling`, `subscriptions` and
+/// `registration` — **not `data_store`**. So naming a tenant got the SMTP
+/// identity and the register link right and still pointed the command at the
+/// platform database.
+///
+/// This is the same family as the `backup-all` bug documented on
+/// [`TenancyConfig::tenant_db_path`]: a second, wrong answer to "where does this
+/// tenant's data live", in a file the server never reads.
+///
+/// ## Which tenant
+///
+/// [`OMNICAL_TENANT`](TENANT_ENV) wins — an operator who named a tenant meant
+/// that one. Otherwise `default_tenant`: a CLI command has no `Host` header, so
+/// the server's step-2 chain has nothing to work with, and `default_tenant` is
+/// its documented last resort and N=1 escape hatch for exactly this shape of
+/// install. That fallback is the case that broke on the appliance, where
+/// nothing selects a tenant and every command fell through to the platform
+/// database.
+///
+/// `get_tenant_by_slug` returns `None` for a suspended tenant, so this refuses
+/// a suspended one for free — a CLI must not become a way to edit the data of a
+/// tenant the server has taken away.
+///
+/// ## What is preserved
+///
+/// Only `db_url` is redirected. `run_repairs` and `skip_broken` stay whatever
+/// the global config says, because those are operator-chosen and a CLI command
+/// asking for repairs should get them.
+///
+/// # Errors
+/// If tenancy is enabled and the selected tenant cannot be resolved — none
+/// selected, unknown, or suspended. Each names the slug, because that is what the
+/// operator can edit. Also if the control plane or the tenant store directory
+/// cannot be opened.
+pub async fn cli_data_store(config: &Config) -> anyhow::Result<DataStoreConfig> {
+    if !config.tenancy.enabled {
+        return Ok(config.data_store.clone());
+    }
+    let DataStoreConfig::Sqlite(global) = &config.data_store;
+
+    // Already tenant-scoped? Leave it alone.
+    //
+    // `OMNICAL_TENANT` and `default_tenant` are how a *global* config finds a
+    // tenant, but a config may already name a tenant's own database — the
+    // integration harness writes one per tenant, and an operator can too.
+    // Redirecting in that case would resolve the tenant a second time and could
+    // point the command at a *different* tenant's database than the config asked
+    // for, which is worse than the bug this function exists to fix.
+    if let (Ok(configured), Ok(root)) = (
+        global.database_file(),
+        config.tenancy.data_root(&config.data_store),
+    ) && configured.starts_with(root.join("tenants"))
+    {
+        return Ok(config.data_store.clone());
+    }
+
+    let Some(slug) = cli_tenant_slug(config) else {
+        anyhow::bail!(
+            "[tenancy] is enabled but neither {TENANT_ENV} nor [tenancy] default_tenant names a \
+             tenant, so there is nothing for a CLI command to act on. Set one, or pass the store \
+             path explicitly."
+        );
+    };
+
+    let control_plane = open_control_plane(&config.tenancy.control_db_url).await?;
+    let tenant = control_plane
+        .get_tenant_by_slug(&slug)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no active tenant with slug {slug:?} in {}. A suspended tenant is \
+             indistinguishable from an unknown one here by design; check \
+             `rustical tenants list`.",
+                config.tenancy.control_db_url
+            )
+        })?;
+
+    // The same two calls, in the same order, as `tenant_builder` above. If one
+    // of them ever changes there it has to change here too, which is why this
+    // is written out rather than shared: the closure is the server's hot path
+    // and this is not, and the alternative — a helper both call — is a
+    // refactor of working dispatch code for the sake of four CLI sites.
+    let root = config
+        .tenancy
+        .data_root(&config.data_store)
+        .map_err(anyhow::Error::msg)?;
+    let db_path = config
+        .tenancy
+        .ensure_tenant_store_dir(&root, &tenant.id)
+        .map_err(anyhow::Error::msg)?;
+
+    Ok(DataStoreConfig::Sqlite(SqliteDataStoreConfig {
+        db_url: format!("sqlite://{}", db_path.display()),
+        run_repairs: global.run_repairs,
+        skip_broken: global.skip_broken,
+    }))
 }
 
 /// The closure that turns one tenant into `(stores, router)`.

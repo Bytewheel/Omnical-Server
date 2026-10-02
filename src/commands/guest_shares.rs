@@ -116,7 +116,7 @@ async fn find_share(
 )]
 pub async fn cmd_guest_shares(args: GuestSharesArgs, config: Config) -> anyhow::Result<()> {
     let (addr_store, cal_store, _, principal_store, _, _, subscription_store, _, _, share_store, _) =
-        get_data_stores(true, &config.data_store).await?;
+        get_data_stores(true, &crate::tenancy::cli_data_store(&config).await?).await?;
 
     match args.command {
         GuestShareCommand::Add(AddArgs {
