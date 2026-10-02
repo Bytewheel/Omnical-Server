@@ -242,3 +242,33 @@ async fn test_app_token_regenerate_rejects_unknown_and_foreign(
         .unwrap();
     assert_eq!(response.status(), StatusCode::MULTI_STATUS);
 }
+
+/// The portal's Delete form answers 404 rather than redirecting as though it
+/// worked, so a mistyped id is visible instead of silent.
+#[rstest]
+#[tokio::test]
+async fn test_app_token_delete_route_404s_on_an_unknown_id(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    let app = get_app(context.clone());
+
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri("/frontend/user/user/app_token/00000000-0000-0000-0000-000000000000/delete")
+        .header("host", "public.example")
+        .body(Body::empty())
+        .unwrap();
+    request
+        .headers_mut()
+        .typed_insert(Authorization::basic("user", "pass"));
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "deleting a token that is not there must not look like it worked"
+    );
+}

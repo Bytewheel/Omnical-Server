@@ -195,7 +195,19 @@ pub fn is_lan_peer(addr: &SocketAddr) -> bool {
 /// see the last arm of the function.
 #[must_use]
 pub fn should_enter_setup_mode(config_file: &Path) -> bool {
-    if reset_marker_path(config_file).exists() {
+    should_enter_setup_mode_with_marker(config_file, &reset_marker_path(config_file))
+}
+
+/// [`should_enter_setup_mode`] with the marker path supplied.
+///
+/// The marker is normally `/tmp/rustical-setup-again`, which is **process- and
+/// machine-global**: any test that creates it changes the answer for every other
+/// test consulting it in the same instant, which is a race rather than a test.
+/// This exists so a caller that owns its own marker — a test, a second
+/// instance — can be given one instead of reaching into shared state.
+#[must_use]
+pub fn should_enter_setup_mode_with_marker(config_file: &Path, marker: &Path) -> bool {
+    if marker.exists() {
         return true;
     }
     if !config_file.is_file() {

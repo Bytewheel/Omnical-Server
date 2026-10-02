@@ -256,8 +256,8 @@ impl AuthenticationProvider for SqlitePrincipalStore {
     }
 
     #[instrument]
-    async fn remove_app_token(&self, user_id: &str, token_id: &str) -> Result<(), Error> {
-        sqlx::query!(
+    async fn remove_app_token(&self, user_id: &str, token_id: &str) -> Result<bool, Error> {
+        let result = sqlx::query!(
             r#"DELETE FROM app_tokens WHERE (principal, id) = (?, ?)"#,
             user_id,
             token_id
@@ -265,7 +265,7 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         .execute(&self.db)
         .await
         .map_err(crate::Error::from)?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
     #[instrument(skip(token))]

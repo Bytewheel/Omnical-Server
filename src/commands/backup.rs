@@ -163,7 +163,7 @@ pub struct RestoreArgs {
 /// Create a verified archive of the database. Returns the archive path.
 #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 pub async fn cmd_backup(args: BackupArgs, config: Config, config_file: &Path) -> Result<PathBuf> {
-    let db_path = resolve_database_path(&config, args.db.as_deref())?;
+    let db_path = resolve_database_path(&config, args.db.as_deref()).await?;
     require_database_file(&db_path)?;
 
     let out_dir = args.out_dir.clone().unwrap_or_else(|| {
@@ -435,7 +435,7 @@ pub async fn cmd_restore(args: RestoreArgs, config: Config) -> Result<()> {
         );
     }
 
-    let db_path = resolve_database_path(&config, args.db.as_deref())?;
+    let db_path = resolve_database_path(&config, args.db.as_deref()).await?;
 
     if args.dry_run {
         println!(
@@ -997,24 +997,40 @@ fn loopback_normalised(address: &str) -> String {
     }
 }
 
-/// The database file to operate on: `--db` wins over `db_url`, which may be a
-/// `sqlite://` URL with options in the query string.
+/// The database file to operate on: `--db` wins, then the tenant's own
+/// database, then `db_url` — which may be a `sqlite://` URL with options in the
+/// query string.
 ///
-/// The `db_url` half is `SqliteDataStoreConfig::database_file`'s job and nothing
-/// here repeats it. It used to: this function parsed the URL with sqlx and then
-/// refused any filename containing a `:`, which was a correct instinct with the
-/// wrong test — sqlx does not strip a `file:` scheme, so on the deployed
-/// appliance's `db_url = "file:/usr/local/share/rustical/db.sqlite3"` the colon
-/// tripped the guard and `backup`, `restore` and `upgrade` all refused a
-/// perfectly good database. The guard's intent survives inside the single
-/// definition, where a `postgres://` URL is still refused and a `file:` URL is
-/// not.
+/// ## Why the tenant's database and not `db_url`
+///
+/// With `[tenancy] enabled` the server answers from
+/// `{data_root}/tenants/<id>/db.sqlite3` and never opens `db_url`. So a backup
+/// taken from `db_url` is a backup of the *platform* database, which on a
+/// tenancy install holds no tenant data at all — and because the install
+/// copied rather than moved its store, that platform database still has a full
+/// set of tables, so the archive looks like a healthy database and restores
+/// cleanly. It is a backup of nothing.
+///
+/// This is the same gap `cli_data_store` closes for the ordinary commands, and
+/// the same family as the `backup-all` bug on `TenancyConfig::tenant_db_path`.
+/// `--db` still wins, because an operator restoring a specific archive knows
+/// which file it came from and that answer should not be second-guessed.
+///
+/// `async` because resolving a tenant means reading the control plane, which
+/// `SqliteDataStoreConfig::database_file` — a pure function of the config —
+/// cannot do. All three callers were already async.
+///
+/// # Errors
+/// If no override is given and the database cannot be determined — including
+/// the case where tenancy is enabled and no tenant resolves, which is a refusal
+/// rather than a fallback to a database that holds nothing.
 #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
-pub fn resolve_database_path(config: &Config, db_override: Option<&Path>) -> Result<PathBuf> {
+pub async fn resolve_database_path(config: &Config, db_override: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = db_override {
         return Ok(path.to_path_buf());
     }
-    let crate::config::DataStoreConfig::Sqlite(sqlite) = &config.data_store;
+    let store = crate::tenancy::cli_data_store(config).await?;
+    let crate::config::DataStoreConfig::Sqlite(sqlite) = &store;
     sqlite
         .database_file()
         .map_err(|reason| anyhow!("{reason} ({}) — nothing to back up", sqlite.db_url))

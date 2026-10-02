@@ -21,7 +21,7 @@ use tower::ServiceExt;
 
 use rustical::setup_mode::{
     ApplyError, RESET_MARKER, SetupForm, SetupMode, SetupRestart, is_lan_peer,
-    should_enter_setup_mode, validate,
+    should_enter_setup_mode, should_enter_setup_mode_with_marker, validate,
 };
 
 /// Counts restarts instead of sending a signal, so the test can assert the box
@@ -397,10 +397,22 @@ fn the_reset_marker_re_arms_setup_mode_and_is_cleared_by_it() {
     // again, and completing it removes the marker so the *following* boot is
     // normal. Leaving it would put a working appliance back into setup on every
     // reboot, which is its own outage.
-    let marker = std::env::temp_dir().join(RESET_MARKER);
+    // A path of this test's own. The real marker is `/tmp/rustical-setup-again`,
+    // shared by the whole machine: writing it here made every other test in this
+    // binary that consults the marker race on it, and the suite passed or failed
+    // depending on scheduling. An unrelated test asserting
+    // "a broken install is not setup mode" duly failed once under load.
+    let marker = std::env::temp_dir().join(format!("{RESET_MARKER}-{}", std::process::id()));
     std::fs::write(&marker, b"pressed").unwrap();
-    assert!(should_enter_setup_mode(&fixture.config_file));
+    assert!(should_enter_setup_mode_with_marker(
+        &fixture.config_file,
+        &marker
+    ));
     std::fs::remove_file(&marker).unwrap();
+    assert!(!should_enter_setup_mode_with_marker(
+        &fixture.config_file,
+        &marker
+    ));
 }
 
 // ── 5. validation: all errors at once, and nothing written ─────────────────

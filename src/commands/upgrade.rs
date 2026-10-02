@@ -237,12 +237,18 @@ fn floor() -> i64 {
 /// reversible floor, or `--no-backup` was combined with a real rollback.
 #[allow(clippy::too_many_lines)]
 pub async fn cmd_upgrade(config: &Config, args: UpgradeArgs) -> Result<()> {
-    let db_path = crate::commands::backup::resolve_database_path(config, None)?;
+    let db_path = crate::commands::backup::resolve_database_path(config, None).await?;
+    // The pool is opened over the *tenant's* database for the same reason the
+    // backup path resolves one: under tenancy the server never opens
+    // `config.data_store`, so a migration or rollback driven against it would
+    // report success having touched the platform copy while every tenant kept
+    // the old schema.
+    let store = crate::tenancy::cli_data_store(config).await?;
     let DataStoreConfig::Sqlite(SqliteDataStoreConfig {
         db_url,
         run_repairs,
         ..
-    }) = &config.data_store;
+    }) = &store;
     let pool = rustical_store_sqlite::create_db_pool(db_url, *run_repairs)
         .await
         .context("opening the database")?;

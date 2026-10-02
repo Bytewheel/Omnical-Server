@@ -75,7 +75,17 @@ pub async fn cmd_app_token(
             println!("{token_id}_{token}");
         }
         AppTokenCommand::Remove(RemoveArgs { id, .. }) => {
-            user_store.remove_app_token(principal, id).await?;
+            // A revocation that reports success when it removed nothing is worse
+            // than one that fails: the operator walks away believing a leaked
+            // credential is dead. See the trait's docs on why `false` is
+            // reachable at all.
+            if !user_store.remove_app_token(principal, id).await? {
+                anyhow::bail!(
+                    "no app token {id:?} on principal {principal:?} — nothing was revoked. \
+                     Check the id with `rustical principals app-token list {principal}`."
+                );
+            }
+            println!("Revoked {id}");
         }
         AppTokenCommand::Regenerate(RegenerateArgs { id, .. }) => {
             let token = generate_app_token();

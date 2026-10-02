@@ -388,4 +388,66 @@ mod tests {
             "revoked shares must not stamp a privilege"
         );
     }
+
+    /// Revocation must say whether it revoked anything.
+    ///
+    /// `remove_app_token` deletes on `(principal, id)`, which is what stops one
+    /// principal's delete from reaching another's token — and which also means a
+    /// wrong id, a foreign id and an already-revoked token all delete zero rows. It
+    /// used to report success for all three, so a revocation step whose gate is "the
+    /// old credential stopped working" could not fail even when nothing had been
+    /// revoked. `false` is now returned instead of a bare `Ok(())`.
+    #[rstest]
+    #[tokio::test]
+    async fn remove_app_token_reports_whether_it_removed_anything(
+        #[from(test_store_context)]
+        #[future]
+        context: TestStoreContext,
+    ) {
+        let context = context.await;
+        // The fixture already provisions `user` with one app token.
+        let store = &context.principal_store;
+        let tokens = store.get_app_tokens("user").await.unwrap();
+        assert_eq!(tokens.len(), 1);
+        let token_id = tokens[0].id.clone();
+
+        // A real token id, but addressed under a principal that does not own it.
+        // This is the predicate that stops one principal's revocation from
+        // reaching another's credential, so it is the case most worth proving
+        // reports `false` rather than success.
+        assert!(
+            !store
+                .remove_app_token("someone-else", &token_id)
+                .await
+                .unwrap(),
+            "a token addressed under the wrong principal must not report as removed"
+        );
+        assert_eq!(
+            store.get_app_tokens("user").await.unwrap().len(),
+            1,
+            "and it must still be there"
+        );
+
+        // An id that does not exist at all.
+        assert!(
+            !store
+                .remove_app_token("user", "00000000-0000-0000-0000-000000000000")
+                .await
+                .unwrap(),
+            "an unknown id must not report as removed"
+        );
+
+        // The real one.
+        assert!(
+            store.remove_app_token("user", &token_id).await.unwrap(),
+            "the token's own principal and id must report as removed"
+        );
+        assert!(store.get_app_tokens("user").await.unwrap().is_empty());
+
+        // And it is not idempotent into lying: a second attempt says so.
+        assert!(
+            !store.remove_app_token("user", &token_id).await.unwrap(),
+            "re-revoking an already-revoked token must not report as removed"
+        );
+    }
 }

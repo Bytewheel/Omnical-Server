@@ -335,7 +335,13 @@ pub async fn cmd_serve(
         password_reset_store,
     ) = get_data_stores(!args.no_migrations, &serve_store).await?;
 
-    if config.dav_push.enabled {
+    // Tenancy spawns these per tenant, from the tenant closure in `tenancy.rs`,
+    // over that tenant's stores. Spawning them here as well would run a second
+    // set against the default tenant's database — which is the bug: on a
+    // tenancy install the server never reads `config.data_store`, so iMIP
+    // replies, DAV-push notifications and trash sweeps would all go to a
+    // database no tenant is served from.
+    if config.dav_push.enabled && !tenancy_enabled {
         let vapid_key = dav_push_store.get_vapid_keypair().await?;
         let dav_push_service = DavPushService::new(
             config.dav_push.allowed_push_servers,
@@ -363,7 +369,7 @@ pub async fn cmd_serve(
 
     // Inbound iMIP ingestion: poll the configured IMAP mailboxes for
     // attendee REPLY emails. No-op unless [scheduling.imap] is configured.
-    if let Some(scheduler) = scheduler.clone() {
+    if let Some(scheduler) = scheduler.clone().filter(|_| !tenancy_enabled) {
         // The spawned task is detached on purpose: it runs for the life of the
         // process and there is nothing to do with a handle to it. `spawn_ingestion`
         // returns `()`, so there is no handle to hold on to.
@@ -489,12 +495,18 @@ pub async fn cmd_serve(
     let app = NormalizePathLayer::trim_trailing_slash().layer(app);
 
     let mut provided_listeners = ProvidedListeners::from_env()?;
-    if let Some(trash_retention_days) = config.maintenance.trash_retention_days {
-        tokio::spawn(tasks::cleanup_trashed_calendar_entities(
-            cal_store.clone(),
-            trash_retention_days,
-            shutdown_signal(),
-        ));
+    if let Some(trash_retention_days) = config
+        .maintenance
+        .trash_retention_days
+        .filter(|_| !tenancy_enabled)
+    {
+        {
+            tokio::spawn(tasks::cleanup_trashed_calendar_entities(
+                cal_store.clone(),
+                trash_retention_days,
+                shutdown_signal(),
+            ));
+        }
     }
 
     let bind_config = config.http.bind_config()?;
@@ -625,7 +637,10 @@ fn build_extensions(
     (scheduler, subscriptions, registration)
 }
 
-async fn shutdown_signal() -> () {
+/// `pub(crate)` because the tenancy layer spawns **per-tenant** copies of the
+/// background tasks, and those need the same shutdown signal the single-tenant
+/// path uses. Not `pub`: it is not part of the crate's API.
+pub(crate) async fn shutdown_signal() -> () {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await

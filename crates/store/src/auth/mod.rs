@@ -82,7 +82,17 @@ pub trait AuthenticationProvider: Send + Sync + 'static {
         name: String,
         token: String,
     ) -> Result<String, Error>;
-    async fn remove_app_token(&self, user_id: &str, token_id: &str) -> Result<(), Error>;
+    /// Revokes an app token. `Ok(false)` means **no such token for this
+    /// principal**, which is deliberately not `Ok(true)`.
+    ///
+    /// The `(user_id, token_id)` predicate is what stops one principal's
+    /// `remove` from deleting another's token, and it is also why a wrong id is
+    /// indistinguishable from another principal's: both delete zero rows. That
+    /// used to report success either way, so a mistyped id and a
+    /// revoked-already token both looked like the credential had been destroyed
+    /// when nothing had happened — which is the worst possible answer for a
+    /// revocation step.
+    async fn remove_app_token(&self, user_id: &str, token_id: &str) -> Result<bool, Error>;
 
     /// Rotates the secret of an existing app token (same id, name and
     /// `created_at`; the old secret stops validating immediately). The new

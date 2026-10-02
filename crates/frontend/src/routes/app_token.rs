@@ -147,6 +147,9 @@ pub async fn route_delete_app_token<AP: AuthenticationProvider>(
     Path((user_id, token_id)): Path<(String, String)>,
 ) -> Result<Redirect, rustical_store::Error> {
     assert_eq!(user_id, user.id);
-    auth_provider.remove_app_token(&user.id, &token_id).await?;
+    if !auth_provider.remove_app_token(&user.id, &token_id).await? {
+        // 404, not a redirect that looks like it worked.
+        return Err(rustical_store::Error::NotFound);
+    }
     Ok(Redirect::to("/frontend/user"))
 }

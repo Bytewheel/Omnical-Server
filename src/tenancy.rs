@@ -25,11 +25,19 @@
 //! - A **missing `default_tenant` on an appliance-style install** is a refusal
 //!   to boot, from [`TenancyConfig::validate`], not a 404 on every request.
 
+use crate::store_bundle::StoreBundle;
+use rustical_dav_push::{DavPushService, VapidStore};
 use rustical_frontend::{AdminPanel, AppliancePanel};
+use rustical_scheduling::Scheduler;
+use rustical_store::CalendarStorePruneDeleted;
+use rustical_store::TenantId;
 use rustical_store::admin_store::AdminCredentialStore;
+use rustical_store::auth::AuthenticationProvider;
 use rustical_store::tenant_store::TenantStore;
 use rustical_store_sqlite::{SqliteTenantStore, create_control_plane_pool};
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tracing::info;
 
 use crate::app::AppConfig;
@@ -434,14 +442,101 @@ pub async fn cli_data_store(config: &Config) -> anyhow::Result<DataStoreConfig> 
 ///
 /// Everything a tenant needs is inside the closure, so the dispatch loop stays a
 /// pure "resolve then serve".
+/// Starts this tenant's background tasks, at most once per tenant.
+///
+/// iMIP ingestion, the DAV-push notifier and trash retention are per-tenant
+/// facts: the IMAP accounts that receive RSVP replies, the collections whose
+/// deletions expire, and the subscriptions that need notifying all belong to one
+/// tenant's database. Spawning them once from `cmd_serve` meant every tenant but
+/// one got none, and the one that did got them against the platform database —
+/// which `cmd_serve` no longer does under tenancy, see the guards there.
+///
+/// `spawned` guards the **once**: the tenant closure runs on every cache miss,
+/// and a tenant evicted from `StoreBundleCache` and requested again would
+/// otherwise get a second set of tasks over the same rows — double deletes,
+/// duplicate notifications, two pollers on one IMAP folder. A task set that has
+/// been spawned is never restarted, so a long-lived process also never
+/// accumulates tasks for tenants that have fallen out of the cache.
+///
+/// Takes `update_recv` out of the bundle: consuming the receiver half of that
+/// channel is what makes this tenant's DAV-push notifications drain rather than
+/// queue unread.
+fn spawn_tenant_tasks(
+    tenant_id: &TenantId,
+    spawned: &Mutex<HashSet<String>>,
+    config: &Config,
+    ingest_scheduler: Option<&Arc<Scheduler>>,
+    bundle: &mut StoreBundle<impl AuthenticationProvider>,
+) {
+    let Ok(mut guard) = spawned.lock() else {
+        // A poisoned lock means some other tenant's task set panicked on the way
+        // in. Refusing to spawn this one is safer than a second set.
+        tracing::error!("not starting background tasks: the per-tenant guard is poisoned");
+        return;
+    };
+    if !guard.insert(tenant_id.to_string()) {
+        return;
+    }
+    drop(guard);
+
+    if let Some(scheduler) = ingest_scheduler {
+        rustical_scheduling::ingest::spawn_ingestion(scheduler, &crate::shutdown_signal);
+    }
+
+    let update_recv = bundle.update_recv.take();
+    if config.dav_push.enabled {
+        let dav_push_store = bundle.dav_push_store.clone();
+        let allowed = config.dav_push.allowed_push_servers.clone();
+        tokio::spawn(async move {
+            // The VAPID keypair is per tenant, so this service can only be built
+            // once the tenant's bundle exists.
+            let vapid_key = match dav_push_store.get_vapid_keypair().await {
+                Ok(vapid_key) => (*vapid_key).clone(),
+                Err(e) => {
+                    tracing::error!(
+                        "DAV-push notifier not started for this tenant: reading its VAPID \
+                         keypair failed: {e}"
+                    );
+                    return;
+                }
+            };
+            match DavPushService::new(allowed, dav_push_store, vapid_key) {
+                Ok(service) => {
+                    if let Some(recv) = update_recv {
+                        service.notifier_loop(recv).await;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("this tenant's DAV-push notifier is invalid: {e}");
+                }
+            }
+        });
+    }
+
+    if let Some(days) = config.maintenance.trash_retention_days {
+        let cal_store: Arc<dyn CalendarStorePruneDeleted> = Arc::new((*bundle.cal_store).clone());
+        tokio::spawn(crate::tasks::cleanup_trashed_calendar_entities(
+            cal_store,
+            days,
+            crate::shutdown_signal(),
+        ));
+    }
+}
+
 fn tenant_builder(
     config: &Config,
     _control_plane: &SqliteTenantStore,
     _cache: &Arc<StoreBundleCache>,
 ) -> TenantBuilder {
     let config = config.clone();
+    // One background task set per tenant, ever — see the note at the spawn.
+    let spawned: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     Arc::new(move |tenant| {
         let config = config.clone();
+        // Cloned, not moved: the outer closure is `Fn` and runs once per
+        // request that misses the cache.
+        let spawned = spawned.clone();
         Box::pin(async move {
             // This closure's error type is `String` (it is boxed into a
             // `TenantBuilder`), so the anyhow error is flattened back to a
@@ -532,6 +627,9 @@ fn tenant_builder(
 
             let mut app_config =
                 app_config_for(&config).map_err(|e| format!("the tenant router config: {e}"))?;
+            // Cloned before the move on the next line: the per-tenant iMIP
+            // ingestion task below needs its own handle to this scheduler.
+            let ingest_scheduler = scheduler.clone();
             app_config.scheduler = scheduler;
             app_config.subscriptions = subscriptions;
             app_config.registration = registration;
@@ -539,6 +637,15 @@ fn tenant_builder(
             app_config.smtp_accounts.clone_from(&scheduling.smtp);
 
             let mut bundle = bundle;
+
+            spawn_tenant_tasks(
+                &tenant.id,
+                &spawned,
+                &config,
+                ingest_scheduler.as_ref(),
+                &mut bundle,
+            );
+
             let router = crate::app::make_app_for(Some(tenant), app_config, bundle.app_stores());
             // DAV-Push is wired per tenant in a later part; until then the
             // channel is left unconsumed rather than silently drained, so a
