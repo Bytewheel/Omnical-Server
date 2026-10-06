@@ -7,6 +7,28 @@
     <p class="description">Your account already contains a <strong>personal calendar</strong>, a <strong>tasks list</strong> and a <strong>contacts book</strong> — they sync to your apps as soon as one is connected. To connect an app, create an <strong>app token</strong> below (the password your calendar app uses — different from the one you sign in to this website with) and follow <a href="#app-token-help">How to use app tokens…</a>. Share links that let others (or Google Calendar) view a calendar read-only are on the <a href="/frontend/user/{{ user.id }}/calendar">Calendars</a> tab.</p>
   </div>
 </details>
+<script>
+  // Expanded on first sight, dismissed by collapsing: users who registered
+  // before the onboarding page existed (or on a new browser) get the full
+  // introduction on their next login; collapsing it remembers the dismissal
+  // for this browser, reopening it forgets it again. localStorage only —
+  // no server state, nothing to sync, and a blocked storage degrades to
+  // the collapsed details (the summary still works).
+  (function () {
+    var el = document.getElementById('what-is-omnical');
+    if (!el) return;
+    var KEY = 'omnical-intro-dismissed';
+    var storage;
+    try { storage = window.localStorage; } catch (e) { return; }
+    if (!storage.getItem(KEY)) el.setAttribute('open', '');
+    el.addEventListener('toggle', function () {
+      try {
+        if (el.open) { storage.removeItem(KEY); }
+        else { storage.setItem(KEY, '1'); }
+      } catch (e) { /* storage blocked: dismissal is best-effort */ }
+    });
+  })();
+</script>
 
 {% let groups = user.memberships_without_self() %}
 {% if groups.len() > 0 %}
