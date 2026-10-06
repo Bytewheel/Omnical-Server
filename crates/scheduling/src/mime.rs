@@ -360,6 +360,12 @@ pub fn build_registration_invite(
         out,
         "You have been invited to create an account on Omnical by {created_by}.\r\n\
          \r\n\
+         What to expect: Omnical is a calendar server, not a calendar website.\r\n\
+         Your calendar, tasks and contacts live in the apps you already use — the\r\n\
+         calendar app on your phone or computer syncs to this server. The website\r\n\
+         is only for account setup, connecting your apps, and sharing; it walks\r\n\
+         you through connecting them after you sign up.\r\n\
+         \r\n\
          Open this one-time link to set a password and finish signing up:\r\n\
          \r\n\
          {register_url}\r\n\
@@ -505,6 +511,11 @@ mod tests {
         assert!(mail.contains("Subject: Invitation to Omnical calendar server\r\n"));
         assert!(mail.contains("https://cal.example.com:8443/register?code=abc123\r\n"));
         assert!(mail.contains("by admin.\r\n"));
+        // The expectation-setter (2026-10-06): invited users thought the
+        // website would show a calendar. Say so before they click.
+        assert!(mail.contains("not a calendar website"));
+        assert!(mail.contains("syncs to this server"));
+        assert!(mail.contains("connecting them after you sign up"));
         assert!(mail.contains("This invite expires on 2026-12-31T23:59:59Z."));
         assert!(mail.contains("for the \r\naddress it was sent to."));
     }

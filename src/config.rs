@@ -459,8 +459,8 @@ pub struct SubscriptionsConfig {
 /// While disabled (the default) the build behaves byte-for-byte like the
 /// current one: no `/register` routes are mounted and no registration state
 /// is constructed. When enabled, invite-gated registration provisions a full
-/// account (principal, app tokens, seed collections, share feed) and
-/// auto-logs the new user in.
+/// account (principal, seed collections, share feed) and auto-logs the new
+/// user in.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields, default)]
 pub struct RegistrationConfig {
@@ -472,10 +472,6 @@ pub struct RegistrationConfig {
     pub invite_required: bool,
     /// Minimum accepted password length.
     pub min_password_length: usize,
-    /// Client app-token names created automatically for every new registrant.
-    /// These are shown (and then never again) on the success card.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub auto_app_tokens: Vec<String>,
     /// Create `personal` calendar + addressbook share feeds for every new
     /// registrant (requires `[subscriptions] enabled = true` to serve them).
     pub auto_subscription: bool,
@@ -493,14 +489,6 @@ impl Default for RegistrationConfig {
             enabled: false,
             invite_required: true,
             min_password_length: 12,
-            auto_app_tokens: vec![
-                "vdirsyncer".to_owned(),
-                "hawkbook".to_owned(),
-                "davx5".to_owned(),
-                "thunderbird".to_owned(),
-                "apple".to_owned(),
-                "i3status".to_owned(),
-            ],
             auto_subscription: true,
             default_group: String::new(),
             rate_limit_per_hour: 10,

@@ -210,10 +210,6 @@ async fn test_written_config_round_trips() {
         Config::default_config().http.payload_limit_mb,
         "a value the wizard never asks about must survive it"
     );
-    assert_eq!(
-        rewritten.registration.auto_app_tokens,
-        Config::default_config().registration.auto_app_tokens
-    );
     assert_eq!(rewritten.registration.min_password_length, 12);
     assert!(rewritten.frontend.enabled);
 }

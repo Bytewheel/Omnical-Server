@@ -11,10 +11,10 @@
 //!    - the **atomic redemption** (`redeem_invite`) is the commit point — the
 //!      single-use code is consumed before any account data is written, so two
 //!      concurrent registrations with the same code yield exactly one account;
-//!    - provisioning: principal (argon2), optional group membership, app
-//!      tokens, seed collections, share feeds (PLAN.md §17.8.2);
-//!    - the new user is auto-logged-in (session `user`) and a success card
-//!      shows the credentials — the only time they are ever displayed.
+//!    - provisioning: principal (argon2), optional group membership, seed
+//!      collections, share feeds (PLAN.md §17.8.2);
+//!    - the new user is auto-logged-in (session `user`) and an onboarding
+//!      page explains what Omnical is and how to connect apps to it.
 //!
 //! ## Security discipline
 //!
@@ -613,23 +613,6 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
         error!(%err, "registration: needs_password_change clear failed");
     }
 
-    // App tokens (full values shown once on the card).
-    let mut app_tokens = Vec::with_capacity(state.context.config.auto_app_tokens.len());
-    for name in &state.context.config.auto_app_tokens {
-        let token = random_token();
-        match state
-            .auth_provider
-            .add_app_token(email, name.clone(), token.clone())
-            .await
-        {
-            Ok(mut token_id) => {
-                token_id.truncate(4);
-                app_tokens.push((name.clone(), format!("{token_id}_{token}")));
-            }
-            Err(err) => error!(%err, "registration: app token {name} failed"),
-        }
-    }
-
     // Seed collections (discovery parity, PLAN.md §17.8.2). Shared with
     // `rustical setup` — see `seed_collections`.
     if let Err(err) = seed_collections(&*state.cal_store, &*state.addr_store, email).await {
@@ -671,7 +654,7 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
         warn!("registration: session persist failed for {email}");
     }
 
-    render_success(email, displayname, host, &app_tokens, &feeds).into_response()
+    render_success(email, displayname, host, &feeds).into_response()
 }
 
 /// Create the collections a new account needs to be useful: a `personal`
@@ -912,23 +895,26 @@ fn render_form(
     ))
 }
 
+/// The onboarding page a fresh registrant lands on.
+///
+/// Feedback from invited users (2026-10-06): they expected a calendar
+/// frontend *on the website* and were unsure how to use Omnical. So this page
+/// sets that expectation first — no web calendar, your data syncs to the
+/// apps you already use, this site is the control panel — and then walks the
+/// one flow that matters next: creating an app token on the profile page and
+/// following the per-client instructions there.
+///
+/// No app tokens are minted at registration (removed the same day): they
+/// could not be used yet, the one-time display was lost by the time a device
+/// was actually configured, and a wall of six random strings read as
+/// "save these somewhere, they matter" — which is exactly the confusion an
+/// invited non-technical user does not need on their first screen.
 fn render_success(
     email: &str,
     displayname: &str,
     host: &str,
-    app_tokens: &[(String, String)],
     feeds: &[(String, String)],
 ) -> Html<String> {
-    let mut tokens_html = String::new();
-    for (name, token) in app_tokens {
-        writeln!(
-            tokens_html,
-            "<tr><td>{}</td><td><code>{}</code></td></tr>",
-            escape_html(name),
-            escape_html(token),
-        )
-        .unwrap();
-    }
     let mut feeds_html = String::new();
     for (label, url) in feeds {
         writeln!(
@@ -940,6 +926,18 @@ fn render_success(
         )
         .unwrap();
     }
+    let feeds_section = if feeds.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<h2>Read-only subscribe links</h2>
+        <p class="muted">These let calendar apps that can only <em>view</em> a calendar — Google
+        Calendar and Outlook.com — display yours. Anyone holding a link can read that
+        collection, so treat the links like passwords. You will also find them on the
+        Calendars tab of your account page.</p>
+        <ul>{feeds_html}</ul>"#
+        )
+    };
     let host_html = if host.is_empty() {
         String::new()
     } else {
@@ -955,19 +953,32 @@ fn render_success(
     };
 
     render_page(&format!(
-        r#"<h1>Account created</h1>
-        <p>Welcome{greeting}! Your account <code>{email}</code> is ready and you have been signed in automatically.</p>
-        <div class="warn"><strong>These credentials are shown only once.</strong>
-        Copy them now — app tokens cannot be recovered later.</div>
+        r#"<h1>Your account is ready</h1>
+        <p>Welcome{greeting}! Your account <code>{email}</code> is set up and you have been
+        signed in to this website automatically.</p>
+        <div class="intro">
+          <h2>What Omnical is — and what it is not</h2>
+          <p><strong>There is no calendar on this website.</strong> Omnical is the place your
+          calendars, tasks and contacts are <em>stored</em>; you see and edit them in the
+          calendar and contacts apps you already use — iPhone/iPad/Mac, Android, or
+          Thunderbird on a computer. This website is the control panel: account settings,
+          connecting your apps, and sharing calendars with people.</p>
+        </div>
+        <h2>Connect your apps — three steps</h2>
+        <ol class="steps">
+          <li>Open <a href="/frontend/user/{email}">your account page</a> — you are already
+          signed in.</li>
+          <li>Under <strong>App tokens</strong>, create a token. That is the password your
+          calendar app will use — <em>not</em> the password you just chose; that one is only
+          for signing in to this website.</li>
+          <li>Open <strong>How to use app tokens…</strong> on that page and follow the steps
+          for your device.</li>
+        </ol>
+        <p>Your account already contains a personal calendar, a tasks list and a contacts
+        book — they are ready to sync the moment an app connects.</p>
+        {feeds_section}
         {host_html}
-        <h2>App tokens</h2>
-        <table>
-          <thead><tr><th>Client</th><th>Token</th></tr></thead>
-          <tbody>{tokens_html}</tbody>
-        </table>
-        <h2>Share feeds</h2>
-        <ul>{feeds_html}</ul>
-        <p><a class="button" href="/frontend/user/{email}">Continue to your account →</a></p>"#,
+        <p><a class="button" href="/frontend/user/{email}">Go to my account page →</a></p>"#,
         email = escape_html(email),
     ))
 }
@@ -1025,6 +1036,9 @@ fn render_page(body: &str) -> Html<String> {
   button {{ padding: 0.6rem 1.2rem; font-size: 1rem; cursor: pointer; }}
   .error {{ color: #b00020; border: 1px solid currentColor; padding: 0.6rem; }}
   .warn {{ border-left: 4px solid #f0ad4e; padding: 0.5rem 0.8rem; background: rgba(240,173,78,.15); }}
+  .intro {{ border-left: 4px solid #3178c6; padding: 0.5rem 0.8rem 0.7rem; background: rgba(49,120,198,.08); }}
+  .intro h2 {{ margin-top: 0.3rem; }}
+  .steps {{ padding-left: 1.2rem; }} .steps li {{ margin-bottom: 0.6rem; }}
   .muted {{ color: #666; }} .button {{ display: inline-block; margin-top: 1rem; }}
   table {{ border-collapse: collapse; width: 100%; }} td, th {{ border: 1px solid #ccc; padding: 0.35rem 0.5rem; text-align: left; }}
   code {{ word-break: break-all; }}
@@ -1191,11 +1205,6 @@ mod tests {
             enabled: true,
             invite_required: true,
             min_password_length: 12,
-            auto_app_tokens: vec![
-                "vdirsyncer".to_owned(),
-                "hawkbook".to_owned(),
-                "davx5".to_owned(),
-            ],
             auto_subscription: true,
             default_group: String::new(),
             rate_limit_per_hour: 10,
@@ -1236,10 +1245,20 @@ mod tests {
             ])
             .await;
         assert_eq!(status, StatusCode::OK, "body: {body}");
-        assert!(body.contains("Share feeds"), "body: {body}");
+        // The onboarding page: expectation-setting intro + subscribe feeds.
+        assert!(body.contains("What Omnical is"), "body: {body}");
+        assert!(body.contains("Read-only subscribe links"), "body: {body}");
         assert!(body.contains("new@example.com"), "body: {body}");
+        // …and nothing that looks like a one-time credential table: the
+        // intro *names* the "App tokens" section it points at, so the marker
+        // is the old token table's heading, not the phrase.
+        assert!(!body.contains("App tokens</h2>"), "body: {body}");
+        assert!(!body.contains("<table"), "body: {body}");
+        assert!(!body.contains("cannot be recovered"), "body: {body}");
 
-        // Account exists, redemption was recorded, tokens + collections + feeds.
+        // Account exists, redemption was recorded, collections + feeds.
+        // No app tokens: they are minted by the user on the profile page
+        // when a device is actually being connected — never at registration.
         let principal = rig
             .principal_store
             .get_principal("new@example.com")
@@ -1259,8 +1278,10 @@ mod tests {
             .get_app_tokens(&principal.id)
             .await
             .unwrap();
-        // vdirsyncer, hawkbook, davx5
-        assert_eq!(tokens.len(), 3);
+        assert!(
+            tokens.is_empty(),
+            "registration must not mint app tokens: {tokens:?}"
+        );
         for name in ["personal", "tasks"] {
             rig.cal_store
                 .get_calendar(&principal.id, name, false)
@@ -1287,7 +1308,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn success_card_renders_feeds() {
+    async fn success_page_renders_feeds_and_intro() {
         let rig = TestRig::new(base_config()).await;
         rig.get_form().await;
         rig.invite_store
@@ -1317,6 +1338,8 @@ mod tests {
         );
         assert!(body.contains(".ics"), "{body}");
         assert!(body.contains(".vcf"), "{body}");
+        // The three-step connect flow links into the profile page.
+        assert!(body.contains("/frontend/user/sess@example.com"), "{body}");
     }
 
     #[tokio::test]

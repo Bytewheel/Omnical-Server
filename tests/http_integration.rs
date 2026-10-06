@@ -767,14 +767,14 @@ async fn test_register_enabled_provisions() {
                 .unwrap()
                 .unwrap();
             assert!(principal.password.is_some());
-            // vdirsyncer, hawkbook, davx5, thunderbird, apple, i3status
-            assert_eq!(
+            // No app tokens at registration — the user mints them from the
+            // profile page when connecting a device.
+            assert!(
                 principal_store
                     .get_app_tokens(&principal.id)
                     .await
                     .unwrap()
-                    .len(),
-                6
+                    .is_empty()
             );
 
             let (send, _recv) = tokio::sync::mpsc::channel(1);
@@ -888,14 +888,12 @@ async fn test_register_enabled_provisions() {
                 .unwrap()
                 .unwrap();
             assert!(second_principal.password.is_some());
-            // vdirsyncer, hawkbook, davx5, thunderbird, apple, i3status
-            assert_eq!(
+            assert!(
                 principal_store
                     .get_app_tokens(&second_principal.id)
                     .await
                     .unwrap()
-                    .len(),
-                6
+                    .is_empty()
             );
             let (send, _recv) = tokio::sync::mpsc::channel(1);
             let cal_store = SqliteCalendarStore::new(db, send, false);
