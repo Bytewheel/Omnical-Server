@@ -1,12 +1,18 @@
 //! The HawkBook download (the DAVx⁵ fork the per-client instructions keep
-//! naming): a signed-in-only route serving the configured APK plus the
-//! sha256 the profile intro prints next to the link.
+//! naming): a PUBLIC route (the phone that needs the package cannot
+//! form-login to the portal, and `wget`/`curl` for the printed sha256 need
+//! a plain URL) serving the configured APK plus the sha256 the profile
+//! intro prints next to the link.
 //!
 //! The design contract under test: the checksum the page shows and the bytes
 //! the route serves derive from ONE startup read of ONE configured file
 //! (`[frontend] hawkbook_apk`), so a link that renders can always serve,
 //! and what it serves always matches what the page claims. Unset (or
-//! unreadable) config ⇒ no link and a 404 — never a link at a 404.
+//! unreadable) config ⇒ no link and a 404 — never a link at a 404. And the
+//! download itself works with NO credential at all — the first cut
+//! session-gated it and the deploy that shipped it logged the user's
+//! browser out mid-flight (in-process session store), which is exactly the
+//! failure the phone path must never have.
 use super::{ResponseExtractString, get_app, get_app_with_frontend_config};
 use axum::body::Body;
 use axum::extract::Request;
@@ -38,7 +44,9 @@ fn authed_get(path: &str) -> Request {
     )
 }
 
-fn authed_get_no_auth(path: &str) -> Request {
+/// The download path, with NO credential of any kind — how wget, curl and a
+/// fresh phone browser hit it.
+fn anon_get(path: &str) -> Request {
     Request::builder()
         .uri(path)
         .header("host", "public.example")
@@ -61,7 +69,7 @@ fn write_fake_apk() -> PathBuf {
 
 /// The page-intro and the download route must agree: the sha256 printed in
 /// the New here? block is the ETag AND the sha256 of the served bytes, and
-/// an unauthenticated hit never reaches the file.
+/// the whole download path works with NO credential at all.
 #[rstest]
 #[tokio::test]
 async fn test_download_route_matches_the_intro_checksum(
@@ -96,10 +104,11 @@ async fn test_download_route_matches_the_intro_checksum(
         "{page}"
     );
 
-    // 2. The route serves the exact file bytes with the APK content type.
+    // 2. The route serves the exact file bytes with the APK content type,
+    // with NO credential — the phone/wget path, not a portal session.
     let response = app
         .clone()
-        .oneshot(authed_get("/frontend/download/hawkbook.apk"))
+        .oneshot(anon_get("/frontend/download/hawkbook.apk"))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -114,18 +123,16 @@ async fn test_download_route_matches_the_intro_checksum(
     let body = response.extract_string().await;
     assert_eq!(body, std::fs::read_to_string(&apk_path).unwrap());
 
-    // 3. Revalidation: `no-cache` means every re-download re-asks; a
-    // matching If-None-Match must be a 304 (answered before the file is
-    // even read), a non-matching one a full 200 — 18 MB over a
+    // 3. Revalidation, also anonymous: `no-cache` means every re-download
+    // re-asks; a matching If-None-Match must be a 304 (answered before the
+    // file is even read), a non-matching one a full 200 — 18 MB over a
     // home-router uplink must not be re-sent just for a re-check.
-    let revalidating = with_auth(
-        Request::builder()
-            .uri("/frontend/download/hawkbook.apk")
-            .header("host", "public.example")
-            .header(header::IF_NONE_MATCH, format!("\"{sha256}\""))
-            .body(Body::empty())
-            .unwrap(),
-    );
+    let revalidating = Request::builder()
+        .uri("/frontend/download/hawkbook.apk")
+        .header("host", "public.example")
+        .header(header::IF_NONE_MATCH, format!("\"{sha256}\""))
+        .body(Body::empty())
+        .unwrap();
     let response = app.clone().oneshot(revalidating).await.unwrap();
     assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
     assert_eq!(
@@ -134,33 +141,18 @@ async fn test_download_route_matches_the_intro_checksum(
     );
     assert!(response.extract_string().await.is_empty());
 
-    let stale = with_auth(
-        Request::builder()
-            .uri("/frontend/download/hawkbook.apk")
-            .header("host", "public.example")
-            .header(header::IF_NONE_MATCH, "\"stale-deadbeef\"")
-            .body(Body::empty())
-            .unwrap(),
-    );
+    let stale = Request::builder()
+        .uri("/frontend/download/hawkbook.apk")
+        .header("host", "public.example")
+        .header(header::IF_NONE_MATCH, "\"stale-deadbeef\"")
+        .body(Body::empty())
+        .unwrap();
     let response = app.clone().oneshot(stale).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get(header::ETAG).unwrap(),
         format!("\"{sha256}\"").as_str()
     );
-
-    // 4. Sessionless hits are bounced to the login form (with the way back),
-    // never to the file — the package rides a home-router uplink.
-    let response = app
-        .clone()
-        .oneshot(authed_get_no_auth("/frontend/download/hawkbook.apk"))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let body = response.extract_string().await;
-    // redirect_uri is percent-encoded by the redirect builder; do not
-    // over-specify the encoding, assert the way-back target instead.
-    assert!(body.contains("/frontend/login?redirect_uri="), "{body}");
 
     std::fs::remove_file(&apk_path).unwrap();
 }
@@ -187,7 +179,7 @@ async fn test_unconfigured_download_stays_hidden_and_absent(
     assert!(!page.contains("/frontend/download/hawkbook.apk"), "{page}");
 
     let response = app
-        .oneshot(authed_get("/frontend/download/hawkbook.apk"))
+        .oneshot(anon_get("/frontend/download/hawkbook.apk"))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);

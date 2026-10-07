@@ -5,7 +5,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use headers::{CacheControl, ETag, HeaderMapExt};
-use rustical_store::auth::Principal;
 use sha2::{Digest, Sha256};
 use std::{path::PathBuf, str::FromStr};
 
@@ -48,15 +47,19 @@ impl HawkBookApk {
     }
 }
 
-/// `GET /download/hawkbook.apk` — the download. Behind the portal session
-/// (`Principal`) on purpose: an 18 MB file on a home-router uplink must not
-/// be anonymously leechable, and every user who needs it (the intro links
-/// it) is signed in by construction — the invite→register→intro flow lands
-/// them authenticated before the link can ever render for them.
+/// `GET /download/hawkbook.apk` — the download, UNAUTHENTICATED by design.
+///
+/// Not an oversight — the session-gated first cut was wrong for the use
+/// case: the point of hosting the package is the user's NEW Android phone,
+/// which is exactly the client that cannot form-login to the portal, and
+/// `wget`/`curl` for the sha256 verification the intro prints need a plain
+/// URL too. The file is a build artifact, not user data (nothing secret in
+/// an APK), and the URL is unadvertised: it is printed only inside the
+/// authenticated intro. The profile session dying on every deploy (the
+/// session store is in-process) must also never take the download with it.
 pub async fn route_download_hawkbook(
     Extension(apk): Extension<Option<HawkBookApk>>,
     headers: HeaderMap,
-    _user: Principal,
 ) -> Response {
     let Some(apk) = apk else {
         return StatusCode::NOT_FOUND.into_response();

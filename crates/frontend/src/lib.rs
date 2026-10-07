@@ -246,14 +246,14 @@ pub fn frontend_router<
             get(route_timezones).head(route_timezones),
         )
         // HawkBook download: sibling of /login, not under /user — it is not
-        // user-scoped state, it is this deployment's client package. Same
-        // 401→login-redirect middleware as the user pages, so a sessionless
-        // hit lands on the login form (with the way back via `redirect_uri`)
-        // instead of a bare `WWW-Authenticate: Basic` dialog.
-        .route(
-            "/download/hawkbook.apk",
-            get(route_download_hawkbook).layer(middleware::from_fn(unauthorized_handler)),
-        );
+        // user-scoped state, it is this deployment's client package. Served
+        // UNAUTHENTICATED by design (see `route_download_hawkbook`): the
+        // phone that needs it cannot form-login to the portal, `wget`/`curl`
+        // for the printed sha256 need a plain URL, and the package is a
+        // build artifact, not user data. The URL is printed only inside the
+        // authenticated intro, and a deploy-restart killing the profile
+        // session must not take the download with it.
+        .route("/download/hawkbook.apk", get(route_download_hawkbook));
 
     #[cfg(not(feature = "dev"))]
     let mut router = router.route_service("/assets/{*file}", EmbedService::<Assets>::default());
