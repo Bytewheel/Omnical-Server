@@ -526,6 +526,10 @@ form.inline-form {
   }
 }
 
+.client-help.profile-intro {
+  margin-bottom: 2em;
+}
+
 /* One-time banners and page-level messages */
 .error {
   color: var(--danger);

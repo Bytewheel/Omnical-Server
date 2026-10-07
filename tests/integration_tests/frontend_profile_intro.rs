@@ -59,5 +59,7 @@ async fn test_profile_page_carries_the_intro_and_its_dismiss_logic(
     // Not server-side-open: the details element itself ships closed, so the
     // expansion is purely the browser's decision (and private-mode browsers
     // that block storage still get the collapsed summary).
-    assert!(!page.contains("<details class=\"client-help\" id=\"what-is-omnical\" open"));
+    assert!(
+        !page.contains("<details class=\"client-help profile-intro\" id=\"what-is-omnical\" open")
+    );
 }
