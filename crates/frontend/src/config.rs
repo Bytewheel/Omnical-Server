@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 const fn default_true() -> bool {
     true
@@ -19,6 +20,21 @@ pub struct FrontendConfig {
     /// (mirrors `[registration] min_password_length`).
     #[serde(default = "default_min_password_length")]
     pub min_password_length: usize,
+    /// The `HawkBook` Android package (the `DAVx⁵` fork the per-client
+    /// instructions keep naming) this deployment serves at
+    /// `/frontend/download/hawkbook.apk`. The route and the sha256 the
+    /// profile intro prints are both derived from this one file, so the
+    /// download link and the checksum cannot drift apart.
+    ///
+    /// Unset (or the file missing at startup) ⇒ the route 404s and the intro
+    /// omits the download sentence — the page never links at something it
+    /// cannot serve.
+    ///
+    /// Not embedded in the binary like `public/assets` on purpose: an APK is
+    /// ~18 MB, the whole build is gated at 35 MiB, and the router's overlay
+    /// cannot hold two copies of it.
+    #[serde(default)]
+    pub hawkbook_apk: Option<PathBuf>,
     /// `[tenancy] trusted_proxies`, already parsed (C5, §7.3.4).
     ///
     /// **`serde(skip)`, and that is the point.** The operator-facing key is
@@ -50,6 +66,7 @@ impl Default for FrontendConfig {
             allow_password_login: true,
             min_password_length: default_min_password_length(),
             trusted_proxies: Vec::new(),
+            hawkbook_apk: None,
         }
     }
 }

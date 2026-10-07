@@ -53,6 +53,7 @@ use crate::routes::{
         route_calendar, route_calendar_credentials, route_calendar_credentials_revoke,
         route_calendar_restore, route_calendar_subscribe,
     },
+    download::{HawkBookApk, route_download_hawkbook},
     groups::{
         route_group_detail, route_group_member_privilege, route_group_member_remove,
         route_group_new, route_groups,
@@ -104,6 +105,12 @@ pub fn frontend_router<
     // Read once: `frontend_config` is moved into its own `Extension` a few
     // layers down, and this list is needed for a second one.
     let frontend_trusted_proxies = frontend_config.trusted_proxies.clone();
+    // HawkBook download (the DAVx⁵ fork): read + hash the configured package
+    // once HERE, at router construction, so the route's ETag, the sha256 the
+    // profile intro prints and the file the route can serve are all derived
+    // from one read — see `HawkBookApk::from_config`. `None` (unconfigured,
+    // or unreadable) keeps the route a 404 and omits the intro sentence.
+    let hawkbook_apk = HawkBookApk::from_config(frontend_config.hawkbook_apk.as_ref());
 
     let user_router = Router::new()
         .route("/", get(route_get_home))
@@ -237,6 +244,15 @@ pub fn frontend_router<
         .route(
             "/_timezones.json",
             get(route_timezones).head(route_timezones),
+        )
+        // HawkBook download: sibling of /login, not under /user — it is not
+        // user-scoped state, it is this deployment's client package. Same
+        // 401→login-redirect middleware as the user pages, so a sessionless
+        // hit lands on the login form (with the way back via `redirect_uri`)
+        // instead of a bare `WWW-Authenticate: Basic` dialog.
+        .route(
+            "/download/hawkbook.apk",
+            get(route_download_hawkbook).layer(middleware::from_fn(unauthorized_handler)),
         );
 
     #[cfg(not(feature = "dev"))]
@@ -277,6 +293,7 @@ pub fn frontend_router<
         .layer(Extension(password_reset_store))
         .layer(Extension(reset_limiter))
         .layer(Extension(frontend_trusted_proxies))
+        .layer(Extension(hawkbook_apk))
         .layer(Extension(smtp_accounts));
 
     Router::new()

@@ -1,5 +1,6 @@
 use std::{str::FromStr, sync::Arc};
 
+use crate::routes::download::HawkBookApk;
 use crate::routes::user::{RegeneratedToken, render_profile_page};
 use askama::Template;
 use axum::{
@@ -104,6 +105,7 @@ pub async fn route_regenerate_app_token<AP: AuthenticationProvider>(
     user: Principal,
     Extension(auth_provider): Extension<Arc<AP>>,
     Extension(public_url): Extension<String>,
+    Extension(hawkbook_apk): Extension<Option<HawkBookApk>>,
     Path((user_id, token_id)): Path<(String, String)>,
     TypedHeader(host): TypedHeader<Host>,
     headers: HeaderMap,
@@ -137,6 +139,7 @@ pub async fn route_regenerate_app_token<AP: AuthenticationProvider>(
         &headers,
         &user,
         Some(RegeneratedToken { name, token }),
+        hawkbook_apk.map(|apk| apk.sha256_hex()),
     )
     .await)
 }

@@ -13,6 +13,22 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 pub fn get_app(context: TestStoreContext) -> axum::Router {
+    get_app_with_frontend_config(
+        context,
+        FrontendConfig {
+            enabled: true,
+            allow_password_login: true,
+            ..FrontendConfig::default()
+        },
+    )
+}
+
+/// The same app as [`get_app`], with the caller's `[frontend]` section —
+/// the HawkBook download tests need to point `hawkbook_apk` at a file.
+pub fn get_app_with_frontend_config(
+    context: TestStoreContext,
+    frontend_config: FrontendConfig,
+) -> axum::Router {
     let TestStoreContext {
         addr_store,
         cal_store,
@@ -35,11 +51,7 @@ pub fn get_app(context: TestStoreContext) -> axum::Router {
         Arc::new(cal_store),
         Arc::new(dav_push_store),
         Arc::new(principal_store),
-        FrontendConfig {
-            enabled: true,
-            allow_password_login: true,
-            ..FrontendConfig::default()
-        },
+        frontend_config,
         None,
         CalDavConfig::default(),
         None,
@@ -93,6 +105,7 @@ mod caldav;
 mod carddav;
 mod frontend_app_token;
 mod frontend_calendars;
+mod frontend_download;
 mod frontend_groups;
 mod frontend_linked_platforms;
 mod frontend_password;

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::pages::user::{Section, UserPage};
 use crate::routes::calendar::resolve_base_url;
+use crate::routes::download::HawkBookApk;
 use askama::Template;
 use askama_web::WebTemplate;
 use axum::{
@@ -44,6 +45,12 @@ pub struct ProfileSection {
     /// One-time banner payload of a Regenerate action (`None` on a plain
     /// page load).
     pub regenerated: Option<RegeneratedToken>,
+    /// sha256 of the `HawkBook` APK this deployment serves at
+    /// `/frontend/download/hawkbook.apk`, straight from the startup read
+    /// (`HawkBookApk`), so the intro prints a checksum the download route
+    /// provably serves. `None` ⇒ unconfigured (or unreadable at startup):
+    /// no link, no checksum.
+    pub hawkbook_apk_sha256: Option<String>,
 }
 
 /// The shared profile-page renderer (same pattern as
@@ -56,6 +63,7 @@ pub async fn render_profile_page<AP: AuthenticationProvider>(
     headers: &HeaderMap,
     user: &Principal,
     regenerated: Option<RegeneratedToken>,
+    hawkbook_apk_sha256: Option<String>,
 ) -> Response {
     let ua = headers.typed_get::<UserAgent>();
     let hawkbook_hostname =
@@ -71,6 +79,7 @@ pub async fn render_profile_page<AP: AuthenticationProvider>(
             caldav_url: format!("{base_url}/caldav"),
             carddav_url: format!("{base_url}/carddav"),
             regenerated,
+            hawkbook_apk_sha256,
         },
         user: user.clone(),
     }
@@ -81,6 +90,7 @@ pub async fn route_user_named<AP: AuthenticationProvider>(
     Path(user_id): Path<String>,
     Extension(auth_provider): Extension<Arc<AP>>,
     Extension(public_url): Extension<String>,
+    Extension(hawkbook_apk): Extension<Option<HawkBookApk>>,
     TypedHeader(host): TypedHeader<Host>,
     user: Principal,
     headers: HeaderMap,
@@ -89,7 +99,16 @@ pub async fn route_user_named<AP: AuthenticationProvider>(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    render_profile_page(&auth_provider, &public_url, &host, &headers, &user, None).await
+    render_profile_page(
+        &auth_provider,
+        &public_url,
+        &host,
+        &headers,
+        &user,
+        None,
+        hawkbook_apk.map(|apk| apk.sha256_hex()),
+    )
+    .await
 }
 
 pub async fn route_get_home(user: Principal) -> Redirect {
