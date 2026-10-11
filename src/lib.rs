@@ -519,7 +519,14 @@ pub async fn cmd_serve(
             tokio::spawn(async move {
                 info!("RustiCal serving on http://{address}");
                 if let Some(start_notifier) = start_notifier {
-                    start_notifier.notify_waiters();
+                    // `notify_one`, deliberately: it stores a permit, so a
+                    // waiter that registers after the signal still wakes.
+                    // `notify_waiters` woke only listeners polled at the
+                    // exact signal instant — under the CI runner's crowded
+                    // scheduling the spawned server could out-run the test
+                    // thread to this line, the wakeup was lost, and the
+                    // http_integration startup wait died on its timeout.
+                    start_notifier.notify_one();
                 }
                 let make =
                     ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(app);
@@ -553,7 +560,9 @@ pub async fn cmd_serve(
             tokio::spawn(async move {
                 info!("RustiCal serving on unix://{path}", path = path.display());
                 if let Some(start_notifier) = start_notifier {
-                    start_notifier.notify_waiters();
+                    // See the TCP arm: `notify_one` keeps the permit, so the
+                    // waiter cannot miss the wakeup.
+                    start_notifier.notify_one();
                 }
                 // **No** connect info: a Unix socket has no peer address, and
                 // `SocketAddr: Connected<UnixStream>` does not exist. The
