@@ -154,10 +154,14 @@ pub async fn route_share_create<CS: CalendarStore, AS: AddressbookStore + Prefix
                 SubscriptionKind::Addressbook => {
                     render_addressbooks_page(
                         &addr_store,
+                        &share_store,
                         Some(&sub_store),
                         &base_url,
                         &user,
-                        Some(error),
+                        crate::routes::addressbooks::AddressbooksExtras {
+                            error: Some(error),
+                            ..Default::default()
+                        },
                     )
                     .await
                 }

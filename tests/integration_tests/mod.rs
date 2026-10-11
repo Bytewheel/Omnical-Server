@@ -104,6 +104,7 @@ mod api;
 mod caldav;
 mod carddav;
 mod frontend_app_token;
+mod frontend_calendar_view;
 mod frontend_calendars;
 mod frontend_download;
 mod frontend_groups;

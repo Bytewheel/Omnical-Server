@@ -1,0 +1,76 @@
+{% extends "layouts/default.html" %}
+
+{% block title %}{{ title }} · Omnical{% endblock %}
+
+{% block content %}
+<section class="event-form-page">
+  <h1>{{ title }}</h1>
+  <form method="POST" action="{{ action }}" class="event-form">
+    {% if calendars.len() > 1 %}
+    <label for="calendar">Calendar
+      <select name="calendar" id="calendar" required>
+        {% for cal in calendars %}
+        <option value="{{ cal.value }}">{{ cal.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    {% else %}
+    {% for cal in calendars %}<input type="hidden" name="calendar" value="{{ cal.value }}">{% endfor %}
+    {% endif %}
+
+    <label for="summary">Title
+      <input type="text" name="summary" id="summary" value="{{ summary }}" required autofocus>
+    </label>
+
+    <label for="location">Location
+      <input type="text" name="location" id="location" value="{{ location }}">
+    </label>
+
+    <label for="description">Description
+      <textarea name="description" id="description" rows="4">{{ description }}</textarea>
+    </label>
+
+    <div class="event-datetime">
+      <label>Start
+        <input type="date" name="start_date" id="start_date" value="{{ start_date }}" required>
+        <input type="time" name="start_time" id="start_time" value="{{ start_time }}">
+      </label>
+      <label>End
+        <input type="date" name="end_date" id="end_date" value="{{ end_date }}">
+        <input type="time" name="end_time" id="end_time" value="{{ end_time }}">
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" name="all_day" id="all_day" value="on" {% if all_day %}checked{% endif %}>
+        All day
+      </label>
+    </div>
+
+    <label for="timezone">Timezone
+      <input type="text" name="timezone" id="timezone" value="{{ timezone }}" list="tz-list">
+      <datalist id="tz-list">
+        {% for tz in timezones %}<option value="{{ tz }}"></option>{% endfor %}
+      </datalist>
+    </label>
+
+    <div class="form-actions">
+      <button type="submit" class="primary">Save</button>
+      <button type="button" onclick="history.back()">Cancel</button>
+    </div>
+  </form>
+
+  <script>
+    (function () {
+      var allDay = document.getElementById("all_day");
+      var startTime = document.getElementById("start_time");
+      var endTime = document.getElementById("end_time");
+      function sync() {
+        var checked = allDay.checked;
+        startTime.disabled = checked;
+        endTime.disabled = checked;
+      }
+      allDay.addEventListener("change", sync);
+      sync();
+    })();
+  </script>
+</section>
+{% endblock %}

@@ -8,7 +8,7 @@ use rustical_store::{
     Addressbook, AddressbookReadStore, AddressbookWriteStore, CollectionMetadata,
     CollectionOperation, CollectionOperationInfo, Error, synctoken::format_synctoken,
 };
-use sqlx::{Acquire, Executor, Sqlite, SqlitePool, Transaction};
+use sqlx::{Acquire, Executor, Row, Sqlite, SqlitePool, Transaction};
 use tokio::sync::mpsc::Sender;
 use tracing::{error, error_span, instrument, warn};
 
@@ -232,6 +232,75 @@ impl SqliteAddressbookStore {
         .fetch_all(executor)
         .await
         .map_err(crate::Error::from)?;
+        Ok(addressbooks)
+    }
+
+    /// Resolve the physical owner of an addressbook for the acting principal:
+    /// direct ownership, else an active guest share (`kind = 'addressbook'`,
+    /// Omnical §17.12.1 — the addressbook counterpart of the calendar share
+    /// resolution).
+    async fn resolve_owner(
+        &self,
+        principal: &str,
+        addrbook_id: &str,
+    ) -> Result<Option<String>, Error> {
+        let direct = sqlx::query("SELECT 1 FROM addressbooks WHERE principal = ?1 AND id = ?2")
+            .bind(principal)
+            .bind(addrbook_id)
+            .fetch_optional(&self.db)
+            .await
+            .map_err(crate::Error::from)?;
+        if direct.is_some() {
+            return Ok(Some(principal.to_owned()));
+        }
+        let row = sqlx::query(
+            "SELECT owner_principal FROM collection_shares \
+             WHERE guest_principal = ?1 AND collection_id = ?2 \
+               AND kind = 'addressbook' AND revoked_at IS NULL",
+        )
+        .bind(principal)
+        .bind(addrbook_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(crate::Error::from)?;
+        Ok(row.map(|row| row.get("owner_principal")))
+    }
+
+    /// Resolve the physical owner, or `NotFound` when neither direct
+    /// ownership nor an active share grants access.
+    async fn effective_owner(&self, principal: &str, addrbook_id: &str) -> Result<String, Error> {
+        self.resolve_owner(principal, addrbook_id)
+            .await?
+            .ok_or(Error::NotFound)
+    }
+
+    /// The addressbooks a principal was granted via guest shares, each
+    /// rewritten to `addressbook.principal = guest_id` (the acting principal)
+    /// so the existing DAV `is_principal`/`can_write` checks pass unchanged.
+    async fn resolve_shared_addressbooks(
+        &self,
+        principal: &str,
+    ) -> Result<Vec<Addressbook>, Error> {
+        let rows = sqlx::query(
+            "SELECT owner_principal, collection_id FROM collection_shares \
+             WHERE guest_principal = ? AND kind = 'addressbook' AND revoked_at IS NULL",
+        )
+        .bind(principal)
+        .fetch_all(&self.db)
+        .await
+        .map_err(crate::Error::from)?;
+        let mut addressbooks = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (owner, collection_id): (String, String) =
+                (row.get("owner_principal"), row.get("collection_id"));
+            // Skip shares whose collection was deleted meanwhile.
+            if let Ok(mut addressbook) =
+                Self::_get_addressbook(&self.db, &owner, &collection_id, false).await
+            {
+                principal.clone_into(&mut addressbook.principal);
+                addressbooks.push(addressbook);
+            }
+        }
         Ok(addressbooks)
     }
 
@@ -533,7 +602,21 @@ impl AddressbookReadStore for SqliteAddressbookStore {
         id: &str,
         show_deleted: bool,
     ) -> Result<Addressbook, rustical_store::Error> {
-        Self::_get_addressbook(&self.db, principal, id, show_deleted).await
+        // Omnical §17.12.1: on a direct miss, resolve via a guest share and
+        // rewrite the returned addressbook to the acting principal.
+        match Self::_get_addressbook(&self.db, principal, id, show_deleted).await {
+            Ok(addressbook) => Ok(addressbook),
+            Err(Error::NotFound) => {
+                let Some(owner) = self.resolve_owner(principal, id).await? else {
+                    return Err(Error::NotFound);
+                };
+                let mut addressbook =
+                    Self::_get_addressbook(&self.db, &owner, id, show_deleted).await?;
+                principal.clone_into(&mut addressbook.principal);
+                Ok(addressbook)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     #[instrument]
@@ -541,7 +624,17 @@ impl AddressbookReadStore for SqliteAddressbookStore {
         &self,
         principal: &str,
     ) -> Result<Vec<Addressbook>, rustical_store::Error> {
-        Self::_get_addressbooks(&self.db, principal).await
+        let mut addressbooks = Self::_get_addressbooks(&self.db, principal).await?;
+        // Omnical §17.12.1: append shared addressbooks (rewritten to the
+        // acting principal); ids are unique per principal namespace, so a
+        // shared id already owned directly is skipped.
+        for shared in self.resolve_shared_addressbooks(principal).await? {
+            if addressbooks.iter().any(|addrbook| addrbook.id == shared.id) {
+                continue;
+            }
+            addressbooks.push(shared);
+        }
+        Ok(addressbooks)
     }
 
     #[instrument]
@@ -559,7 +652,17 @@ impl AddressbookReadStore for SqliteAddressbookStore {
         addressbook_id: &str,
         synctoken: i64,
     ) -> Result<(Vec<(String, AddressObject)>, Vec<String>, i64), rustical_store::Error> {
-        Self::_sync_changes(&self.db, principal, addressbook_id, synctoken).await
+        // Omnical §17.12.1: on a direct miss, resolve via a guest share.
+        match Self::_sync_changes(&self.db, principal, addressbook_id, synctoken).await {
+            Ok(changes) => Ok(changes),
+            Err(Error::NotFound) => {
+                let Some(owner) = self.resolve_owner(principal, addressbook_id).await? else {
+                    return Err(Error::NotFound);
+                };
+                Self::_sync_changes(&self.db, &owner, addressbook_id, synctoken).await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     #[instrument]
@@ -568,9 +671,10 @@ impl AddressbookReadStore for SqliteAddressbookStore {
         principal: &str,
         addressbook_id: &str,
     ) -> Result<CollectionMetadata, rustical_store::Error> {
+        let owner = self.effective_owner(principal, addressbook_id).await?;
         let mut sizes = vec![];
         let mut deleted_sizes = vec![];
-        for (size, deleted) in Self::_list_objects(&self.db, principal, addressbook_id).await? {
+        for (size, deleted) in Self::_list_objects(&self.db, &owner, addressbook_id).await? {
             if deleted {
                 deleted_sizes.push(size);
             } else {
@@ -591,7 +695,8 @@ impl AddressbookReadStore for SqliteAddressbookStore {
         principal: &str,
         addressbook_id: &str,
     ) -> Result<Vec<(String, AddressObject)>, rustical_store::Error> {
-        let objects = Self::_get_objects(&self.db, principal, addressbook_id).await?;
+        let owner = self.effective_owner(principal, addressbook_id).await?;
+        let objects = Self::_get_objects(&self.db, &owner, addressbook_id).await?;
         if self.skip_broken {
             Ok(objects
                 .filter_map(|(id, res)| Some((id, res.ok()?)))
@@ -611,7 +716,18 @@ impl AddressbookReadStore for SqliteAddressbookStore {
         object_id: &str,
         show_deleted: bool,
     ) -> Result<AddressObject, rustical_store::Error> {
-        Self::_get_object(&self.db, principal, addressbook_id, object_id, show_deleted).await
+        // Omnical §17.12.1: on a direct miss, resolve via a guest share.
+        match Self::_get_object(&self.db, principal, addressbook_id, object_id, show_deleted).await
+        {
+            Ok(object) => Ok(object),
+            Err(Error::NotFound) => {
+                let Some(owner) = self.resolve_owner(principal, addressbook_id).await? else {
+                    return Err(Error::NotFound);
+                };
+                Self::_get_object(&self.db, &owner, addressbook_id, object_id, show_deleted).await
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -624,9 +740,13 @@ impl AddressbookWriteStore for SqliteAddressbookStore {
         id: &str,
         addressbook: Addressbook,
     ) -> Result<(), rustical_store::Error> {
-        assert_eq!(principal, &addressbook.principal);
-        assert_eq!(id, &addressbook.id);
-        Self::_update_addressbook(&self.db, principal, id, &addressbook).await
+        // Omnical §17.12.1: persist a shared addressbook under its physical
+        // owner.
+        let owner = self.effective_owner(principal, id).await?;
+        let mut addressbook = addressbook;
+        addressbook.principal = owner.clone();
+        id.clone_into(&mut addressbook.id);
+        Self::_update_addressbook(&self.db, &owner, id, &addressbook).await
     }
 
     #[instrument]
@@ -684,14 +804,17 @@ impl AddressbookWriteStore for SqliteAddressbookStore {
             .await
             .map_err(crate::Error::from)?;
 
+        // Omnical §17.12.1: resolve a shared addressbook to its physical owner.
+        let owner = self.effective_owner(principal, addressbook_id).await?;
+
         let addressbook =
-            match Self::_get_addressbook(&mut *tx, principal, addressbook_id, use_trashbin).await {
+            match Self::_get_addressbook(&mut *tx, &owner, addressbook_id, use_trashbin).await {
                 Ok(addressbook) => Some(addressbook),
                 Err(Error::NotFound) => None,
                 Err(err) => return Err(err),
             };
 
-        Self::_delete_addressbook(&mut *tx, principal, addressbook_id, use_trashbin).await?;
+        Self::_delete_addressbook(&mut *tx, &owner, addressbook_id, use_trashbin).await?;
         tx.commit().await.map_err(crate::Error::from)?;
 
         if let Some(addressbook) = addressbook {
@@ -725,9 +848,13 @@ impl AddressbookWriteStore for SqliteAddressbookStore {
             .await
             .map_err(crate::Error::from)?;
 
+        // Omnical §17.12.1: write a shared addressbook's objects under the
+        // physical owner.
+        let owner = self.effective_owner(principal, addressbook_id).await?;
+
         Self::_put_object(
             &mut *tx,
-            principal,
+            &owner,
             addressbook_id,
             object_id,
             &object,
@@ -737,7 +864,7 @@ impl AddressbookWriteStore for SqliteAddressbookStore {
 
         let sync_token = Self::log_object_operation(
             &mut tx,
-            principal,
+            &owner,
             addressbook_id,
             object_id,
             ChangeOperation::Add,
@@ -749,7 +876,7 @@ impl AddressbookWriteStore for SqliteAddressbookStore {
 
         self.send_push_notification(
             CollectionOperationInfo::Content { sync_token },
-            self.get_addressbook(principal, addressbook_id, false)
+            self.get_addressbook(&owner, addressbook_id, false)
                 .await?
                 .push_topic,
         );
@@ -771,11 +898,14 @@ impl AddressbookWriteStore for SqliteAddressbookStore {
             .await
             .map_err(crate::Error::from)?;
 
-        Self::_delete_object(&mut *tx, principal, addressbook_id, object_id, use_trashbin).await?;
+        // Omnical §17.12.1: resolve a shared addressbook to its physical owner.
+        let owner = self.effective_owner(principal, addressbook_id).await?;
+
+        Self::_delete_object(&mut *tx, &owner, addressbook_id, object_id, use_trashbin).await?;
 
         let sync_token = Self::log_object_operation(
             &mut tx,
-            principal,
+            &owner,
             addressbook_id,
             object_id,
             ChangeOperation::Delete,
@@ -787,7 +917,7 @@ impl AddressbookWriteStore for SqliteAddressbookStore {
 
         self.send_push_notification(
             CollectionOperationInfo::Content { sync_token },
-            self.get_addressbook(principal, addressbook_id, false)
+            self.get_addressbook(&owner, addressbook_id, false)
                 .await?
                 .push_topic,
         );
@@ -807,11 +937,14 @@ impl AddressbookWriteStore for SqliteAddressbookStore {
             .await
             .map_err(crate::Error::from)?;
 
-        Self::_restore_object(&mut *tx, principal, addressbook_id, object_id).await?;
+        // Omnical §17.12.1: resolve a shared addressbook to its physical owner.
+        let owner = self.effective_owner(principal, addressbook_id).await?;
+
+        Self::_restore_object(&mut *tx, &owner, addressbook_id, object_id).await?;
 
         let sync_token = Self::log_object_operation(
             &mut tx,
-            principal,
+            &owner,
             addressbook_id,
             object_id,
             ChangeOperation::Add,
@@ -822,7 +955,7 @@ impl AddressbookWriteStore for SqliteAddressbookStore {
 
         self.send_push_notification(
             CollectionOperationInfo::Content { sync_token },
-            self.get_addressbook(principal, addressbook_id, false)
+            self.get_addressbook(&owner, addressbook_id, false)
                 .await?
                 .push_topic,
         );

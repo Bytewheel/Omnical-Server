@@ -2,6 +2,15 @@
 {% if let Some(error) = error.as_ref() %}
 <p class="error">{{ error }}</p>
 {% endif %}
+{% if let Some(server_url) = credential_server_url.as_ref() %}
+<div class="success">
+  <p><strong>Addressbook credentials generated!</strong> This one-time credential was created for <code>{{ credential_addressbook_id.as_deref().unwrap_or("") }}</code>{% if let Some(email) = credential_email.as_ref() %} and sent to {{ email }}{% endif %} — full read, write, and admin access to that addressbook:</p>
+  <p>Server URL: <code>{{ server_url }}</code></p>
+  <p>Username: <code>{{ credential_username.as_deref().unwrap_or("") }}</code></p>
+  <p>App token: <code>{{ credential_token.as_deref().unwrap_or("") }}</code></p>
+  <p class="description">The app token is only shown here once; send the setup to your collaborator and have them add this addressbook in any CardDAV client.</p>
+</div>
+{% endif %}
 <ul class="collection-list">
   {% for tile in addressbooks %}
   {% let addressbook = tile.addressbook %}
@@ -39,6 +48,34 @@
           <button type="submit" title="Create a secret read-only share URL (a live .vcf feed — no account needed)">Create share link</button>
         </form>
         {% endif %}
+      </div>
+      <div class="subscribe-block">
+        <span class="block-label">Full access (read & write)</span>
+        {% if tile.can_generate %}
+        <form method="POST" action="/frontend/user/{{ user.id }}/addressbook/credentials" class="inline-form">
+          <input type="hidden" name="principal" value="{{ addressbook.principal }}">
+          <input type="hidden" name="addressbook_id" value="{{ addressbook.id }}">
+          <input class="invite-email" type="email" name="email" placeholder="email@example.com" title="Optional: email the credentials to this address">
+          <button type="submit" title="Generate full read/write/admin CardDAV credentials for this addressbook">Generate credentials</button>
+        </form>
+        {% endif %}
+        {% for guest in tile.guest_shares %}
+        <div class="metadata">
+          CardDAV access: <code>{{ guest.guest_principal }}</code>
+          {%- if let Some(email) = guest.target_email %} ({{ email }}){% endif %}
+          · {{ guest.privilege }} access
+          {% if let Some(created_at) = guest.created_at %} · created {{ created_at }}{% endif %}
+          {% if guest.can_manage %}
+          <span class="invite-actions">
+            <form method="POST" action="/frontend/user/{{ user.id }}/addressbook/credentials/{{ guest.share_id }}/revoke">
+              <input type="hidden" name="principal" value="{{ addressbook.principal }}">
+              <button type="submit" class="delete">Revoke</button>
+            </form>
+          </span>
+          {% endif %}
+        </div>
+        {% endfor %}
+        <p class="description">A generated credential can create, edit and delete contacts in this addressbook via CardDAV. Server: <code>{{ carddav_url }}</code></p>
       </div>
       <div class="actions">
         <form action="/carddav/principal/{{ addressbook.principal }}/{{ addressbook.id }}" target="_blank"

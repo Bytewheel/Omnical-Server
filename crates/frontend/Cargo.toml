@@ -47,6 +47,7 @@ itertools.workspace = true
 rustical_api.workspace = true
 rustical_dav.workspace = true
 caldata.workspace = true
+chrono-tz.workspace = true
 reqwest.workspace = true
 argon2.workspace = true
 sha2.workspace = true

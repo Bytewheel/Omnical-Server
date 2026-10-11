@@ -47,11 +47,21 @@ pub use routes::appliance::{
 };
 
 use crate::routes::{
-    addressbook::{route_addressbook, route_addressbook_restore},
+    addressbook::{
+        route_addressbook, route_addressbook_contacts, route_addressbook_contacts_create,
+        route_addressbook_contacts_new, route_addressbook_restore, route_contact_delete,
+        route_contact_edit, route_contact_update,
+    },
+    addressbooks::{route_addressbook_credentials, route_addressbook_credentials_revoke},
     app_token::{route_delete_app_token, route_post_app_token, route_regenerate_app_token},
     calendar::{
         route_calendar, route_calendar_credentials, route_calendar_credentials_revoke,
         route_calendar_restore, route_calendar_subscribe,
+    },
+    calendar_view::{
+        route_calendar_event_create, route_calendar_events, route_calendar_events_new,
+        route_event_create, route_event_delete, route_event_edit, route_event_update, route_events,
+        route_events_new,
     },
     download::{HawkBookApk, route_download_hawkbook},
     groups::{
@@ -71,6 +81,10 @@ use crate::routes::{
     share::{
         route_share_create, route_share_guest_invite, route_share_guest_revoke, route_share_invite,
         route_share_invite_revoke, route_share_revoke,
+    },
+    tasks::{
+        route_task_delete, route_task_edit, route_task_update, route_tasks, route_tasks_create,
+        route_tasks_new,
     },
     timezones::route_timezones,
     user::{route_get_home, route_root, route_user_named},
@@ -147,11 +161,84 @@ pub fn frontend_router<
             "/{user}/calendar/{calendar}/restore",
             post(route_calendar_restore::<CS>),
         )
+        // Calendar view (Omnical: Roundcube-style web grid)
+        .route(
+            "/{user}/calendar/{calendar}/events",
+            get(route_calendar_events::<CS>).post(route_calendar_event_create::<CS>),
+        )
+        .route(
+            "/{user}/calendar/{calendar}/events/new",
+            get(route_calendar_events_new::<CS>),
+        )
+        .route(
+            "/{user}/calendar/{calendar}/events/{object}/edit",
+            get(route_event_edit::<CS>),
+        )
+        .route(
+            "/{user}/calendar/{calendar}/events/{object}",
+            post(route_event_update::<CS>),
+        )
+        .route(
+            "/{user}/calendar/{calendar}/events/{object}/delete",
+            post(route_event_delete::<CS>),
+        )
+        // Aggregate calendar view
+        .route(
+            "/{user}/events",
+            get(route_events::<CS>).post(route_event_create::<CS>),
+        )
+        .route("/{user}/events/new", get(route_events_new::<CS>))
+        // Tasks view
+        .route(
+            "/{user}/tasks",
+            get(route_tasks::<CS>).post(route_tasks_create::<CS>),
+        )
+        .route("/{user}/tasks/new", get(route_tasks_new::<CS>))
+        .route(
+            "/{user}/calendar/{calendar}/tasks/{object}/edit",
+            get(route_task_edit::<CS>),
+        )
+        .route(
+            "/{user}/calendar/{calendar}/tasks/{object}",
+            post(route_task_update::<CS>),
+        )
+        .route(
+            "/{user}/calendar/{calendar}/tasks/{object}/delete",
+            post(route_task_delete::<CS>),
+        )
         // Addressbook
         .route("/{user}/addressbook", get(route_addressbooks::<AS>))
         .route(
+            "/{user}/addressbook/credentials",
+            post(route_addressbook_credentials::<AP, AS>),
+        )
+        .route(
+            "/{user}/addressbook/credentials/{id}/revoke",
+            post(route_addressbook_credentials_revoke),
+        )
+        .route(
             "/{user}/addressbook/{addressbook}",
             get(route_addressbook::<AS>),
+        )
+        .route(
+            "/{user}/addressbook/{addressbook}/contacts",
+            get(route_addressbook_contacts::<AS>).post(route_addressbook_contacts_create::<AS>),
+        )
+        .route(
+            "/{user}/addressbook/{addressbook}/contacts/new",
+            get(route_addressbook_contacts_new::<AS>),
+        )
+        .route(
+            "/{user}/addressbook/{addressbook}/contacts/{object}/edit",
+            get(route_contact_edit::<AS>),
+        )
+        .route(
+            "/{user}/addressbook/{addressbook}/contacts/{object}",
+            post(route_contact_update::<AS>),
+        )
+        .route(
+            "/{user}/addressbook/{addressbook}/contacts/{object}/delete",
+            post(route_contact_delete::<AS>),
         )
         .route(
             "/{user}/addressbook/{addressbook}/restore",

@@ -172,6 +172,22 @@ button, .button {
   }
 }
 
+/* A borderless danger action, for the inline delete forms of the tasks and
+   contacts lists. */
+.link-danger {
+  cursor: pointer;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--danger);
+  font-size: .9em;
+  font-weight: 500;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
 input[type="text"],
 input[type="email"],
 input[type="url"],
@@ -805,4 +821,326 @@ footer {
       color: var(--text);
     }
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Calendar month view                                                */
+/* ------------------------------------------------------------------ */
+
+.calendar-view {
+  margin-top: 1em;
+}
+
+.calendar-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1em;
+  flex-wrap: wrap;
+  margin-bottom: .5em;
+
+  h2 {
+    margin: 0;
+    font-size: 1.4em;
+  }
+}
+
+.month-label {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: .7em;
+  margin-left: .5em;
+}
+
+.calendar-nav {
+  display: flex;
+  align-items: center;
+  gap: .4em;
+
+  a {
+    padding: .35em .7em;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--background-color-03);
+    font-size: .9em;
+
+    &:hover {
+      background: var(--background-color-02);
+    }
+  }
+
+  .nav-arrow {
+    font-size: 1.1em;
+    line-height: 1;
+    padding: .2em .55em;
+  }
+}
+
+.button-primary-link {
+  display: inline-block;
+  cursor: pointer;
+  border: 1px solid var(--primary);
+  background: var(--primary);
+  padding: .5em 1em;
+  border-radius: var(--radius-sm);
+  color: var(--primary-text);
+  font-size: .9em;
+  font-weight: 600;
+  white-space: nowrap;
+
+  &:hover {
+    background: var(--primary-hover);
+    border-color: var(--primary-hover);
+  }
+}
+
+.calendar-month {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  background: var(--background-color-03);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+
+  th {
+    padding: .5em;
+    font-size: .8em;
+    font-weight: 600;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+
+  td {
+    vertical-align: top;
+    height: 92px;
+    border: 1px solid var(--border);
+    padding: 4px;
+    font-size: .85em;
+  }
+
+  td.other-month {
+    background: var(--background-color-04);
+  }
+
+  td.today {
+    background: color-mix(in srgb, var(--primary), transparent 94%);
+  }
+
+  .day-number {
+    font-size: .85em;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  td.today .day-number {
+    color: var(--primary);
+  }
+}
+
+.event {
+  display: block;
+  font-size: .72em;
+  line-height: 1.3;
+  margin: 2px 0;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--event-color);
+  background: color-mix(in srgb, var(--event-color), transparent 84%);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  &:hover {
+    background: color-mix(in srgb, var(--event-color), transparent 70%);
+  }
+
+  .event-time {
+    font-weight: 600;
+    margin-right: .3em;
+  }
+}
+
+.calendar-legend {
+  display: flex;
+  gap: 1em;
+  flex-wrap: wrap;
+  margin-top: .75em;
+}
+
+.legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .4em;
+  font-size: .85em;
+  color: var(--text-muted);
+}
+
+.legend-color {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--event-color);
+  display: inline-block;
+  border: 1px solid var(--border);
+}
+
+.times-note {
+  color: var(--text-muted);
+  font-size: .8em;
+  margin-top: .5em;
+}
+
+/* ------------------------------------------------------------------ */
+/* Event form                                                          */
+/* ------------------------------------------------------------------ */
+
+.event-form-page {
+  max-width: 640px;
+  margin: 2em auto;
+}
+
+.event-form {
+  textarea {
+    display: block;
+    width: 100%;
+    color: var(--text);
+    font-size: .9rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: .5em .7em;
+    background: var(--background-color-03);
+  }
+
+  input[type="date"],
+  input[type="time"] {
+    display: block;
+    width: 100%;
+  }
+}
+
+.event-datetime {
+  display: flex;
+  gap: 1em;
+  flex-wrap: wrap;
+
+  label {
+    flex: 1;
+    min-width: 220px;
+  }
+}
+
+.form-actions {
+  margin-top: 1.5em;
+  display: flex;
+  gap: .5em;
+  flex-wrap: wrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* Tasks view                                                          */
+/* ------------------------------------------------------------------ */
+
+.tasks-view {
+  margin-top: 1em;
+}
+
+.tasks-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1em;
+  flex-wrap: wrap;
+  margin-bottom: .75em;
+
+  h2 {
+    margin: 0;
+  }
+}
+
+.tasks-filters {
+  display: flex;
+  gap: .4em;
+}
+
+.task-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.task-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1em;
+  padding: .6em .8em;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--event-color);
+  border-radius: var(--radius-sm);
+  background: var(--background-color-03);
+  margin-bottom: .5em;
+
+  &.completed .task-summary {
+    text-decoration: line-through;
+    color: var(--text-muted);
+  }
+}
+
+.task-summary {
+  font-weight: 500;
+}
+
+.task-meta {
+  display: flex;
+  gap: .6em;
+  align-items: center;
+  font-size: .85em;
+  white-space: nowrap;
+}
+
+.task-due {
+  color: var(--text);
+}
+
+/* ------------------------------------------------------------------ */
+/* Contacts view                                                       */
+/* ------------------------------------------------------------------ */
+
+.contacts-page {
+  max-width: 720px;
+  margin: 2em auto;
+}
+
+.contact-list {
+  list-style: none;
+  margin: 1em 0 0;
+  padding: 0;
+}
+
+.contact-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1em;
+  padding: .6em .8em;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--background-color-03);
+  margin-bottom: .5em;
+}
+
+.contact-name {
+  font-weight: 500;
+}
+
+.contact-meta {
+  display: flex;
+  gap: .8em;
+  font-size: .9em;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }

@@ -1,0 +1,80 @@
+<section class="calendar-view">
+  <div class="calendar-toolbar">
+    <h2>{{ heading }} <span class="month-label">{{ month_label }}</span></h2>
+    <div class="calendar-nav">
+      <a href="?date={{ prev }}" class="nav-arrow" aria-label="Previous month">&#8249;</a>
+      <a href="?date={{ today }}">Today</a>
+      <a href="?date={{ next }}" class="nav-arrow" aria-label="Next month">&#8250;</a>
+    </div>
+    {% if can_create %}<a class="button-primary-link" href="{{ new_href }}">New event</a>{% endif %}
+  </div>
+
+  <table class="calendar-month">
+    <thead>
+      <tr>
+        <th>Mon</th>
+        <th>Tue</th>
+        <th>Wed</th>
+        <th>Thu</th>
+        <th>Fri</th>
+        <th>Sat</th>
+        <th>Sun</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for week in weeks %}
+      <tr>
+        {% for day in week.days %}
+        <td class="{% if !day.in_month %}other-month{% endif %}{% if day.today %} today{% endif %}">
+          <span class="day-number">{{ day.day_number }}</span>
+          {% for event in day.events %}
+          {% if event.editable %}
+          <a class="event{% if event.all_day %} all-day{% endif %}" href="{{ event.href }}"
+            style="--event-color: {{ event.color }}"
+            title="{{ event.calendar_name }}">
+            {% if let Some(time) = event.time %}<span class="event-time">{{ time }}</span>{% endif %}
+            <span class="event-summary">{{ event.summary }}</span>
+          </a>
+          {% else %}
+          <span class="event{% if event.all_day %} all-day{% endif %}"
+            style="--event-color: {{ event.color }}"
+            title="{{ event.calendar_name }}">
+            {% if let Some(time) = event.time %}<span class="event-time">{{ time }}</span>{% endif %}
+            <span class="event-summary">{{ event.summary }}</span>
+          </span>
+          {% endif %}
+          {% endfor %}
+        </td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if !calendars.is_empty() %}
+  <div class="calendar-legend">
+    {% for cal in calendars %}
+    <span class="legend-chip"><span class="legend-color" style="--event-color: {{ cal.color }}"></span>{{ cal.name }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <p class="times-note">{{ times_note }}</p>
+
+  <script>
+    (function () {
+      var tz;
+      try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) {}
+      tz = tz || "UTC";
+      function cookie(name) {
+        var m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
+        return m ? decodeURIComponent(m[1]) : null;
+      }
+      if (cookie("tzid") !== tz) {
+        document.cookie = "tzid=" + encodeURIComponent(tz) +
+          "; path=/; max-age=31536000; samesite=lax";
+        location.reload();
+      }
+    })();
+  </script>
+</section>

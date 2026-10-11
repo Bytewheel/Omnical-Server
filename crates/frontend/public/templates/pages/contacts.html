@@ -1,0 +1,38 @@
+{% extends "layouts/default.html" %}
+
+{% block title %}Contacts · {{ addressbook.displayname.as_deref().unwrap_or(addressbook.id.as_str()) }} · Omnical{% endblock %}
+
+{% block content %}
+<section class="contacts-page">
+  <div class="tasks-toolbar">
+    <h1>{% if let Some(name) = addressbook.displayname %}{{ name }}{% else %}{{ addressbook.principal }}/{{ addressbook.id }}{% endif %}</h1>
+    {% if can_create %}<a class="button-primary-link" href="{{ new_href }}">New contact</a>{% endif %}
+  </div>
+  <p class="description">
+    <a href="/frontend/user/{{ addressbook.principal }}/addressbook/{{ addressbook.id }}">Addressbook settings</a>
+  </p>
+
+  {% if contacts.is_empty() %}
+  <p class="description">No contacts yet.</p>
+  {% else %}
+  <ul class="contact-list">
+    {% for contact in contacts %}
+    <li class="contact-item">
+      <span class="contact-name">{{ contact.name }}</span>
+      <span class="contact-meta">
+        {% if let Some(email) = contact.email %}<a href="mailto:{{ email }}" class="muted">{{ email }}</a>{% endif %}
+        {% if let Some(phone) = contact.phone %}<span class="muted">{{ phone }}</span>{% endif %}
+        {% if contact.editable %}
+        <a class="button" href="{{ contact.href }}">Edit</a>
+        <form method="POST" action="{{ contact.delete_href }}" class="inline-form"
+          onsubmit="return confirm('Delete this contact?')">
+          <button type="submit" class="link-danger">Delete</button>
+        </form>
+        {% endif %}
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}
