@@ -45,7 +45,16 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run tarpaulin
-        run: cargo tarpaulin --workspace --all-features --exclude xml_derive --coveralls ${{ secrets.COVERALLS_REPO_TOKEN }}
+        env:
+          COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
+        # Forks without a Coveralls token still run the coverage job; the
+        # upload is skipped rather than failing the whole run.
+        run: |
+          if [ -n "$COVERALLS_REPO_TOKEN" ]; then
+            cargo tarpaulin --workspace --all-features --exclude xml_derive --coveralls "$COVERALLS_REPO_TOKEN"
+          else
+            cargo tarpaulin --workspace --all-features --exclude xml_derive
+          fi
 
   lints:
     name: Lints
