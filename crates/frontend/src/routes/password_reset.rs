@@ -127,7 +127,7 @@ impl ResetRateLimiter {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            window: Duration::from_secs(3600),
+            window: Duration::from_hours(1),
             max_per_ip: 5,
             max_global: 30,
             per_ip: Mutex::new(HashMap::new()),

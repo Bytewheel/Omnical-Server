@@ -5,7 +5,7 @@
 //!
 //! # Why one archive per tenant, and not one archive of everything
 //!
-//! C7 is one SQLite file per tenant. That decision is usually argued as a
+//! C7 is one `SQLite` file per tenant. That decision is usually argued as a
 //! *performance* choice, and it is one — but this is where it pays: restoring a
 //! customer is a **one-file operation**. No shared database means no shared
 //! failure, no "restore everyone because one table is corrupt", and no restore

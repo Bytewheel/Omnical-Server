@@ -188,7 +188,7 @@ pub trait AuthenticationProvider: Send + Sync + 'static {
     /// Sets the `needs_password_change` flag of a principal (forced
     /// password-change nudge, cleared by the store when the password is
     /// updated). The default is a no-op so non-SQLite (test) stores keep
-    /// compiling; the SQLite store persists the change.
+    /// compiling; the `SQLite` store persists the change.
     ///
     /// # Errors
     /// Any store error.

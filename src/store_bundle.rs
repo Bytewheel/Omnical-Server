@@ -36,7 +36,7 @@
 //!    vouched for. A host-keyed cache would be a second, less-filtered
 //!    resolution path — exactly what would make suspension lag.
 //! 3. **The control plane is hit on every request.** §3.3 budgets ~50 µs
-//!    against a small SQLite file. That is the deliberate price of never
+//!    against a small `SQLite` file. That is the deliberate price of never
 //!    caching a decision that can be revoked.
 
 use lru::LruCache;

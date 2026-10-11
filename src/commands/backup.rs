@@ -6,7 +6,7 @@
 //! archive it together with the config. Two deliberate differences:
 //!
 //! * `VACUUM INTO` replaces the `sqlite3 .backup` CLI call, because sqlx
-//!   does not expose SQLite's online-backup API. For this purpose it is a
+//!   does not expose `SQLite`'s online-backup API. For this purpose it is a
 //!   superset of `.backup`: one statement, one consistent snapshot of a live
 //!   database, and the output is compacted — so the archive holds a small
 //!   self-contained file instead of a copy of a live database.
@@ -685,7 +685,7 @@ pub fn verify_archive(path: &Path) -> Result<VerifiedArchive> {
 /// changes across a migration.
 ///
 /// # Errors
-/// If the file cannot be opened, is not a SQLite database, or a table cannot be
+/// If the file cannot be opened, is not a `SQLite` database, or a table cannot be
 /// counted. Notably it does **not** return `Ok` with empty counts for a file
 /// that is not a database: `create_db_pool` fails, and that failure is reported.
 pub async fn row_counts_of(path: &Path) -> Result<DatabaseInventory> {

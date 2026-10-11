@@ -771,7 +771,7 @@ fn remove_marker(database: &Path) {
 ///    The safety copy is on disk either way, and the operator re-stages.
 /// 2. The staged file is checked to be a real file. A zero-length or absent
 ///    staging file is refused.
-/// 3. The `-wal` and `-shm` sidecars are removed. Left in place, SQLite would
+/// 3. The `-wal` and `-shm` sidecars are removed. Left in place, `SQLite` would
 ///    replay the *old* WAL into the *new* file on the next open — the classic
 ///    way a "successful" restore corrupts the data. Copied from
 ///    `swap_in_database`, and for the same reason.

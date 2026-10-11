@@ -1,4 +1,4 @@
-//! SQLite implementation of the [`CalendarSourceStore`] (Omnical registration
+//! `SQLite` implementation of the [`CalendarSourceStore`] (Omnical registration
 //! extension / "linked platforms").
 //!
 //! All queries use the runtime query API (`sqlx::query`) deliberately: the

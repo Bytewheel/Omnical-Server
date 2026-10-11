@@ -121,7 +121,7 @@ impl RateLimiter {
     fn new(per_ip_limit: u32) -> Self {
         // The global bucket is a coarse safety net above the per-IP budget.
         Self {
-            window: Duration::from_secs(3600),
+            window: Duration::from_hours(1),
             max_per_ip: per_ip_limit as usize,
             max_global: (per_ip_limit as usize).saturating_mul(6),
             per_ip: Mutex::new(HashMap::new()),

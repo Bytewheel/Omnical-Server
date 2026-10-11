@@ -37,7 +37,7 @@ pub const BEGIN_IMMEDIATE: &str = "BEGIN IMMEDIATE";
 
 /// ISO 8601 UTC, matching the format the rest of the fork writes timestamps in.
 ///
-/// **Not** SQLite's `CURRENT_TIMESTAMP`, which yields `YYYY-MM-DD HH:MM:SS` —
+/// **Not** `SQLite`'s `CURRENT_TIMESTAMP`, which yields `YYYY-MM-DD HH:MM:SS` —
 /// a space, no `Z`, and UTC-without-saying-so. The invites table already
 /// stores `YYYY-MM-DDTHH:MM:SSZ`, and a control plane whose timestamps are
 /// sorted against invite timestamps as *strings* would order `2026-09-28

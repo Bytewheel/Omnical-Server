@@ -215,9 +215,9 @@ impl SqliteDataStoreConfig {
     /// hand-rolled prefix chop would disagree with it about `%20` in a filename.
     ///
     /// What it does *not* strip is `file:`, because `file:` is not a scheme sqlx
-    /// knows: it falls through into the filename whole. SQLite itself then
+    /// knows: it falls through into the filename whole. `SQLite` itself then
     /// consumes it, because it passes the filename to `sqlite3_open_v2` with URI
-    /// handling on. Measured against sqlx 0.9 and SQLite, with the file each URL
+    /// handling on. Measured against sqlx 0.9 and `SQLite`, with the file each URL
     /// actually created:
     ///
     /// ```text
@@ -235,12 +235,12 @@ impl SqliteDataStoreConfig {
     ///
     /// `Err` with the reason, never with a guessed path:
     ///
-    /// - `db_url` does not parse as a SQLite URL at all;
+    /// - `db_url` does not parse as a `SQLite` URL at all;
     /// - it names an in-memory database (`:memory:`, `?mode=memory`). sqlx
     ///   invents a synthetic `file:sqlx-in-memory-N` filename for those; checked
     ///   *before* the `file:` strip, or the caller is handed a path that does not
     ///   exist under a name sqlx made up;
-    /// - the `file:` form has an authority (`file://host/path`), which SQLite
+    /// - the `file:` form has an authority (`file://host/path`), which `SQLite`
     ///   rejects outright with "invalid uri authority" — reported here rather
     ///   than turned into a plausible-looking relative path;
     /// - what remains is empty, still carries a `:`, or is not UTF-8. A surviving
@@ -692,11 +692,11 @@ impl TenancyConfig {
     /// The directory holding a tenant's store, created if absent.
     ///
     /// §3.4 writes the convention as `<data_root>/tenants/<tenant_id>/db.sqlite3`,
-    /// and the missing half of that sentence is that **SQLite will not create
+    /// and the missing half of that sentence is that **`SQLite` will not create
     /// the directory**. `create_db_pool` sets `create_if_missing(true)`, which
     /// creates a *file*, not the two directories above it — so without this, the
     /// very first request for a brand-new tenant fails with
-    /// `unable to open database file` (SQLite code 14) and every subsequent one
+    /// `unable to open database file` (`SQLite` code 14) and every subsequent one
     /// fails the same way. A tenant that cannot serve is worse than a tenant
     /// that does not exist, because the 500 looks like our bug rather than a
     /// missing `mkdir`.
@@ -740,7 +740,7 @@ impl TenancyConfig {
     /// on exactly today's path — no migration, no surprise.
     ///
     /// # Errors
-    /// If `data_root` is unset and the data store is not SQLite, since a
+    /// If `data_root` is unset and the data store is not `SQLite`, since a
     /// per-tenant path cannot be derived from it. The message names the setting
     /// to add rather than only reporting that derivation failed.
     pub fn data_root(&self, data_store: &DataStoreConfig) -> Result<std::path::PathBuf, String> {
@@ -1070,7 +1070,7 @@ impl Config {
         }
     }
 
-    /// The SQLite file this config points at, or `None` when `db_url` names no
+    /// The `SQLite` file this config points at, or `None` when `db_url` names no
     /// file at all (an in-memory database, or a URL some other backend owns).
     #[must_use]
     pub fn sqlite_db_path(&self) -> Option<std::path::PathBuf> {

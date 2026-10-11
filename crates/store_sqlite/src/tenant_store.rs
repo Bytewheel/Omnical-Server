@@ -1,4 +1,4 @@
-//! SQLite control plane — `PLAN_DEPLOYMENTS.md` §3.4, §6.1.
+//! `SQLite` control plane — `PLAN_DEPLOYMENTS.md` §3.4, §6.1.
 //!
 //! ## Why this gets its own connection pool
 //!
@@ -26,7 +26,7 @@
 //! diff in which the 66 unrelated ones drown out the 4 that changed. The
 //! dominant convention in this crate is already runtime queries (six of eight
 //! store modules), so this follows that, and pays for it with tests that run
-//! every statement against a real SQLite file — a wrong column name is a
+//! every statement against a real `SQLite` file — a wrong column name is a
 //! runtime error, so it is caught by the test suite rather than by the
 //! compiler.
 
@@ -91,7 +91,7 @@ fn row_to_tenant(row: &sqlx::sqlite::SqliteRow) -> Result<Tenant, Error> {
     })
 }
 
-/// The hosted-tenancy cross-tenant index, backed by its own SQLite file.
+/// The hosted-tenancy cross-tenant index, backed by its own `SQLite` file.
 #[derive(Debug, Clone)]
 pub struct SqliteTenantStore {
     pool: SqlitePool,
@@ -190,7 +190,7 @@ async fn audit(
     Ok(())
 }
 
-/// One row of `control_tenant_usage`, as SQLite returns it.
+/// One row of `control_tenant_usage`, as `SQLite` returns it.
 ///
 /// A local struct rather than deriving `FromRow` onto
 /// [`TenantUsage`](rustical_store::tenant_usage::TenantUsage): the column names

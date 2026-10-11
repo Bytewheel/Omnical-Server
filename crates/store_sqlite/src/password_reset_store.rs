@@ -1,4 +1,4 @@
-//! SQLite implementation of the [`PasswordResetStore`] (Omnical
+//! `SQLite` implementation of the [`PasswordResetStore`] (Omnical
 //! password-reset extension).
 //!
 //! All queries use the runtime query API (`sqlx::query`) deliberately: the

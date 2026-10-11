@@ -119,7 +119,7 @@ pub enum AdminAuthOutcome {
 /// `chrono` is already a dependency of this crate. The format is a property of
 /// the **trait's** contract — [`AdminCredential::is_locked`] compares these as
 /// strings — so the two functions that produce them belong beside it rather
-/// than in whichever store crate happens to be the SQLite one this month.
+/// than in whichever store crate happens to be the `SQLite` one this month.
 #[must_use]
 pub fn admin_now() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
@@ -127,9 +127,9 @@ pub fn admin_now() -> String {
 
 /// The lockout deadline for a failure recorded at `now`.
 ///
-/// Computed in Rust, **not** in SQL, because SQLite's date functions return
+/// Computed in Rust, **not** in SQL, because `SQLite`'s date functions return
 /// `YYYY-MM-DD HH:MM:SS` — a space and no `Z` — and [`AdminCredential::is_locked`]
-/// compares these as strings. A deadline written by SQLite and compared against
+/// compares these as strings. A deadline written by `SQLite` and compared against
 /// a `now` from Rust would sort wrong for every timestamp, which is to say it
 /// would expire immediately.
 ///

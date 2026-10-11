@@ -1,4 +1,4 @@
-//! SQLite implementation of the [`InviteStore`] (Omnical registration
+//! `SQLite` implementation of the [`InviteStore`] (Omnical registration
 //! extension).
 //!
 //! All queries use the runtime query API (`sqlx::query`) deliberately: the

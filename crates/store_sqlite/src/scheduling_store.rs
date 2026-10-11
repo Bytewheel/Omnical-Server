@@ -1,4 +1,4 @@
-//! SQLite implementation of the [`SchedulingStore`] (Omnical RFC 6638 extension).
+//! `SQLite` implementation of the [`SchedulingStore`] (Omnical RFC 6638 extension).
 //!
 //! All queries use the runtime query API (`sqlx::query`) deliberately: the
 //! sqlx offline metadata in `.sqlx/` only covers upstream's macro queries and

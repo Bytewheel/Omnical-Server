@@ -51,7 +51,7 @@ pub struct Subscription {
 /// Data access for public read-only subscription feeds ("share links",
 /// Omnical extension). The token in the export URL is the only credential.
 ///
-/// This is implemented by the SQLite store. The default implementations are
+/// This is implemented by the `SQLite` store. The default implementations are
 /// no-ops/errors so other (test) stores keep compiling unchanged.
 #[async_trait]
 pub trait SubscriptionStore: Send + Sync + 'static {

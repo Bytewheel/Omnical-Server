@@ -10,7 +10,7 @@ pub struct InboxObject {
 
 /// Data access for RFC 6638 style scheduling (Omnical extension).
 ///
-/// This is implemented by the SQLite store. The default implementations are
+/// This is implemented by the `SQLite` store. The default implementations are
 /// no-ops so other (test) stores keep compiling unchanged.
 #[async_trait]
 pub trait SchedulingStore: Send + Sync + 'static {

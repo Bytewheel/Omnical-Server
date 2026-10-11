@@ -33,7 +33,7 @@ pub struct CollectionShare {
 
 /// Data access for per-collection guest shares (Omnical extension).
 ///
-/// Implemented by the SQLite store alongside `SqliteCalendarStore` (shares
+/// Implemented by the `SQLite` store alongside `SqliteCalendarStore` (shares
 /// live in the same database). The default implementations are
 /// no-ops/errors so other (test) stores keep compiling unchanged.
 #[async_trait]

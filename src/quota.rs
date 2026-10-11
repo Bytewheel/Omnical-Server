@@ -121,7 +121,7 @@ pub fn check_calendars(quota: &TenantQuota, usage: Option<&TenantUsage>) -> Quot
 ///
 /// The quota column is `quota_megabytes`, so this compares **bytes on disk** and
 /// not an object count. The snapshot's `bytes_on_disk` is the file's size, which
-/// includes SQLite's free pages after a delete — so a tenant who deletes a large
+/// includes `SQLite`'s free pages after a delete — so a tenant who deletes a large
 /// event may stay over the limit until a `VACUUM`. That is a real inaccuracy and
 /// it is the conservative direction: the tenant is told they are at the limit when
 /// the disk says they are.

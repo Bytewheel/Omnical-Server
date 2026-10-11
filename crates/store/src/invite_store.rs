@@ -36,7 +36,7 @@ pub struct Invite {
 /// normalized to the same `YYYY-MM-DDTHH:MM:SSZ` shape so the expiry check in
 /// `redeem_invite` is a plain string comparison.
 ///
-/// This is implemented by the SQLite store. The default implementations are
+/// This is implemented by the `SQLite` store. The default implementations are
 /// no-ops/errors so other (test) stores keep compiling unchanged.
 #[async_trait]
 pub trait InviteStore: Send + Sync + 'static {

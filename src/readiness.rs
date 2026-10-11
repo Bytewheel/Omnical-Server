@@ -243,7 +243,7 @@ pub async fn readyz(State(probe): State<Arc<ReadinessProbe>>) -> Response {
 ///
 /// The tenancy probe checks a control plane and then a set of tenant stores,
 /// because on that install a request needs both. A single-tenant process has no
-/// control plane at all: every request needs exactly one thing, the one SQLite
+/// control plane at all: every request needs exactly one thing, the one `SQLite`
 /// pool. So this reports that one check and says so, rather than reusing
 /// `Readiness`'s two fields and reporting `control_plane=ok` for a control plane
 /// that does not exist — which would be a green result for a check that never

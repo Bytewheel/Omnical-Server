@@ -9,7 +9,7 @@
 //!
 //! ## What is built here, in order
 //!
-//! 1. the **control plane** — a second SQLite file, opened and migrated;
+//! 1. the **control plane** — a second `SQLite` file, opened and migrated;
 //! 2. the **store cache** — an LRU sized by `max_cached_tenants`;
 //! 3. a **builder closure** that turns one [`Tenant`] into its stores and router.
 //!

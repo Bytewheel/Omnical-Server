@@ -159,7 +159,7 @@ impl AdminRateLimiter {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            window: Duration::from_secs(3600),
+            window: Duration::from_hours(1),
             max_per_name: 10,
             max_per_source: 30,
             max_global: 300,

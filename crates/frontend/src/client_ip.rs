@@ -89,10 +89,10 @@ impl PeerAddr {
     }
 }
 
-#[allow(
-    clippy::unused_async_trait_impl,
-    reason = "an axum extractor whose value is already in the request extensions"
-)]
+// `async` with no `.await` — the value is already in the request
+// extensions; removing `async` would change axum's trait signature.
+#[allow(unknown_lints, clippy::unknown_lints)]
+#[allow(clippy::unused_async_trait_impl)]
 impl<S> axum::extract::FromRequestParts<S> for PeerAddr
 where
     S: Send + Sync,

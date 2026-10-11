@@ -1,4 +1,4 @@
-//! SQLite implementation of the [`CollectionShareStore`] (Omnical §17.10
+//! `SQLite` implementation of the [`CollectionShareStore`] (Omnical §17.10
 //! guest-invites extension).
 //!
 //! All queries use the runtime query API (`sqlx::query`) deliberately: the

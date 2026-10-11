@@ -1,4 +1,4 @@
-//! SQLite implementation of the [`SubscriptionStore`] (Omnical share-links
+//! `SQLite` implementation of the [`SubscriptionStore`] (Omnical share-links
 //! extension).
 //!
 //! All queries use the runtime query API (`sqlx::query`) deliberately: the
