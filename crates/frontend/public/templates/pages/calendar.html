@@ -36,7 +36,7 @@
       </span>
     </p>
     {% else %}
-    <p class="description">Create a subscribe link on the <a href="/frontend/user/{{ user.id }}/calendar#cal-{{ calendar.id }}">Calendars tab</a> to get a URL for these.</p>
+    <p class="description">Create a subscribe link on the <a href="/frontend/user/{{ user.id }}/calendar#cal-{{ calendar.id }}">Calendars section</a> to get a URL for these.</p>
     {% endif %}
     <ul>
       <li><strong>Apple iPhone/iPad</strong>: Calendar app → Calendars → Add Calendar → Subscribe to Calendar → paste the link.</li>
@@ -47,7 +47,7 @@
       <li><strong>Anything else</strong>: any webcal/ICS-subscribing app works — the link is a plain live ICS feed.</li>
     </ul>
     <h4>Full access — read + write (CalDAV)</h4>
-    <p class="description">To use the calendar in full (add, change, delete events) a CalDAV account with a credential is needed: either a guest username + app token, or your own per-calendar app token (mint one on the <a href="/frontend/user/{{ user.id }}/calendar#cal-{{ calendar.id }}">Calendars tab</a> with "Invite guest" or "Generate credentials", or use your profile's app tokens). Server: <code>{{ caldav_url }}</code></p>
+    <p class="description">To use the calendar in full (add, change, delete events) a CalDAV account with a credential is needed: either a guest username + app token, or your own per-calendar app token (mint one on the <a href="/frontend/user/{{ user.id }}/calendar#cal-{{ calendar.id }}">Calendars section</a> with "Invite guest" or "Generate credentials", or use your profile's app tokens). Server: <code>{{ caldav_url }}</code></p>
     <ul>
       <li><strong>Apple iPhone/iPad/Mac</strong>: Settings → Calendar → Accounts → Add Account → Other → Add CalDAV Account → server <code>{{ caldav_url }}</code>, user = the guest username, password = the app token.</li>
       <li><strong>Android</strong>: the built-in Google Calendar app cannot add an external CalDAV server — install <strong>HawkBook/DavX</strong> → add account → CalDAV → paste <code>{{ caldav_url }}</code> + username + app token.</li>
@@ -84,8 +84,8 @@
     </ul>
     <h4>Importing and exporting</h4>
     <ul>
-      <li>Use <strong>Import calendar</strong> on the <a href="/frontend/user/{{ user.id }}/calendar">Calendars tab</a> to upload an <code>.ics</code> file containing journal entries — the calendar will pick up <code>VJOURNAL</code> support from the file.</li>
-      <li>The <strong>Download</strong> button on the Calendars tab exports every entry, journals included, in one <code>.ics</code> file.</li>
+      <li>Use <strong>Import calendar</strong> on the <a href="/frontend/user/{{ user.id }}/calendar">Calendars section</a> to upload an <code>.ics</code> file containing journal entries — the calendar will pick up <code>VJOURNAL</code> support from the file.</li>
+      <li>The <strong>Download</strong> button on the Calendars section exports every entry, journals included, in one <code>.ics</code> file.</li>
       <li>Unchecking <code>VJOURNAL</code> in the calendar's Edit form stops new journal entries from being written. Entries already stored stay readable and can still be edited.</li>
     </ul>
   </div>

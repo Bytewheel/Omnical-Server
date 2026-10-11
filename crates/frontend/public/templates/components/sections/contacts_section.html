@@ -1,0 +1,32 @@
+<section class="contacts-view">
+  <div class="tasks-toolbar">
+    <h2>Contacts</h2>
+    <div class="tasks-filters">
+      {% if can_create %}<a class="button-primary-link" href="{{ new_href }}">New contact</a>{% endif %}
+    </div>
+  </div>
+
+  {% if contacts.is_empty() %}
+  <p class="description">No contacts yet.{% if can_create %} <a href="{{ new_href }}">Create the first one</a>{% else %} Add a contact in any CardDAV client (the contacts app of your phone or computer) and it will appear here.{% endif %}</p>
+  {% else %}
+  <ul class="contact-list">
+    {% for contact in contacts %}
+    <li class="contact-item">
+      <span class="contact-name">{{ contact.name }}</span>
+      <span class="contact-meta">
+        {% if let Some(email) = contact.email %}<a href="mailto:{{ email }}" class="muted">{{ email }}</a>{% endif %}
+        {% if let Some(phone) = contact.phone %}<span class="muted">{{ phone }}</span>{% endif %}
+        <span class="muted">{{ contact.addressbook_name }}</span>
+        {% if contact.editable %}
+        <a class="button" href="{{ contact.href }}">Edit</a>
+        <form method="POST" action="{{ contact.delete_href }}" class="inline-form"
+          onsubmit="return confirm('Delete this contact?')">
+          <button type="submit" class="link-danger">Delete</button>
+        </form>
+        {% endif %}
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>

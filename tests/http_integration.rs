@@ -17,8 +17,8 @@ use rustical::{
 use rustical_ical::CalendarObjectType;
 use rustical_store::auth::{AuthenticationProvider, PrincipalType};
 use rustical_store::{
-    AddressbookReadStore, Calendar, CalendarMetadata, CalendarReadStore, CalendarWriteStore,
-    InviteStore, SubscriptionKind, SubscriptionStore,
+    Addressbook, AddressbookReadStore, AddressbookWriteStore, Calendar, CalendarMetadata,
+    CalendarReadStore, CalendarWriteStore, InviteStore, SubscriptionKind, SubscriptionStore,
 };
 use rustical_store_sqlite::{
     SqliteAddressbookStore, SqliteCalendarStore, SqliteInviteStore, SqlitePrincipalStore,
@@ -37,8 +37,13 @@ where
     // Start RustiCal process
     let (token, port, main_process, start_notify) = rustical_process(db_path);
 
-    // Wait for RustiCal server to listen
-    tokio::time::timeout(Duration::new(2, 0), start_notify.notified())
+    // Wait for RustiCal server to listen. The budget is generous on purpose:
+    // under tarpaulin's ptrace instrumentation (the CI coverage job) every
+    // syscall of the spawned server is intercepted, several servers start in
+    // parallel, and a 2s budget failed the coverage run — a wait that only
+    // ever costs time when the server is genuinely not coming up (which
+    // fails the test either way).
+    tokio::time::timeout(Duration::from_secs(30), start_notify.notified())
         .await
         .unwrap();
 
@@ -60,8 +65,9 @@ where
     // Start RustiCal process
     let (token, port, main_process, start_notify) = rustical_process_with(db_path, customize);
 
-    // Wait for RustiCal server to listen
-    tokio::time::timeout(Duration::new(2, 0), start_notify.notified())
+    // Wait for RustiCal server to listen — same generous budget as
+    // `test_runner` (see there for why 2s failed the CI coverage run).
+    tokio::time::timeout(Duration::from_secs(30), start_notify.notified())
         .await
         .unwrap();
 
@@ -973,6 +979,216 @@ async fn test_register_enabled_provisions() {
                 alert_from(&used_body),
                 "Invalid or expired invitation code."
             );
+        },
+    )
+    .await;
+}
+
+/// The unified profile page: every former top-level tab (Calendars,
+/// Addressbooks, Groups, Linked platforms) is a collapsed `<details>` section
+/// on /frontend/user/{user}, the legacy tab URLs deep-link into the same page
+/// with their section expanded, and the aggregate Contacts page behaves like
+/// the Tasks one (list + picker form + create-redirect).
+#[tokio::test]
+async fn test_portal_profile_sections_and_contacts() {
+    let db_tempfile = tempfile::NamedTempFile::with_suffix(".rustical-test.sqlite3").unwrap();
+    let db_path = db_tempfile.path().to_string_lossy().into_owned();
+
+    test_runner_with(
+        Some(db_path.clone()),
+        |_| {},
+        async |port| {
+            let origin = format!("http://localhost:{port}");
+            let config = Config {
+                tenancy: TenancyConfig::default(),
+                data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
+                    db_url: db_path.clone(),
+                    run_repairs: true,
+                    skip_broken: false,
+                }),
+                http: HttpConfig {
+                    bind: Some(format!("127.0.0.1:{port}")),
+                    ..Default::default()
+                },
+                frontend: Default::default(),
+                oidc: None,
+                tracing: Default::default(),
+                dav_push: Default::default(),
+                nextcloud_login: Default::default(),
+                caldav: Default::default(),
+                scheduling: Default::default(),
+                subscriptions: Default::default(),
+                registration: Default::default(),
+                maintenance: Default::default(),
+                appliance: Default::default(),
+            };
+
+            // Create the principal (CLI), then set its password.
+            cmd_principals(
+                PrincipalsArgs {
+                    command: PrincipalsCommand::Create(CreateArgs {
+                        id: "user".to_owned(),
+                        name: Some("Test User".to_owned()),
+                        password: false,
+                        for_testing_password_from_arg: None,
+                        principal_type: Some(PrincipalType::Individual),
+                        overwrite: true,
+                    }),
+                },
+                config.clone(),
+            )
+            .await
+            .unwrap();
+            cmd_principals(
+                PrincipalsArgs {
+                    command: PrincipalsCommand::Edit(EditArgs {
+                        id: "user".to_owned(),
+                        name: None,
+                        password: false,
+                        remove_password: false,
+                        for_testing_password_from_arg: Some("pass".to_owned()),
+                        principal_type: None,
+                    }),
+                },
+                config.clone(),
+            )
+            .await
+            .unwrap();
+
+            // Seed one addressbook for the Contacts page.
+            let db = create_db_pool(&db_path, false).await.unwrap();
+            let (send, _recv) = tokio::sync::mpsc::channel(1);
+            SqliteAddressbookStore::new(db, send, false)
+                .insert_addressbook(Addressbook {
+                    id: "people".to_owned(),
+                    principal: "user".to_owned(),
+                    displayname: Some("People".to_owned()),
+                    description: None,
+                    deleted_at: None,
+                    synctoken: 0,
+                    push_topic: "people-push-topic".to_owned(),
+                })
+                .await
+                .unwrap();
+
+            let client = reqwest::Client::builder()
+                .redirect(Policy::none())
+                .cookie_store(true)
+                .build()
+                .unwrap();
+            let url = origin.clone() + "/frontend/login";
+            let resp = client
+                .request(Method::POST, &url)
+                .form(&[("username", "user"), ("password", "pass")])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+            {
+                // The unified profile page: every former tab is a collapsed
+                // section.
+                let url = origin.clone() + "/frontend/user/user";
+                let resp = client.request(Method::GET, &url).send().await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                let body = resp.text().await.unwrap();
+                for id in [
+                    "app-tokens-section",
+                    "calendars-section",
+                    "addressbooks-section",
+                    "groups-section",
+                    "linked-platforms-section",
+                ] {
+                    let collapsed = format!(r#"<details class="profile-section" id="{id}">"#);
+                    assert!(
+                        body.contains(&collapsed),
+                        "{id} renders as a collapsed profile section: {body}"
+                    );
+                }
+                // The seeded addressbook is embedded in the Addressbooks
+                // section.
+                assert!(body.contains("People"), "addressbook listed: {body}");
+                // The nav keeps the aggregate frontends …
+                assert!(body.contains(r#"href="/frontend/user/user/tasks""#));
+                assert!(body.contains(r#"href="/frontend/user/user/contacts""#));
+                // … and the former tab entries are gone from the nav.
+                assert!(!body.contains(">Addressbooks</a>"), "nav: {body}");
+                assert!(!body.contains(">Groups</a>"), "nav: {body}");
+                assert!(!body.contains(">Linked platforms</a>"), "nav: {body}");
+            }
+
+            {
+                // A legacy tab URL renders the same page with its section
+                // expanded (deep-link behaviour).
+                let url = origin.clone() + "/frontend/user/user/calendar";
+                let resp = client.request(Method::GET, &url).send().await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                let body = resp.text().await.unwrap();
+                assert!(
+                    body.contains(
+                        r#"<details class="profile-section" id="calendars-section" open>"#
+                    ),
+                    "calendars expanded on its deep link: {body}"
+                );
+                assert!(
+                    body.contains(r#"<details class="profile-section" id="addressbooks-section">"#),
+                    "addressbooks still collapsed: {body}"
+                );
+            }
+
+            {
+                // The aggregate Contacts page: empty state + create button.
+                let url = origin.clone() + "/frontend/user/user/contacts";
+                let resp = client.request(Method::GET, &url).send().await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                let body = resp.text().await.unwrap();
+                assert!(body.contains("Contacts"), "heading: {body}");
+                assert!(body.contains("No contacts yet"), "empty state: {body}");
+                assert!(body.contains("New contact"), "create button: {body}");
+            }
+
+            {
+                // The aggregate form offers the addressbook picker.
+                let url = origin.clone() + "/frontend/user/user/contacts/new";
+                let resp = client.request(Method::GET, &url).send().await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                let body = resp.text().await.unwrap();
+                assert!(body.contains(r#"name="addressbook""#), "picker: {body}");
+                assert!(body.contains(r#"value="user|people""#), "offered: {body}");
+            }
+
+            {
+                // A contact created through the aggregate form lands on the
+                // aggregate list, and the per-addressbook list agrees.
+                let url = origin.clone() + "/frontend/user/user/contacts";
+                let resp = client
+                    .request(Method::POST, &url)
+                    .form(&[
+                        ("addressbook", "user|people"),
+                        ("name", "Jane Doe"),
+                        ("email", "jane@example.com"),
+                    ])
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+                assert_eq!(
+                    resp.headers().get("Location").unwrap().to_str().unwrap(),
+                    "/frontend/user/user/contacts"
+                );
+
+                let resp = client.request(Method::GET, &url).send().await.unwrap();
+                let body = resp.text().await.unwrap();
+                assert!(body.contains("Jane Doe"), "created contact listed: {body}");
+                assert!(body.contains("jane@example.com"), "email rendered: {body}");
+                assert!(body.contains("People"), "addressbook label: {body}");
+
+                let url = origin.clone() + "/frontend/user/user/addressbook/people/contacts";
+                let resp = client.request(Method::GET, &url).send().await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                let body = resp.text().await.unwrap();
+                assert!(body.contains("Jane Doe"), "per-addressbook list: {body}");
+            }
         },
     )
     .await;

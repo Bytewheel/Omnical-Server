@@ -6,6 +6,18 @@
 <section class="event-form-page">
   <h1>{{ title }}</h1>
   <form method="POST" action="{{ action }}" class="event-form">
+    {% if addressbooks.len() > 1 %}
+    <label for="addressbook">Addressbook
+      <select name="addressbook" id="addressbook" required>
+        {% for ab in addressbooks %}
+        <option value="{{ ab.value }}">{{ ab.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    {% else %}
+    {% for ab in addressbooks %}<input type="hidden" name="addressbook" value="{{ ab.value }}">{% endfor %}
+    {% endif %}
+
     <label for="name">Name
       <input type="text" name="name" id="name" value="{{ name }}" required autofocus>
     </label>

@@ -1,35 +1,28 @@
 use askama::Template;
-use askama_web::WebTemplate;
 use axum::{
     Extension,
     extract::{Form, Path},
     response::{IntoResponse, Redirect, Response},
 };
-use axum_extra::TypedHeader;
-use headers::Host;
 use http::StatusCode;
 use rustical_scheduling::{SmtpAccount, mime, smtp};
 use rustical_store::{
-    Addressbook, AddressbookStore, Calendar, CollectionMetadata, CollectionShareStore,
-    PrefixedCalendarStore, SubscriptionKind, SubscriptionStore,
+    Addressbook, AddressbookStore, Calendar, CalendarStore, CollectionMetadata,
+    CollectionShareStore, PrefixedCalendarStore, SubscriptionKind, SubscriptionStore,
     auth::{AuthenticationProvider, Principal, PrincipalType, Privilege},
 };
 use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::pages::user::{Section, UserPage};
 use crate::routes::app_token::generate_app_token;
 use crate::routes::calendar::{GuestShareEntry, resolve_base_url};
+use crate::routes::user::{
+    ProfileAnchor, ProfileDeps, ProfileExtras, ProfileRequest, render_profile_page,
+};
 use crate::url_builder::export_url;
 
-impl Section for AddressbooksSection {
-    fn name() -> &'static str {
-        "addressbooks"
-    }
-}
-
-/// One addressbook tile of the Addressbooks screen: the rendered addressbook
+/// One addressbook tile of the profile's Addressbooks section: the rendered
 /// plus its credential-less share-link data (PLAN.md §17.15 — the addressbook
 /// half of the old Share tab's share-link block) and its minted full-access
 /// `CardDAV` credentials (`PLAN_NEXT_AGENT_WEB_CALENDAR_UI.md` — the addressbook
@@ -56,7 +49,7 @@ pub struct AddressbookTile {
     pub guest_shares: Vec<GuestShareEntry>,
 }
 
-#[derive(Template, WebTemplate)]
+#[derive(Template)]
 #[template(path = "components/sections/addressbooks_section.html")]
 pub struct AddressbooksSection {
     pub user: Principal,
@@ -73,8 +66,8 @@ pub struct AddressbooksSection {
     pub error: Option<String>,
 }
 
-/// One-time banner payloads of the Addressbooks screen — all `None` on a plain
-/// page load; the credentials POST sets exactly the credential fields.
+/// One-time banner payloads of the Addressbooks section — all `None` on a
+/// plain page load; the credentials POST sets exactly the credential fields.
 #[derive(Default)]
 pub struct AddressbooksExtras {
     pub error: Option<String>,
@@ -85,18 +78,28 @@ pub struct AddressbooksExtras {
     pub credential_email: Option<String>,
 }
 
-/// The shared Addressbooks-screen renderer: lists the user's addressbooks
+impl AddressbooksExtras {
+    /// True when any one-time banner is set — the profile page expands the
+    /// Addressbooks heading for a render that carries one.
+    #[must_use]
+    pub const fn has_banner(&self) -> bool {
+        self.error.is_some() || self.credential_server_url.is_some()
+    }
+}
+
+/// The shared Addressbooks-section builder: lists the user's addressbooks
 /// with their share-link and credential blocks plus an error banner (§17.15,
-/// §17.12.1).
+/// §17.12.1). Rendered into the profile page's collapsible Addressbooks
+/// heading.
 #[allow(clippy::too_many_lines)]
-pub async fn render_addressbooks_page<AS: AddressbookStore + PrefixedCalendarStore>(
+pub async fn build_addressbooks_section<AS: AddressbookStore + PrefixedCalendarStore>(
     addr_store: &Arc<AS>,
     share_store: &Arc<dyn CollectionShareStore>,
     sub_store: Option<&Arc<dyn SubscriptionStore>>,
     base_url: &str,
     user: &Principal,
     extras: AddressbooksExtras,
-) -> Response {
+) -> AddressbooksSection {
     let mut addressbooks = vec![];
     for group in user.memberships() {
         addressbooks.extend(addr_store.get_addressbooks(group).await.unwrap());
@@ -194,44 +197,43 @@ pub async fn render_addressbooks_page<AS: AddressbookStore + PrefixedCalendarSto
         credential_email,
     } = extras;
 
-    UserPage {
-        section: AddressbooksSection {
-            user: user.clone(),
-            addressbooks: addressbook_infos,
-            deleted_addressbooks: deleted_addressbook_infos,
-            carddav_url: format!("{base_url}/carddav"),
-            credential_server_url,
-            credential_username,
-            credential_token,
-            credential_addressbook_id,
-            credential_email,
-            error,
-        },
+    AddressbooksSection {
         user: user.clone(),
+        addressbooks: addressbook_infos,
+        deleted_addressbooks: deleted_addressbook_infos,
+        carddav_url: format!("{base_url}/carddav"),
+        credential_server_url,
+        credential_username,
+        credential_token,
+        credential_addressbook_id,
+        credential_email,
+        error,
     }
-    .into_response()
 }
 
-pub async fn route_addressbooks<AS: AddressbookStore + PrefixedCalendarStore>(
+/// GET /{user}/addressbook — the former Addressbooks tab: the same unified
+/// profile page with its Addressbooks heading expanded.
+pub async fn route_addressbooks<
+    AP: AuthenticationProvider,
+    CS: CalendarStore,
+    AS: AddressbookStore + PrefixedCalendarStore,
+>(
     Path(user_id): Path<String>,
-    Extension(addr_store): Extension<Arc<AS>>,
-    Extension(share_store): Extension<Arc<dyn CollectionShareStore>>,
-    Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
-    Extension(public_url): Extension<String>,
-    TypedHeader(host): TypedHeader<Host>,
+    deps: ProfileDeps<AP, CS, AS>,
+    req: ProfileRequest,
     user: Principal,
 ) -> impl IntoResponse {
     if user_id != user.id {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let base_url = resolve_base_url(&public_url, &host);
-    render_addressbooks_page(
-        &addr_store,
-        &share_store,
-        sub_store.as_ref(),
-        &base_url,
+    render_profile_page(
+        &deps,
+        &req,
         &user,
-        AddressbooksExtras::default(),
+        ProfileExtras {
+            anchor: ProfileAnchor::Addressbooks,
+            ..ProfileExtras::default()
+        },
     )
     .await
 }
@@ -252,19 +254,16 @@ pub struct AddressbookCredentialsForm {
 /// `CardDAV` credentials for one addressbook and show them once on the
 /// Addressbooks screen (Omnical §17.12.1, the addressbook counterpart of the
 /// calendar "Generate credentials").
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)]
 pub async fn route_addressbook_credentials<
     AP: AuthenticationProvider,
+    CS: CalendarStore,
     AS: AddressbookStore + PrefixedCalendarStore,
 >(
     Path(user_id): Path<String>,
-    Extension(auth_provider): Extension<Arc<AP>>,
-    Extension(addr_store): Extension<Arc<AS>>,
-    Extension(share_store): Extension<Arc<dyn CollectionShareStore>>,
-    Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
-    Extension(public_url): Extension<String>,
+    deps: ProfileDeps<AP, CS, AS>,
+    req: ProfileRequest,
     Extension(smtp_accounts): Extension<Vec<SmtpAccount>>,
-    TypedHeader(host): TypedHeader<Host>,
     user: Principal,
     Form(form): Form<AddressbookCredentialsForm>,
 ) -> Response {
@@ -272,7 +271,7 @@ pub async fn route_addressbook_credentials<
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let base_url = resolve_base_url(&public_url, &host);
+    let base_url = resolve_base_url(&req.public_url, req.host.as_ref());
 
     // Only the owner — or a group admin — may mint credentials for a group
     // addressbook; the minted credential always carries `admin` privilege
@@ -285,22 +284,23 @@ pub async fn route_addressbook_credentials<
             .into_response();
     }
 
+    // Every error path below re-renders the unified profile page with the
+    // banner in its Addressbooks section (which the banner expands).
     let page_error = |error: String| {
-        let addr_store = addr_store.clone();
-        let share_store = share_store.clone();
-        let sub_store = sub_store.clone();
-        let base_url = base_url.clone();
+        let deps = deps.clone();
+        let req = req.clone();
         let user = user.clone();
         async move {
-            render_addressbooks_page(
-                &addr_store,
-                &share_store,
-                sub_store.as_ref(),
-                &base_url,
+            render_profile_page(
+                &deps,
+                &req,
                 &user,
-                AddressbooksExtras {
-                    error: Some(error),
-                    ..AddressbooksExtras::default()
+                ProfileExtras {
+                    addressbooks: AddressbooksExtras {
+                        error: Some(error),
+                        ..AddressbooksExtras::default()
+                    },
+                    ..ProfileExtras::default()
                 },
             )
             .await
@@ -313,7 +313,8 @@ pub async fn route_addressbook_credentials<
 
     // Fail fast on a wrong addressbook id (same discipline as the calendar
     // credentials route).
-    if addr_store
+    if deps
+        .addr_store
         .get_addressbook(&form.principal, &form.addressbook_id, false)
         .await
         .is_err()
@@ -341,7 +342,8 @@ pub async fn route_addressbook_credentials<
 
     // 1. Create the guest principal (no portal password, no memberships).
     let guest_id = format!("guest-{}", Uuid::new_v4());
-    if let Err(err) = auth_provider
+    if let Err(err) = deps
+        .auth_provider
         .insert_principal(
             Principal {
                 id: guest_id.clone(),
@@ -361,7 +363,8 @@ pub async fn route_addressbook_credentials<
 
     // 2. Mint an app token → the DAV credential (`{id4}_{secret}`).
     let token_secret = generate_app_token();
-    let mut token_id = match auth_provider
+    let mut token_id = match deps
+        .auth_provider
         .add_app_token(
             &guest_id,
             format!("{} guest", form.addressbook_id),
@@ -378,7 +381,8 @@ pub async fn route_addressbook_credentials<
     let credential = format!("{token_id}_{token_secret}");
 
     // 3. Persist the share row — always `admin` (full read/write/admin).
-    if let Err(err) = share_store
+    if let Err(err) = deps
+        .share_store
         .add_share(
             &form.principal,
             &form.addressbook_id,
@@ -421,19 +425,20 @@ pub async fn route_addressbook_credentials<
         });
     }
 
-    render_addressbooks_page(
-        &addr_store,
-        &share_store,
-        sub_store.as_ref(),
-        &base_url,
+    render_profile_page(
+        &deps,
+        &req,
         &user,
-        AddressbooksExtras {
-            credential_server_url: Some(server_url),
-            credential_username: Some(guest_id),
-            credential_token: Some(credential),
-            credential_addressbook_id: Some(form.addressbook_id),
-            credential_email: email,
-            ..AddressbooksExtras::default()
+        ProfileExtras {
+            addressbooks: AddressbooksExtras {
+                credential_server_url: Some(server_url),
+                credential_username: Some(guest_id),
+                credential_token: Some(credential),
+                credential_addressbook_id: Some(form.addressbook_id),
+                credential_email: email,
+                ..AddressbooksExtras::default()
+            },
+            ..ProfileExtras::default()
         },
     )
     .await

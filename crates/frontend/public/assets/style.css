@@ -546,6 +546,34 @@ form.inline-form {
   margin-bottom: 2em;
 }
 
+/* The Profile page's collapsible sections — the former top-level tabs
+   (App tokens, Calendars, Addressbooks, Groups, Linked platforms), each
+   one <details> with its pre-rendered section inside. */
+.profile-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--background-color-04);
+  padding: .8em 1.2em;
+  margin-bottom: 1.6em;
+
+  summary {
+    cursor: pointer;
+    font-weight: 700;
+    font-size: 1.15em;
+    line-height: 1.25;
+    color: var(--text);
+  }
+
+  &[open] summary {
+    margin-bottom: 1em;
+  }
+
+  /* The embedded section's own error banner should span the section. */
+  > .error {
+    margin-bottom: 1em;
+  }
+}
+
 /* One-time banners and page-level messages */
 .error {
   color: var(--danger);

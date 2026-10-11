@@ -1,12 +1,11 @@
 use std::{str::FromStr, sync::Arc};
 
-use crate::routes::addressbooks::render_addressbooks_page;
-use crate::routes::calendar::{CalendarsExtras, render_calendars_page};
+use crate::routes::addressbooks::AddressbooksExtras;
+use crate::routes::calendar::{CalendarsExtras, resolve_base_url};
+use crate::routes::user::{ProfileDeps, ProfileExtras, ProfileRequest, render_profile_page};
 use axum::extract::Path;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::{Extension, Form};
-use axum_extra::extract::TypedHeader;
-use headers::Host;
 use http::StatusCode;
 use rustical_scheduling::{SmtpAccount, mime, smtp};
 use rustical_store::{
@@ -19,17 +18,6 @@ use uuid::Uuid;
 
 use super::app_token::generate_app_token;
 
-/// Resolve the base URL share links are printed with: the configured
-/// `[subscriptions] public_url` (passed in by `make_app`, computed with the
-/// same `public_base_url` as the CLI), else the request's own host.
-fn resolve_base_url(public_url: &str, host: &Host) -> String {
-    if public_url.is_empty() {
-        format!("https://{host}")
-    } else {
-        public_url.to_owned()
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateShareForm {
     pub principal: String,
@@ -41,18 +29,18 @@ pub struct CreateShareForm {
 /// or owned-group collections. The token is the app-token shape (64-char
 /// alphanumeric); the URL is byte-identical to the `subscriptions add` CLI
 /// (same token shape, same shared `export_url` builder). Redirects back to
-/// the Calendars (calendar) or Addressbooks (addressbook) tab the form was
-/// posted from (PLAN.md §17.15 — the Share tab is gone).
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn route_share_create<CS: CalendarStore, AS: AddressbookStore + PrefixedCalendarStore>(
+/// the Calendars (calendar) or Addressbooks (addressbook) section the form
+/// was posted from (PLAN.md §17.15 — the Share tab is gone), and errors
+/// re-render the unified profile page with the banner in that section.
+#[allow(clippy::too_many_lines)]
+pub async fn route_share_create<
+    AP: AuthenticationProvider,
+    CS: CalendarStore,
+    AS: AddressbookStore + PrefixedCalendarStore,
+>(
     Path(user_id): Path<String>,
-    Extension(cal_store): Extension<Arc<CS>>,
-    Extension(addr_store): Extension<Arc<AS>>,
-    Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
-    Extension(invite_store): Extension<Arc<dyn InviteStore>>,
-    Extension(share_store): Extension<Arc<dyn CollectionShareStore>>,
-    Extension(public_url): Extension<String>,
-    TypedHeader(host): TypedHeader<Host>,
+    deps: ProfileDeps<AP, CS, AS>,
+    req: ProfileRequest,
     user: Principal,
     Form(form): Form<CreateShareForm>,
 ) -> Response {
@@ -60,7 +48,7 @@ pub async fn route_share_create<CS: CalendarStore, AS: AddressbookStore + Prefix
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let Some(sub_store) = sub_store else {
+    let Some(sub_store) = deps.sub_store.clone() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Share links are disabled on this server.",
@@ -90,11 +78,13 @@ pub async fn route_share_create<CS: CalendarStore, AS: AddressbookStore + Prefix
     // Fail fast on a wrong collection id instead of creating a URL that
     // 404s forever (same discipline as `subscriptions add`).
     let collection_exists = match kind {
-        SubscriptionKind::Calendar => cal_store
+        SubscriptionKind::Calendar => deps
+            .cal_store
             .get_calendar(&form.principal, &form.collection_id, false)
             .await
             .is_ok(),
-        SubscriptionKind::Addressbook => addr_store
+        SubscriptionKind::Addressbook => deps
+            .addr_store
             .get_addressbook(&form.principal, &form.collection_id, false)
             .await
             .is_ok(),
@@ -133,34 +123,34 @@ pub async fn route_share_create<CS: CalendarStore, AS: AddressbookStore + Prefix
             Redirect::to(&location).into_response()
         }
         Err(err) => {
-            let base_url = resolve_base_url(&public_url, &host);
             let error = format!("Could not create the share link: {err}");
             match kind {
                 SubscriptionKind::Calendar => {
-                    render_calendars_page(
-                        &cal_store,
-                        &share_store,
-                        Some(&sub_store),
-                        &invite_store,
-                        &base_url,
+                    render_profile_page(
+                        &deps,
+                        &req,
                         &user,
-                        CalendarsExtras {
-                            error: Some(error),
-                            ..CalendarsExtras::default()
+                        ProfileExtras {
+                            calendars: CalendarsExtras {
+                                error: Some(error),
+                                ..CalendarsExtras::default()
+                            },
+                            ..ProfileExtras::default()
                         },
                     )
                     .await
                 }
                 SubscriptionKind::Addressbook => {
-                    render_addressbooks_page(
-                        &addr_store,
-                        &share_store,
-                        Some(&sub_store),
-                        &base_url,
+                    render_profile_page(
+                        &deps,
+                        &req,
                         &user,
-                        crate::routes::addressbooks::AddressbooksExtras {
-                            error: Some(error),
-                            ..Default::default()
+                        ProfileExtras {
+                            addressbooks: AddressbooksExtras {
+                                error: Some(error),
+                                ..AddressbooksExtras::default()
+                            },
+                            ..ProfileExtras::default()
                         },
                     )
                     .await
@@ -253,17 +243,16 @@ pub struct SendInviteForm {
 
 /// POST /{user}/share/invite — create a one-time invite code tied to a group
 /// and return the registration link. The caller copies the link and sends it
-/// to the invitee. The Calendars screen re-renders with the link in the
-/// minted calendar's tile (one-time banner, §17.15).
-#[allow(clippy::too_many_arguments)]
-pub async fn route_share_invite<CS: CalendarStore>(
+/// to the invitee. The profile page re-renders with the link in the minted
+/// calendar's tile (one-time banner, §17.15).
+pub async fn route_share_invite<
+    AP: AuthenticationProvider,
+    CS: CalendarStore,
+    AS: AddressbookStore + PrefixedCalendarStore,
+>(
     Path(user_id): Path<String>,
-    Extension(cal_store): Extension<Arc<CS>>,
-    Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
-    Extension(public_url): Extension<String>,
-    Extension(invite_store): Extension<Arc<dyn InviteStore>>,
-    Extension(share_store): Extension<Arc<dyn CollectionShareStore>>,
-    TypedHeader(host): TypedHeader<Host>,
+    deps: ProfileDeps<AP, CS, AS>,
+    req: ProfileRequest,
     user: Principal,
     Form(form): Form<SendInviteForm>,
 ) -> Response {
@@ -271,25 +260,22 @@ pub async fn route_share_invite<CS: CalendarStore>(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let base_url = resolve_base_url(&public_url, &host);
+    let base_url = resolve_base_url(&req.public_url, req.host.as_ref());
     let page_error = |msg: String| {
-        let cal_store = cal_store.clone();
-        let sub_store = sub_store.clone();
-        let invite_store = invite_store.clone();
-        let share_store = share_store.clone();
-        let base_url = base_url.clone();
+        let deps = deps.clone();
+        let req = req.clone();
         let user = user.clone();
         async move {
-            render_calendars_page(
-                &cal_store,
-                &share_store,
-                sub_store.as_ref(),
-                &invite_store,
-                &base_url,
+            render_profile_page(
+                &deps,
+                &req,
                 &user,
-                CalendarsExtras {
-                    error: Some(msg),
-                    ..CalendarsExtras::default()
+                ProfileExtras {
+                    calendars: CalendarsExtras {
+                        error: Some(msg),
+                        ..CalendarsExtras::default()
+                    },
+                    ..ProfileExtras::default()
                 },
             )
             .await
@@ -328,7 +314,9 @@ pub async fn route_share_invite<CS: CalendarStore>(
         return page_error("Invites are only supported for calendars.".to_owned()).await;
     }
     // Fail fast on a wrong collection id (same discipline as share create).
-    if cal_store
+    // Fail fast on a wrong collection id (same discipline as share create).
+    if deps
+        .cal_store
         .get_calendar(&form.principal, &form.collection_id, false)
         .await
         .is_err()
@@ -347,7 +335,8 @@ pub async fn route_share_invite<CS: CalendarStore>(
         Some(form.principal.clone())
     };
 
-    if let Err(err) = invite_store
+    if let Err(err) = deps
+        .invite_store
         .add_invite(
             &code,
             &email,
@@ -363,19 +352,19 @@ pub async fn route_share_invite<CS: CalendarStore>(
     }
 
     let invite_url = format!("{base_url}/register?code={code}");
-    render_calendars_page(
-        &cal_store,
-        &share_store,
-        sub_store.as_ref(),
-        &invite_store,
-        &base_url,
+    render_profile_page(
+        &deps,
+        &req,
         &user,
-        CalendarsExtras {
-            invite_url: Some(invite_url),
-            invited_email: email,
-            invite_collection_id: Some(form.collection_id.clone()),
-            invite_principal: Some(form.principal.clone()),
-            ..CalendarsExtras::default()
+        ProfileExtras {
+            calendars: CalendarsExtras {
+                invite_url: Some(invite_url),
+                invited_email: email,
+                invite_collection_id: Some(form.collection_id.clone()),
+                invite_principal: Some(form.principal.clone()),
+                ..CalendarsExtras::default()
+            },
+            ..ProfileExtras::default()
         },
     )
     .await
@@ -440,19 +429,18 @@ pub struct GuestInviteForm {
 ///   3. Mint an app token and build the DAV credential (`{id4}_{secret}`).
 ///   4. Persist a `collection_shares` row.
 ///   5. Optionally send the credential to `target_email`.
-///   6. Re-render the Calendars screen with a one-time credential banner on
-///      the minted calendar's tile (§17.15).
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn route_share_guest_invite<AP: AuthenticationProvider, CS: CalendarStore>(
+///   6. Re-render the profile page with a one-time credential banner on the
+///      minted calendar's tile (§17.15).
+#[allow(clippy::too_many_lines)]
+pub async fn route_share_guest_invite<
+    AP: AuthenticationProvider,
+    CS: CalendarStore,
+    AS: AddressbookStore + PrefixedCalendarStore,
+>(
     Path(user_id): Path<String>,
-    Extension(auth_provider): Extension<Arc<AP>>,
-    Extension(cal_store): Extension<Arc<CS>>,
-    Extension(sub_store): Extension<Option<Arc<dyn SubscriptionStore>>>,
-    Extension(invite_store): Extension<Arc<dyn InviteStore>>,
-    Extension(share_store): Extension<Arc<dyn CollectionShareStore>>,
+    deps: ProfileDeps<AP, CS, AS>,
+    req: ProfileRequest,
     Extension(smtp_accounts): Extension<Vec<SmtpAccount>>,
-    Extension(public_url): Extension<String>,
-    TypedHeader(host): TypedHeader<Host>,
     user: Principal,
     Form(form): Form<GuestInviteForm>,
 ) -> Response {
@@ -460,25 +448,22 @@ pub async fn route_share_guest_invite<AP: AuthenticationProvider, CS: CalendarSt
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let base_url = resolve_base_url(&public_url, &host);
+    let base_url = resolve_base_url(&req.public_url, req.host.as_ref());
     let page_error = |msg: String| {
-        let cal_store = cal_store.clone();
-        let sub_store = sub_store.clone();
-        let invite_store = invite_store.clone();
-        let share_store = share_store.clone();
-        let base_url = base_url.clone();
+        let deps = deps.clone();
+        let req = req.clone();
         let user = user.clone();
         async move {
-            render_calendars_page(
-                &cal_store,
-                &share_store,
-                sub_store.as_ref(),
-                &invite_store,
-                &base_url,
+            render_profile_page(
+                &deps,
+                &req,
                 &user,
-                CalendarsExtras {
-                    error: Some(msg),
-                    ..CalendarsExtras::default()
+                ProfileExtras {
+                    calendars: CalendarsExtras {
+                        error: Some(msg),
+                        ..CalendarsExtras::default()
+                    },
+                    ..ProfileExtras::default()
                 },
             )
             .await
@@ -508,7 +493,8 @@ pub async fn route_share_guest_invite<AP: AuthenticationProvider, CS: CalendarSt
     }
 
     // Fail fast on wrong collection id (same discipline as share create).
-    if cal_store
+    if deps
+        .cal_store
         .get_calendar(&form.principal, &form.collection_id, false)
         .await
         .is_err()
@@ -536,7 +522,8 @@ pub async fn route_share_guest_invite<AP: AuthenticationProvider, CS: CalendarSt
 
     // 1. Create guest principal.
     let guest_id = format!("guest-{}", Uuid::new_v4());
-    if let Err(err) = auth_provider
+    if let Err(err) = deps
+        .auth_provider
         .insert_principal(
             rustical_store::auth::Principal {
                 id: guest_id.clone(),
@@ -556,7 +543,8 @@ pub async fn route_share_guest_invite<AP: AuthenticationProvider, CS: CalendarSt
 
     // 2. Mint app token → DAV credential.
     let token_secret = generate_app_token();
-    let mut token_id = match auth_provider
+    let mut token_id = match deps
+        .auth_provider
         .add_app_token(
             &guest_id,
             format!("{} guest", form.collection_id),
@@ -573,7 +561,8 @@ pub async fn route_share_guest_invite<AP: AuthenticationProvider, CS: CalendarSt
     let credential = format!("{token_id}_{token_secret}");
 
     // 3. Persist the share row.
-    if let Err(err) = share_store
+    if let Err(err) = deps
+        .share_store
         .add_share(
             &form.principal,
             &form.collection_id,
@@ -595,7 +584,7 @@ pub async fn route_share_guest_invite<AP: AuthenticationProvider, CS: CalendarSt
     //     one already exists, otherwise mint one. When subscriptions are
     //     disabled the guest email simply omits this section.
     let subscribe_url = ensure_subscribe_url(
-        sub_store.as_ref(),
+        deps.sub_store.as_ref(),
         &form.principal,
         &form.collection_id,
         &base_url,
@@ -631,22 +620,22 @@ pub async fn route_share_guest_invite<AP: AuthenticationProvider, CS: CalendarSt
         });
     }
 
-    render_calendars_page(
-        &cal_store,
-        &share_store,
-        sub_store.as_ref(),
-        &invite_store,
-        &base_url,
+    render_profile_page(
+        &deps,
+        &req,
         &user,
-        CalendarsExtras {
-            guest_share_server_url: Some(server_url),
-            guest_share_username: Some(guest_id),
-            guest_share_credential: Some(credential),
-            guest_share_calendar_id: Some(form.collection_id.clone()),
-            guest_share_principal: Some(form.principal.clone()),
-            guest_share_email: email,
-            guest_share_subscribe_url: subscribe_url,
-            ..CalendarsExtras::default()
+        ProfileExtras {
+            calendars: CalendarsExtras {
+                guest_share_server_url: Some(server_url),
+                guest_share_username: Some(guest_id),
+                guest_share_credential: Some(credential),
+                guest_share_calendar_id: Some(form.collection_id.clone()),
+                guest_share_principal: Some(form.principal.clone()),
+                guest_share_email: email,
+                guest_share_subscribe_url: subscribe_url,
+                ..CalendarsExtras::default()
+            },
+            ..ProfileExtras::default()
         },
     )
     .await

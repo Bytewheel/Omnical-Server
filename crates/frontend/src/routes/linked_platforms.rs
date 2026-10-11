@@ -15,9 +15,10 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
-use crate::pages::user::{Section, UserPage};
+use crate::routes::user::{
+    ProfileAnchor, ProfileDeps, ProfileExtras, ProfileRequest, render_profile_page,
+};
 use askama::Template;
-use askama_web::WebTemplate;
 use axum::{
     Extension, Form,
     extract::Path,
@@ -29,7 +30,9 @@ use caldata::parser::{BytesLines, ParserOptions};
 use http::StatusCode;
 use rustical_ical::CalendarObject;
 use rustical_store::{
-    Calendar, CalendarSource, CalendarSourceStore, CalendarStore, Error, auth::Principal,
+    AddressbookStore, Calendar, CalendarSource, CalendarSourceStore, CalendarStore, Error,
+    PrefixedCalendarStore,
+    auth::{AuthenticationProvider, Principal},
 };
 use tracing::{error, info, warn};
 use url::Url;
@@ -287,13 +290,7 @@ async fn refresh_source(
 
 // --- Portal section ---------------------------------------------------------
 
-impl Section for LinkedPlatformsSection {
-    fn name() -> &'static str {
-        "linked-platforms"
-    }
-}
-
-#[derive(Template, WebTemplate)]
+#[derive(Template)]
 #[template(path = "components/sections/linked_platforms_section.html")]
 pub struct LinkedPlatformsSection {
     pub user: Principal,
@@ -312,12 +309,14 @@ impl LinkedPlatformsSection {
     }
 }
 
-async fn linked_platforms_page<CS: CalendarStore>(
+/// The Linked-platforms-section builder, rendered into the profile page's
+/// collapsible heading.
+pub async fn build_linked_platforms_section<CS: CalendarStore>(
     cal_store: &Arc<CS>,
     source_store: &Arc<dyn CalendarSourceStore>,
     user: &Principal,
     error: Option<String>,
-) -> Response {
+) -> LinkedPlatformsSection {
     let sources = source_store
         .get_calendar_sources(&user.id)
         .await
@@ -327,17 +326,13 @@ async fn linked_platforms_page<CS: CalendarStore>(
         .iter()
         .map(LinkedPlatformsSection::display_name)
         .collect();
-    UserPage {
-        section: LinkedPlatformsSection {
-            user: user.clone(),
-            sources,
-            calendars,
-            calendar_display_names,
-            error,
-        },
+    LinkedPlatformsSection {
         user: user.clone(),
+        sources,
+        calendars,
+        calendar_display_names,
+        error,
     }
-    .into_response()
 }
 
 /// Fetch the owning principal's source with an `id` (404 if none/mismatched).
@@ -353,25 +348,46 @@ async fn owned_source(
         .filter(|s| s.principal == user_id)
 }
 
-pub async fn route_get_linked_platforms<CS: CalendarStore>(
+/// GET /{user}/linked-platforms — the former Linked-platforms tab: the same
+/// unified profile page with its Linked-platforms heading expanded.
+pub async fn route_get_linked_platforms<
+    AP: AuthenticationProvider,
+    CS: CalendarStore,
+    AS: AddressbookStore + PrefixedCalendarStore,
+>(
     Path(user_id): Path<String>,
-    Extension(cal_store): Extension<Arc<CS>>,
-    Extension(source_store): Extension<Arc<dyn CalendarSourceStore>>,
+    deps: ProfileDeps<AP, CS, AS>,
+    req: ProfileRequest,
     user: Principal,
 ) -> Response {
     if user_id != user.id {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    linked_platforms_page(&cal_store, &source_store, &user, None).await
+    render_profile_page(
+        &deps,
+        &req,
+        &user,
+        ProfileExtras {
+            anchor: ProfileAnchor::LinkedPlatforms,
+            ..ProfileExtras::default()
+        },
+    )
+    .await
 }
 
 /// POST add — fetch + SSRF-guard the feed first, then record the mapping and
 /// materialize a copy into the chosen calendar. A failed/refused fetch never
-/// leaves a dead mapping behind.
-pub async fn route_post_linked_platforms_add<CS: CalendarStore>(
+/// leaves a dead mapping behind. Errors re-render the unified profile page
+/// with the banner in its Linked-platforms section (which the banner
+/// expands).
+pub async fn route_post_linked_platforms_add<
+    AP: AuthenticationProvider,
+    CS: CalendarStore,
+    AS: AddressbookStore + PrefixedCalendarStore,
+>(
     Path(user_id): Path<String>,
-    Extension(cal_store): Extension<Arc<CS>>,
-    Extension(source_store): Extension<Arc<dyn CalendarSourceStore>>,
+    deps: ProfileDeps<AP, CS, AS>,
+    req: ProfileRequest,
     user: Principal,
     Form(form): Form<AddSourceForm>,
 ) -> Response {
@@ -379,28 +395,35 @@ pub async fn route_post_linked_platforms_add<CS: CalendarStore>(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
+    let page_error = |error: String| {
+        let deps = deps.clone();
+        let req = req.clone();
+        let user = user.clone();
+        async move {
+            render_profile_page(
+                &deps,
+                &req,
+                &user,
+                ProfileExtras {
+                    linked_platforms_error: Some(error),
+                    ..ProfileExtras::default()
+                },
+            )
+            .await
+        }
+    };
+
     if form.source_url.trim().is_empty() {
-        return linked_platforms_page(
-            &cal_store,
-            &source_store,
-            &user,
-            Some("A source URL is required.".to_owned()),
-        )
-        .await;
+        return page_error("A source URL is required.".to_owned()).await;
     }
 
-    if cal_store
+    if deps
+        .cal_store
         .get_calendar(&user.id, &form.calendar_id, false)
         .await
         .is_err()
     {
-        return linked_platforms_page(
-            &cal_store,
-            &source_store,
-            &user,
-            Some(format!("No such calendar '{}'.", form.calendar_id)),
-        )
-        .await;
+        return page_error(format!("No such calendar '{}'.", form.calendar_id)).await;
     }
 
     let provider_host = Url::parse(&form.source_url)
@@ -411,20 +434,16 @@ pub async fn route_post_linked_platforms_add<CS: CalendarStore>(
     let objects = match fetch_and_parse(&form.source_url).await {
         Ok(objects) => objects,
         Err(e) => {
-            return linked_platforms_page(
-                &cal_store,
-                &source_store,
-                &user,
-                Some(format!(
-                    "Could not fetch '{}': {e}. Only public HTTPS .ics feeds are allowed.",
-                    form.source_url
-                )),
-            )
+            return page_error(format!(
+                "Could not fetch '{}': {e}. Only public HTTPS .ics feeds are allowed.",
+                form.source_url
+            ))
             .await;
         }
     };
 
-    let source_id = match source_store
+    let source_id = match deps
+        .source_store
         .add_calendar_source(
             &user.id,
             &form.calendar_id,
@@ -435,42 +454,26 @@ pub async fn route_post_linked_platforms_add<CS: CalendarStore>(
     {
         Ok(id) => id,
         Err(Error::AlreadyExists) => {
-            return linked_platforms_page(
-                &cal_store,
-                &source_store,
-                &user,
-                Some("This calendar is already linked to that URL.".to_owned()),
-            )
-            .await;
+            return page_error("This calendar is already linked to that URL.".to_owned()).await;
         }
         Err(e) => {
             error!(%e, "add calendar source failed");
-            return linked_platforms_page(
-                &cal_store,
-                &source_store,
-                &user,
-                Some(format!("Could not record the linked source: {e}.")),
-            )
-            .await;
+            return page_error(format!("Could not record the linked source: {e}.")).await;
         }
     };
 
-    let cal_dyn: Arc<dyn CalendarStore> = cal_store.clone();
+    let cal_dyn: Arc<dyn CalendarStore> = deps.cal_store.clone();
     if let Err(e) = materialize_objects(&cal_dyn, &user.id, &form.calendar_id, objects).await {
         warn!(%e, "materialize failed after fetch");
-        return linked_platforms_page(
-            &cal_store,
-            &source_store,
-            &user,
-            Some(format!(
-                "Fetched the feed but could not import its events: {e}."
-            )),
-        )
+        return page_error(format!(
+            "Fetched the feed but could not import its events: {e}."
+        ))
         .await;
     }
 
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let _ = source_store
+    let _ = deps
+        .source_store
         .update_calendar_source_fetch(&user.id, &source_id, &now, true)
         .await;
     info!(source = %source_id, "linked platform added and materialized");
@@ -480,30 +483,37 @@ pub async fn route_post_linked_platforms_add<CS: CalendarStore>(
 
 /// POST refresh — re-fetch + diff by UID. Mass-delete heuristic aborts with an
 /// error banner rather than wiping the calendar.
-pub async fn route_post_linked_platforms_refresh<CS: CalendarStore>(
+pub async fn route_post_linked_platforms_refresh<
+    AP: AuthenticationProvider,
+    CS: CalendarStore,
+    AS: AddressbookStore + PrefixedCalendarStore,
+>(
     Path((user_id, id)): Path<(String, String)>,
-    Extension(cal_store): Extension<Arc<CS>>,
-    Extension(source_store): Extension<Arc<dyn CalendarSourceStore>>,
+    deps: ProfileDeps<AP, CS, AS>,
+    req: ProfileRequest,
     user: Principal,
 ) -> Response {
     if user_id != user.id {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let Some(source) = owned_source(&source_store, &user.id, &id).await else {
+    let Some(source) = owned_source(&deps.source_store, &user.id, &id).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let cal_dyn: Arc<dyn CalendarStore> = cal_store.clone();
-    match refresh_source(&cal_dyn, &source_store, &source).await {
+    let cal_dyn: Arc<dyn CalendarStore> = deps.cal_store.clone();
+    match refresh_source(&cal_dyn, &deps.source_store, &source).await {
         Ok(()) => {
             Redirect::to(&format!("/frontend/user/{}/linked-platforms", user.id)).into_response()
         }
         Err(e) => {
             warn!(%id, %e, "refresh failed");
-            linked_platforms_page(
-                &cal_store,
-                &source_store,
+            render_profile_page(
+                &deps,
+                &req,
                 &user,
-                Some(format!("Refresh failed: {e}.")),
+                ProfileExtras {
+                    linked_platforms_error: Some(format!("Refresh failed: {e}.")),
+                    ..ProfileExtras::default()
+                },
             )
             .await
         }

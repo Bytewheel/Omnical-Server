@@ -4,7 +4,7 @@
   <summary>New here? What is Omnical…</summary>
   <div class="client-help-body">
     <p class="description"><strong>This website has no calendar on it.</strong> Omnical is where your calendars, tasks and contacts are stored; you see and edit them in the calendar and contacts apps you already use — iPhone/iPad/Mac, Android, or Thunderbird. This website is the control panel: account settings, connecting your apps, and sharing.</p>
-    <p class="description">Your account already contains a <strong>personal calendar</strong>, a <strong>tasks list</strong> and a <strong>contacts book</strong> — they sync to your apps as soon as one is connected. To connect an app, create an <strong>app token</strong> below (the password your calendar app uses — different from the one you sign in to this website with) and follow <a href="#app-token-help">How to use app tokens…</a>. Share links that let others (or Google Calendar) view a calendar read-only are on the <a href="/frontend/user/{{ user.id }}/calendar">Calendars</a> tab.</p>
+    <p class="description">Your account already contains a <strong>personal calendar</strong>, a <strong>tasks list</strong> and a <strong>contacts book</strong> — they sync to your apps as soon as one is connected. To connect an app, create an <strong>app token</strong> below (the password your calendar app uses — different from the one you sign in to this website with) and follow <a href="#app-token-help">How to use app tokens…</a>. Share links that let others (or Google Calendar) view a calendar read-only are in the <a href="/frontend/user/{{ user.id }}/calendar">Calendars</a> section below.</p>
     {% if let Some(sha256) = hawkbook_apk_sha256.as_ref() %}
     <p class="description"><strong>Android:</strong> install <strong>HawkBook</strong> (our DAVx⁵ fork — the app that syncs calendars, tasks and contacts) — <a href="/frontend/download/hawkbook.apk">download hawkbook.apk from this server</a>, then add your account inside it. The download's checksum, verifiable with <code>sha256sum</code>: <code>{{ sha256 }}</code></p>
     {% endif %}
@@ -31,91 +31,113 @@
       } catch (e) { /* storage blocked: dismissal is best-effort */ }
     });
   })();
+  // The page's sections are collapsed <details>; an in-page anchor that
+  // targets something inside one has to open it first or the browser
+  // cannot scroll there (e.g. the intro's "How to use app tokens…" link).
+  document.querySelectorAll('a[href^="#"]').forEach(function (a) {
+    a.addEventListener('click', function () {
+      var target = document.getElementById(decodeURIComponent(a.hash.slice(1)));
+      var section = target && target.closest('details:not([open])');
+      if (section) section.setAttribute('open', '');
+    });
+  });
 </script>
 
-{% let groups = user.memberships_without_self() %}
-{% if groups.len() > 0 %}
-<h3>Groups</h3>
-<ul>
-  {% for group in groups %}
-  <li>{{ group }}</li>
-  {% endfor %}
-</ul>
-{% endif %}
-
-<h3>App tokens</h3>
-<p class="description">App tokens are the passwords your calendar and contacts apps use to sign in to this server — one per app (e.g. <code>hawkbook</code>, <code>thunderbird</code>, <code>apple</code>), each with <strong>full read + write access</strong> to your calendars, tasks and contacts. The token's value is only shown once, right after you generate it. If you lose one, <strong>Regenerate</strong> it: the app keeps its name and full access, the old secret stops working, and the new one is shown once. Full step-by-step instructions: <a href="#app-token-help">How to use app tokens…</a></p>
-{% if let Some(regenerated) = regenerated.as_ref() %}
-<div class="success">
-  <p><strong>"{{ regenerated.name }}" regenerated!</strong> The old secret no longer works. This new one is shown only once — same token, same full access, just update the password in the app that uses it:</p>
-  <p class="share-url-row">
-    <code class="share-url">{{ regenerated.token }}</code>
-    <span class="invite-actions">
-      <button type="button" onclick="navigator.clipboard.writeText('{{ regenerated.token }}')">Copy</button>
-    </span>
-  </p>
-  <p class="description">Full setup: <a href="#app-token-help">How to use app tokens…</a></p>
-</div>
-{% endif %}
-<table id="app-tokens">
-  <thead>
-    <tr>
-      <th>Name</th>
-      <th>Created at</th>
-      <th></th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for app_token in app_tokens %}
-    <tr>
-      <td><div class="shrink-cell">{{ app_token.name }}</div></td>
-      <td>
-        {% if let Some(created_at) = app_token.created_at %}
-        {{ chrono_humanize::HumanTime::from(created_at.to_owned()) }}
-        {% endif %}
-      </td>
-      <td>
-        <div class="token-row-actions">
-          <form action="/frontend/user/{{ user.id }}/app_token/{{ app_token.id }}/regenerate" method="POST">
-            <button type="submit" title="Show a new secret for this token (full access is kept; the old secret stops working)">Regenerate</button>
-          </form>
-          <form action="/frontend/user/{{ user.id }}/app_token/{{ app_token.id }}/delete" method="POST">
-            <button type="submit" class="delete">Delete</button>
-          </form>
-        </div>
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-
-<generate-app-token-form user="{{ user.id }}" />
-
-<details class="client-help" id="app-token-help">
-  <summary>How to use app tokens…</summary>
-  <div class="client-help-body">
-    <p class="description">An app token works like a per-app password. Any app that speaks CalDAV (calendars, tasks) or CardDAV (contacts) signs in with:</p>
-    <ul>
-      <li><strong>Username</strong>: <code>{{ user.id }}</code> — your login name, not your email address.</li>
-      <li><strong>Password</strong>: the app token — generate one with the form above, one per app, e.g. <code>hawkbook</code> or <code>thunderbird</code>.</li>
-      <li><strong>Calendar server (CalDAV)</strong>: <code>{{ caldav_url }}</code></li>
-      <li><strong>Contacts server (CardDAV)</strong>: <code>{{ carddav_url }}</code></li>
-    </ul>
-    <p class="description">The token value is only shown once when it's created — the server stores it hashed, so nobody (not even you) can look it up afterwards. If you lose it: press <strong>Regenerate</strong> next to the token above — the app keeps its name and full access, the old secret stops working, and the new one is shown once. Deleting a token signs that app out everywhere.</p>
-    <h4>Calendars (CalDAV)</h4>
-    <ul>
-      <li><strong>Apple iPhone/iPad/Mac</strong>: Settings → Calendar → Accounts → Add Account → Other → Add CalDAV Account → server <code>{{ caldav_url }}</code>, user = <code>{{ user.id }}</code>, password = the app token.</li>
-      <li><strong>Android</strong>: the built-in Google Calendar app cannot add an external CalDAV server — install <strong>HawkBook/DavX</strong> → add account → CalDAV → paste <code>{{ caldav_url }}</code> + username + app token.</li>
-      <li><strong>Thunderbird</strong>: Calendar → New Calendar → On the Network → paste <code>{{ caldav_url }}</code> + username + app token.</li>
-      <li><strong>Google Calendar &amp; Outlook.com: not possible</strong> — neither supports adding an external CalDAV server; use a calendar's read-only subscribe link from the Calendars tab instead.</li>
-    </ul>
-    <h4>Contacts (CardDAV)</h4>
-    <ul>
-      <li><strong>Apple iPhone/iPad/Mac</strong>: Settings → Contacts → Accounts → Add Account → Other → Add CardDAV Account → server <code>{{ carddav_url }}</code>, user = <code>{{ user.id }}</code>, password = the app token.</li>
-      <li><strong>Android</strong>: install <strong>HawkBook/DavX</strong> → add account → CardDAV → paste <code>{{ carddav_url }}</code> + username + app token (the same HawkBook/DavX account syncs both).</li>
-      <li><strong>Thunderbird</strong>: add the CardDAV address book at <code>{{ carddav_url }}</code> with the same username and app token.</li>
-    </ul>
+<details class="profile-section" id="app-tokens-section"{% if app_tokens_open %} open{% endif %}>
+  <summary>App tokens</summary>
+  <p class="description">App tokens are the passwords your calendar and contacts apps use to sign in to this server — one per app (e.g. <code>hawkbook</code>, <code>thunderbird</code>, <code>apple</code>), each with <strong>full read + write access</strong> to your calendars, tasks and contacts. The token's value is only shown once, right after you generate it. If you lose one, <strong>Regenerate</strong> it: the app keeps its name and full access, the old secret stops working, and the new one is shown once. Full step-by-step instructions: <a href="#app-token-help">How to use app tokens…</a></p>
+  {% if let Some(regenerated) = regenerated.as_ref() %}
+  <div class="success">
+    <p><strong>"{{ regenerated.name }}" regenerated!</strong> The old secret no longer works. This new one is shown only once — same token, same full access, just update the password in the app that uses it:</p>
+    <p class="share-url-row">
+      <code class="share-url">{{ regenerated.token }}</code>
+      <span class="invite-actions">
+        <button type="button" onclick="navigator.clipboard.writeText('{{ regenerated.token }}')">Copy</button>
+      </span>
+    </p>
+    <p class="description">Full setup: <a href="#app-token-help">How to use app tokens…</a></p>
   </div>
+  {% endif %}
+  <table id="app-tokens">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Created at</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for app_token in app_tokens %}
+      <tr>
+        <td><div class="shrink-cell">{{ app_token.name }}</div></td>
+        <td>
+          {% if let Some(created_at) = app_token.created_at %}
+          {{ chrono_humanize::HumanTime::from(created_at.to_owned()) }}
+          {% endif %}
+        </td>
+        <td>
+          <div class="token-row-actions">
+            <form action="/frontend/user/{{ user.id }}/app_token/{{ app_token.id }}/regenerate" method="POST">
+              <button type="submit" title="Show a new secret for this token (full access is kept; the old secret stops working)">Regenerate</button>
+            </form>
+            <form action="/frontend/user/{{ user.id }}/app_token/{{ app_token.id }}/delete" method="POST">
+              <button type="submit" class="delete">Delete</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <generate-app-token-form user="{{ user.id }}" />
+
+  <details class="client-help" id="app-token-help">
+    <summary>How to use app tokens…</summary>
+    <div class="client-help-body">
+      <p class="description">An app token works like a per-app password. Any app that speaks CalDAV (calendars, tasks) or CardDAV (contacts) signs in with:</p>
+      <ul>
+        <li><strong>Username</strong>: <code>{{ user.id }}</code> — your login name, not your email address.</li>
+        <li><strong>Password</strong>: the app token — generate one with the form above, one per app, e.g. <code>hawkbook</code> or <code>thunderbird</code>.</li>
+        <li><strong>Calendar server (CalDAV)</strong>: <code>{{ caldav_url }}</code></li>
+        <li><strong>Contacts server (CardDAV)</strong>: <code>{{ carddav_url }}</code></li>
+      </ul>
+      <p class="description">The token value is only shown once when it's created — the server stores it hashed, so nobody (not even you) can look it up afterwards. If you lose it: press <strong>Regenerate</strong> next to the token above — the app keeps its name and full access, the old secret stops working, and the new one is shown once. Deleting a token signs that app out everywhere.</p>
+      <h4>Calendars (CalDAV)</h4>
+      <ul>
+        <li><strong>Apple iPhone/iPad/Mac</strong>: Settings → Calendar → Accounts → Add Account → Other → Add CalDAV Account → server <code>{{ caldav_url }}</code>, user = <code>{{ user.id }}</code>, password = the app token.</li>
+        <li><strong>Android</strong>: the built-in Google Calendar app cannot add an external CalDAV server — install <strong>HawkBook/DavX</strong> → add account → CalDAV → paste <code>{{ caldav_url }}</code> + username + app token.</li>
+        <li><strong>Thunderbird</strong>: Calendar → New Calendar → On the Network → paste <code>{{ caldav_url }}</code> + username + app token.</li>
+        <li><strong>Google Calendar &amp; Outlook.com: not possible</strong> — neither supports adding an external CalDAV server; use a calendar's read-only subscribe link from the Calendars section instead.</li>
+      </ul>
+      <h4>Contacts (CardDAV)</h4>
+      <ul>
+        <li><strong>Apple iPhone/iPad/Mac</strong>: Settings → Contacts → Accounts → Add Account → Other → Add CardDAV Account → server <code>{{ carddav_url }}</code>, user = <code>{{ user.id }}</code>, password = the app token.</li>
+        <li><strong>Android</strong>: install <strong>HawkBook/DavX</strong> → add account → CardDAV → paste <code>{{ carddav_url }}</code> + username + app token (the same HawkBook/DavX account syncs both).</li>
+        <li><strong>Thunderbird</strong>: add the CardDAV address book at <code>{{ carddav_url }}</code> with the same username and app token.</li>
+      </ul>
+    </div>
+  </details>
+</details>
+
+<details class="profile-section" id="calendars-section"{% if calendars.open %} open{% endif %}>
+  <summary>Calendars</summary>
+  {{ calendars.html|safe }}
+</details>
+
+<details class="profile-section" id="addressbooks-section"{% if addressbooks.open %} open{% endif %}>
+  <summary>Addressbooks</summary>
+  {{ addressbooks.html|safe }}
+</details>
+
+<details class="profile-section" id="groups-section"{% if groups.open %} open{% endif %}>
+  <summary>Groups</summary>
+  {{ groups.html|safe }}
+</details>
+
+<details class="profile-section" id="linked-platforms-section"{% if linked_platforms.open %} open{% endif %}>
+  <summary>Linked platforms</summary>
+  {{ linked_platforms.html|safe }}
 </details>
 
 {% if let Some(hostname) = hawkbook_hostname %}

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use crate::pages::user::UserPage;
-use crate::pages::{DefaultLayoutData, user::Section};
+use crate::pages::DefaultLayoutData;
+use crate::routes::user::{
+    ProfileAnchor, ProfileDeps, ProfileExtras, ProfileRequest, render_profile_page,
+};
 use askama::Template;
 use askama_web::WebTemplate;
 use axum::Form;
@@ -17,12 +19,6 @@ use rustical_store::{
 };
 use serde::Deserialize;
 
-impl Section for GroupsSection {
-    fn name() -> &'static str {
-        "groups"
-    }
-}
-
 pub struct GroupInfo {
     pub id: String,
     pub displayname: String,
@@ -33,28 +29,26 @@ pub struct GroupInfo {
     pub collection_count: usize,
 }
 
-#[derive(Template, WebTemplate)]
+#[derive(Template)]
 #[template(path = "components/sections/groups_section.html")]
 pub struct GroupsSection {
     pub user: Principal,
     pub groups: Vec<GroupInfo>,
 }
 
-pub async fn route_groups<
+/// The Groups-section builder: every group of the user with its member and
+/// collection counts, rendered into the profile page's collapsible Groups
+/// heading (which replaced the profile's old plain group-name list).
+pub async fn build_groups_section<
     AP: AuthenticationProvider,
     CS: CalendarStore,
     AS: AddressbookStore + PrefixedCalendarStore,
 >(
-    Path(user_id): Path<String>,
-    Extension(auth_provider): Extension<Arc<AP>>,
-    Extension(cal_store): Extension<Arc<CS>>,
-    Extension(addr_store): Extension<Arc<AS>>,
-    user: Principal,
-) -> impl IntoResponse {
-    if user_id != user.id {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
+    auth_provider: &Arc<AP>,
+    cal_store: &Arc<CS>,
+    addr_store: &Arc<AS>,
+    user: &Principal,
+) -> GroupsSection {
     let raw_groups = auth_provider
         .list_groups_for_user(&user.id)
         .await
@@ -89,14 +83,38 @@ pub async fn route_groups<
         });
     }
 
-    UserPage {
-        section: GroupsSection {
-            user: user.clone(),
-            groups,
-        },
-        user,
+    GroupsSection {
+        user: user.clone(),
+        groups,
     }
-    .into_response()
+}
+
+/// GET /{user}/groups — the former Groups tab: the same unified profile page
+/// with its Groups heading expanded.
+pub async fn route_groups<
+    AP: AuthenticationProvider,
+    CS: CalendarStore,
+    AS: AddressbookStore + PrefixedCalendarStore,
+>(
+    Path(user_id): Path<String>,
+    deps: ProfileDeps<AP, CS, AS>,
+    req: ProfileRequest,
+    user: Principal,
+) -> impl IntoResponse {
+    if user_id != user.id {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    render_profile_page(
+        &deps,
+        &req,
+        &user,
+        ProfileExtras {
+            anchor: ProfileAnchor::Groups,
+            ..ProfileExtras::default()
+        },
+    )
+    .await
 }
 
 #[derive(Template, WebTemplate)]

@@ -1,7 +1,8 @@
 use std::{str::FromStr, sync::Arc};
 
-use crate::routes::download::HawkBookApk;
-use crate::routes::user::{RegeneratedToken, render_profile_page};
+use crate::routes::user::{
+    ProfileDeps, ProfileExtras, ProfileRequest, RegeneratedToken, render_profile_page,
+};
 use askama::Template;
 use axum::{
     Extension, Form,
@@ -11,10 +12,13 @@ use axum::{
 };
 use axum_extra::TypedHeader;
 use headers::{ContentType, HeaderMapExt, Host};
-use http::{HeaderMap, HeaderValue, StatusCode, header};
+use http::{HeaderValue, StatusCode, header};
 use rand::{RngExt, distr::Alphanumeric};
 use rustical_dav::rfc_3986_percent_encode;
-use rustical_store::auth::{AuthenticationProvider, Principal};
+use rustical_store::{
+    AddressbookStore, CalendarStore, PrefixedCalendarStore,
+    auth::{AuthenticationProvider, Principal},
+};
 use serde::Deserialize;
 
 pub fn generate_app_token() -> String {
@@ -101,21 +105,23 @@ pub async fn route_post_app_token<AP: AuthenticationProvider>(
 /// hashed and can never be re-displayed, so regenerating is the only way to
 /// get a working credential for that token again. The old secret stops
 /// validating immediately.
-pub async fn route_regenerate_app_token<AP: AuthenticationProvider>(
-    user: Principal,
-    Extension(auth_provider): Extension<Arc<AP>>,
-    Extension(public_url): Extension<String>,
-    Extension(hawkbook_apk): Extension<Option<HawkBookApk>>,
+pub async fn route_regenerate_app_token<
+    AP: AuthenticationProvider,
+    CS: CalendarStore,
+    AS: AddressbookStore + PrefixedCalendarStore,
+>(
     Path((user_id, token_id)): Path<(String, String)>,
-    TypedHeader(host): TypedHeader<Host>,
-    headers: HeaderMap,
+    deps: ProfileDeps<AP, CS, AS>,
+    req: ProfileRequest,
+    user: Principal,
 ) -> Result<Response, rustical_store::Error> {
     if user_id != user.id {
         return Ok(StatusCode::UNAUTHORIZED.into_response());
     }
     // Scope the token to the acting user's own list (ownership gate, and it
     // gives us the token's name for the banner).
-    let name = auth_provider
+    let name = deps
+        .auth_provider
         .get_app_tokens(&user.id)
         .await?
         .into_iter()
@@ -124,7 +130,7 @@ pub async fn route_regenerate_app_token<AP: AuthenticationProvider>(
         .ok_or(rustical_store::Error::NotFound)?;
 
     let secret = generate_app_token();
-    auth_provider
+    deps.auth_provider
         .update_app_token(&user.id, &token_id, secret.clone())
         .await?;
 
@@ -132,14 +138,15 @@ pub async fn route_regenerate_app_token<AP: AuthenticationProvider>(
     token_prefix.truncate(4);
     let token = format!("{token_prefix}_{secret}");
 
+    // The banner forces the App-tokens heading open on the re-render.
     Ok(render_profile_page(
-        &auth_provider,
-        &public_url,
-        &host,
-        &headers,
+        &deps,
+        &req,
         &user,
-        Some(RegeneratedToken { name, token }),
-        hawkbook_apk.map(|apk| apk.sha256_hex()),
+        ProfileExtras {
+            regenerated: Some(RegeneratedToken { name, token }),
+            ..ProfileExtras::default()
+        },
     )
     .await)
 }

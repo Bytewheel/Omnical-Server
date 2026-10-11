@@ -50,7 +50,8 @@ use crate::routes::{
     addressbook::{
         route_addressbook, route_addressbook_contacts, route_addressbook_contacts_create,
         route_addressbook_contacts_new, route_addressbook_restore, route_contact_delete,
-        route_contact_edit, route_contact_update,
+        route_contact_edit, route_contact_update, route_contacts, route_contacts_create,
+        route_contacts_new,
     },
     addressbooks::{route_addressbook_credentials, route_addressbook_credentials_revoke},
     app_token::{route_delete_app_token, route_post_app_token, route_regenerate_app_token},
@@ -128,7 +129,7 @@ pub fn frontend_router<
 
     let user_router = Router::new()
         .route("/", get(route_get_home))
-        .route("/{user}", get(route_user_named::<AP>))
+        .route("/{user}", get(route_user_named::<AP, CS, AS>))
         // App token management
         .route("/{user}/app_token", post(route_post_app_token::<AP>))
         .route(
@@ -140,13 +141,13 @@ pub fn frontend_router<
         // "lost token" retrieval path; shown once, full access unchanged)
         .route(
             "/{user}/app_token/{id}/regenerate",
-            post(route_regenerate_app_token::<AP>),
+            post(route_regenerate_app_token::<AP, CS, AS>),
         )
         // Calendar
-        .route("/{user}/calendar", get(route_calendars::<CS>))
+        .route("/{user}/calendar", get(route_calendars::<AP, CS, AS>))
         .route(
             "/{user}/calendar/credentials",
-            post(route_calendar_credentials::<AP, CS>),
+            post(route_calendar_credentials::<AP, CS, AS>),
         )
         .route(
             "/{user}/calendar/credentials/{id}/revoke",
@@ -154,7 +155,7 @@ pub fn frontend_router<
         )
         .route(
             "/{user}/calendar/subscribe",
-            post(route_calendar_subscribe::<CS>),
+            post(route_calendar_subscribe::<AP, CS, AS>),
         )
         .route("/{user}/calendar/{calendar}", get(route_calendar::<CS>))
         .route(
@@ -206,11 +207,17 @@ pub fn frontend_router<
             "/{user}/calendar/{calendar}/tasks/{object}/delete",
             post(route_task_delete::<CS>),
         )
+        // Contacts view (the contacts counterpart of the Tasks tab)
+        .route(
+            "/{user}/contacts",
+            get(route_contacts::<AS>).post(route_contacts_create::<AS>),
+        )
+        .route("/{user}/contacts/new", get(route_contacts_new::<AS>))
         // Addressbook
-        .route("/{user}/addressbook", get(route_addressbooks::<AS>))
+        .route("/{user}/addressbook", get(route_addressbooks::<AP, CS, AS>))
         .route(
             "/{user}/addressbook/credentials",
-            post(route_addressbook_credentials::<AP, AS>),
+            post(route_addressbook_credentials::<AP, CS, AS>),
         )
         .route(
             "/{user}/addressbook/credentials/{id}/revoke",
@@ -247,15 +254,15 @@ pub fn frontend_router<
         // Linked platforms (Omnical §17.8)
         .route(
             "/{user}/linked-platforms",
-            get(route_get_linked_platforms::<CS>),
+            get(route_get_linked_platforms::<AP, CS, AS>),
         )
         .route(
             "/{user}/linked-platforms/add",
-            post(route_post_linked_platforms_add::<CS>),
+            post(route_post_linked_platforms_add::<AP, CS, AS>),
         )
         .route(
             "/{user}/linked-platforms/{id}/refresh",
-            post(route_post_linked_platforms_refresh::<CS>),
+            post(route_post_linked_platforms_refresh::<AP, CS, AS>),
         )
         .route(
             "/{user}/linked-platforms/{id}/remove",
@@ -264,10 +271,16 @@ pub fn frontend_router<
         // Share links (Omnical §17.7) — the Share tab is gone (§17.15); these
         // internal form actions render on / redirect to the Calendars and
         // Addressbooks tabs.
-        .route("/{user}/share/create", post(route_share_create::<CS, AS>))
+        .route(
+            "/{user}/share/create",
+            post(route_share_create::<AP, CS, AS>),
+        )
         .route("/{user}/share/{id}/revoke", post(route_share_revoke))
         // Send invite (Omnical registration extension)
-        .route("/{user}/share/invite", post(route_share_invite::<CS>))
+        .route(
+            "/{user}/share/invite",
+            post(route_share_invite::<AP, CS, AS>),
+        )
         .route(
             "/{user}/share/invite/{code}/revoke",
             post(route_share_invite_revoke),
@@ -275,7 +288,7 @@ pub fn frontend_router<
         // Guest shares (Omnical §17.10)
         .route(
             "/{user}/share/guest-invite",
-            post(route_share_guest_invite::<AP, CS>),
+            post(route_share_guest_invite::<AP, CS, AS>),
         )
         .route(
             "/{user}/share/guest-invite/{id}/revoke",
