@@ -521,10 +521,11 @@ END:VCALENDAR\r\n";
             "20261012T220000Z",
         );
         assert!(shaped.contains("ORGANIZER:mailto:burningserenity@aphy.io\r\n"));
-        // CREATED inherits the object's own DTSTAMP, so it is stable
-        // across syncs.
+        // CREATED and LAST-MODIFIED both inherit the object's own DTSTAMP,
+        // so a body is byte-stable across syncs (change detection hashes it).
         assert!(shaped.contains("CREATED:20260925T103702Z\r\n"));
-        assert!(shaped.contains("LAST-MODIFIED:20261012T220000Z\r\n"));
+        assert!(shaped.contains("LAST-MODIFIED:20260925T103702Z\r\n"));
+        assert!(!shaped.contains("LAST-MODIFIED:20261012T220000Z\r\n"));
         // Everything else is preserved verbatim.
         assert!(shaped.contains("RRULE:FREQ=WEEKLY\r\n"));
         assert!(shaped.contains("DTSTART;TZID=America/New_York:20260928T190000\r\n"));
