@@ -10,7 +10,7 @@
 //!   is consumed for `<D:getetag/>` + `<D:href/>` only.
 //! * **Every fetched event is filed at its master's `DTSTART`**
 //!   (`CalendarEvent.getTimestamp`), with the raw `RRULE` string beside it —
-//!   no recurrence is ever expanded — into one flat SQLite table
+//!   no recurrence is ever expanded — into one flat `SQLite` table
 //!   (`UserDBHelper`), wiped and reinserted on every sync.
 //! * **The 4-day list is a plain SQL window over that column** —
 //!   `DtStart between <local midnight> and <local midnight + 4d>` — so an
@@ -51,15 +51,23 @@
 //! can write the shim's form back. PROPFIND paths stay canonical by
 //! construction (a `None` [`DailyviewContext`]); `CALDAV:expand` REPORTs keep
 //! RFC 4791 §10.6 semantics untouched.
+//!
+//! **§18.38 — the export route (`?dailyview=1`):** the stock MP02 syncs
+//! `dav.aphy.app`, never omnical, so its only ingest of this server's data is
+//! a manual import of the exported `.ics`. [`build_export_ics_dailyview`]
+//! shapes that download for the phone: recurrences flattened to concrete
+//! instances over a 90-day horizon, all-day lines as local midnights.
 
 use std::borrow::Cow;
 
-use caldata::component::{CalendarInnerData, IcalEvent};
+use caldata::component::{CalendarInnerData, Component, IcalEvent, IcalTimeZone};
 use caldata::generator::Emitter;
+use caldata::parser::ContentLine;
 use caldata::types::CalDateOrDateTime;
-use chrono::{DateTime, Days, TimeZone, Utc};
+use chrono::{DateTime, Days, NaiveDate, TimeZone, Utc};
 use http::HeaderMap;
 use rustical_ical::CalendarObject;
+use rustical_store::Calendar;
 
 /// The User-Agent prefix of the frozen `DailyView` client (`CaldavFacade` in
 /// the app; stock and `dailyview-mod` builds share it, differing only in the
@@ -210,6 +218,187 @@ fn instance_body(instance: &IcalEvent, timezone: &str) -> String {
     }
 }
 
+// ── §18.38: the DailyView-shaped export ─────────────────────────────────────
+//
+// The stock MP02's DailyView syncs `dav.aphy.app`, never omnical — the wire
+// shim above is inert insurance for this deployment — so the phone's only
+// ingest of omnical data is a **manual import of the exported `.ics` into
+// aphy.io**. aphy relays what it stores verbatim, and the phone files every
+// body at its master's `DTSTART` and never expands a recurrence, so the
+// canonical export (masters with `RRULE`, `VALUE=DATE` lines) shows a
+// recurring event on no day at all west of UTC.
+//
+// The export route's `?dailyview=1` serves this builder instead: the same
+// envelope and metadata, with every recurring event flattened to its
+// concrete occurrences over a horizon, each as a standalone plain event
+// (per-instance UID suffix — the phone's `cal_info` table is `UID UNIQUE`,
+// and a re-import must upsert, not collide), no `RECURRENCE-ID` (a lone
+// override is not an event a real server should keep), the master's
+// `DURATION` riding along, and the §18.36 all-day pass applied to the
+// assembled text. Non-recurring events, `VTODO`s and `VJOURNAL`s stay
+// canonical apart from the all-day pass.
+
+/// How many days of concrete instances the `DailyView` export flattens a
+/// recurring event into. The phone's window is 4 days, but its ingest is a
+/// one-shot manual import on aphy — a horizon this long keeps one import
+/// showing correct Mondays for a quarter, and each instance only ever
+/// displays on its own day.
+pub const DAILYVIEW_EXPORT_HORIZON_DAYS: u64 = 90;
+
+/// Build the DailyView-shaped export of a calendar: the canonical envelope
+/// (`VERSION`/`PRODID`/`CALSCALE` + `X-WR-*` metadata), a `VTIMEZONE` for the
+/// deployment's zone, and every object DailyView-consumable — recurring
+/// events flattened to their occurrences over
+/// [`DAILYVIEW_EXPORT_HORIZON_DAYS`] days, all-day lines as local midnights.
+///
+/// Falls back to the canonical [`crate::calendar::methods::get::build_export_ics`]
+/// when `timezone` does not parse: the export must never be wrong, only
+/// less-shaped.
+#[must_use]
+pub fn build_export_ics_dailyview(
+    calendar: &Calendar,
+    objects: Vec<(String, CalendarObject)>,
+    timezone: &str,
+    now: DateTime<Utc>,
+) -> String {
+    let Ok(tz) = timezone.parse::<chrono_tz::Tz>() else {
+        return crate::calendar::methods::get::build_export_ics(calendar, objects);
+    };
+
+    let mut out = String::from(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:RustiCal Export (DailyView)\r\nCALSCALE:GREGORIAN\r\n",
+    );
+    out.push_str(&crate::calendar::methods::get::calendar_x_wr_props(calendar).generate());
+    // The deployment's own zone block: the all-day pass below emits
+    // `TZID`-qualified lines, and a consumer with no tz database of its own
+    // (a strict CalDAV relay, unlike the phone's java-side lookup) must not
+    // be asked to guess what `America/New_York` means.
+    if let Some(vtimezone) = IcalTimeZone::from_tzid(timezone) {
+        out.push_str(&vtimezone.generate());
+    }
+
+    let today = now.with_timezone(&tz).date_naive();
+    let Some(win_last_day) = today.checked_add_days(Days::new(DAILYVIEW_EXPORT_HORIZON_DAYS))
+    else {
+        return crate::calendar::methods::get::build_export_ics(calendar, objects);
+    };
+    // Date-valued instances compare as local dates; timed ones as the UTC
+    // instants caldata's expansion produces.
+    let Some(win_start_local) = today
+        .and_hms_opt(0, 0, 0)
+        .and_then(|midnight| tz.from_local_datetime(&midnight).single())
+    else {
+        return crate::calendar::methods::get::build_export_ics(calendar, objects);
+    };
+    let win_start = win_start_local.with_timezone(&Utc);
+    let win_end = win_start + chrono::Duration::days(DAILYVIEW_EXPORT_HORIZON_DAYS.cast_signed());
+
+    for (_, object) in objects {
+        let object: caldata::component::IcalCalendarObject = object.into();
+        match object.get_inner() {
+            CalendarInnerData::Event(main, overrides) => {
+                if main.has_rruleset() {
+                    // Coarse bounds for the expansion (a day of slack each
+                    // side — the rrule set's after/before are exclusive);
+                    // the filter below is exact.
+                    let instances = main.expand_recurrence(
+                        Some(win_start - chrono::Duration::days(1)),
+                        Some(win_end + chrono::Duration::days(1)),
+                        overrides,
+                    );
+                    for instance in instances {
+                        if instance_in_window(
+                            &instance.dtstart.0,
+                            today,
+                            win_last_day,
+                            win_start,
+                            win_end,
+                        ) {
+                            out.push_str(&flattened_instance(&instance));
+                        }
+                    }
+                } else {
+                    out.push_str(&main.generate());
+                    for event in overrides {
+                        out.push_str(&event.generate());
+                    }
+                }
+            }
+            // The phone never lists these; aphy stores them verbatim —
+            // canonical apart from the all-day pass below.
+            CalendarInnerData::Todo(main, overrides) => {
+                out.push_str(&main.generate());
+                for todo in overrides {
+                    out.push_str(&todo.generate());
+                }
+            }
+            CalendarInnerData::Journal(main, overrides) => {
+                out.push_str(&main.generate());
+                for journal in overrides {
+                    out.push_str(&journal.generate());
+                }
+            }
+        }
+    }
+
+    out.push_str("END:VCALENDAR\r\n");
+
+    match rewrite_date_valued_lines(&out, timezone) {
+        Cow::Borrowed(_) => out,
+        Cow::Owned(rewritten) => rewritten,
+    }
+}
+
+/// One flattened instance of a recurring event: the expansion's event with
+/// the master's UID suffixed by the instance's own date (deterministic, so a
+/// re-import upserts instead of duplicating on aphy) and its `RECURRENCE-ID`
+/// dropped (a lone override line is not an event). Everything else —
+/// `DTSTART` at the occurrence, the master's `DURATION`, summary, alarms
+/// stripped by the expansion — rides along verbatim.
+fn flattened_instance(instance: &IcalEvent) -> String {
+    let suffix = match &instance.dtstart.0 {
+        CalDateOrDateTime::Date(date) => date.naive_date().format("%Y%m%d").to_string(),
+        CalDateOrDateTime::DateTime(datetime) => {
+            datetime.utc().format("%Y%m%dT%H%M%SZ").to_string()
+        }
+    };
+    let mut lines: Vec<ContentLine> = instance.get_properties().clone();
+    for line in &mut lines {
+        if line.name == "UID" {
+            line.value = format!("{}-{suffix}", line.value);
+        }
+    }
+    lines.retain(|line| line.name != "RECURRENCE-ID");
+    let mut out = String::from("BEGIN:VEVENT\r\n");
+    out.push_str(&lines.generate());
+    out.push_str("END:VEVENT\r\n");
+    out
+}
+
+/// Whether the phone would file this occurrence inside its own list window —
+/// here the export horizon rather than the 4-day wire window.
+fn instance_in_window(
+    dtstart: &CalDateOrDateTime,
+    today: NaiveDate,
+    win_last_day: NaiveDate,
+    win_start: DateTime<Utc>,
+    win_end: DateTime<Utc>,
+) -> bool {
+    match dtstart {
+        // DATE-valued: filed at local midnight of the date, so in-window
+        // exactly when the date is one of the horizon's local days.
+        CalDateOrDateTime::Date(date) => {
+            let date = *date.naive_date();
+            (date >= today) && (date < win_last_day)
+        }
+        // DATE-TIME instances come back as true UTC instants.
+        CalDateOrDateTime::DateTime(datetime) => {
+            let stamp = datetime.utc();
+            (stamp >= win_start) && (stamp < win_end)
+        }
+    }
+}
+
 /// Serve `body` for `user_agent`, rewriting DATE-valued `DTSTART`/`DTEND`
 /// into TZID-qualified midnight DATE-TIMEs when the client is `DailyView`
 /// and the shim is configured (`[caldav] dailyview_timezone`). Every other
@@ -226,6 +415,14 @@ pub fn rewrite_all_day_ics<'a>(
     if !user_agent.is_some_and(|ua| ua.starts_with(DAILYVIEW_UA_PREFIX)) {
         return Cow::Borrowed(body);
     }
+    rewrite_date_valued_lines(body, timezone)
+}
+
+/// The §18.36 all-day pass itself, un-gated: every DATE-valued `DTSTART`/
+/// `DTEND` line becomes a TZID-qualified midnight DATE-TIME in `timezone`.
+/// The export builder applies it directly (no User-Agent on that wire).
+#[must_use]
+fn rewrite_date_valued_lines<'a>(body: &'a str, timezone: &str) -> Cow<'a, str> {
     // Only the early-out for bodies with no all-day line at all — the
     // per-line match below stays the sole authority on what rewrites.
     if !body.contains(";VALUE=DATE:") {
@@ -277,7 +474,8 @@ mod tests {
     use std::borrow::Cow;
 
     use super::{
-        DAILYVIEW_UA_PREFIX, DailyviewContext, rewrite_all_day_ics, rewrite_for_dailyview,
+        DAILYVIEW_UA_PREFIX, DailyviewContext, build_export_ics_dailyview, rewrite_all_day_ics,
+        rewrite_for_dailyview,
     };
     use caldata::parser::ParserOptions;
     use chrono::NaiveDateTime;
@@ -544,5 +742,190 @@ mod tests {
         let out = rewrite_for_dailyview(&object, &ctx);
         assert_eq!(out, object.get_ics());
         assert!(out.contains("BEGIN:VTODO"));
+    }
+
+    // ── §18.38: the DailyView-shaped export ───────────────────────────────
+
+    fn export_calendar() -> rustical_store::Calendar {
+        rustical_store::Calendar {
+            meta: rustical_store::CalendarMetadata {
+                displayname: Some("personal".to_owned()),
+                description: None,
+                color: None,
+                order: 0,
+            },
+            principal: "nfcalaway@novo-ordo.com".to_owned(),
+            id: "personal".to_owned(),
+            timezone_id: None,
+            deleted_at: None,
+            synctoken: 1,
+            subscription_url: None,
+            push_topic: String::new(),
+            components: vec![],
+        }
+    }
+
+    fn now(stamp: &str) -> chrono::DateTime<chrono::Utc> {
+        NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M:%S")
+            .unwrap()
+            .and_utc()
+    }
+
+    /// A weekly timed master flattens into one standalone instance per
+    /// occurrence over the horizon: suffixed UIDs, no `RRULE`, no
+    /// `RECURRENCE-ID`, the occurrence's `DTSTART` as a UTC DATE-TIME, the
+    /// master's `DURATION` riding along, and the envelope carrying the
+    /// calendar's `X-WR-CALNAME` and the deployment's `VTIMEZONE`.
+    #[test]
+    fn export_flattens_weekly_timed() {
+        let object = parse(WEEKLY_TIMED);
+        let out = build_export_ics_dailyview(
+            &export_calendar(),
+            vec![(String::from("daily.ics"), object)],
+            "America/New_York",
+            now("2026-10-12 12:00:00"),
+        );
+        assert!(out.starts_with("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"));
+        assert!(out.ends_with("END:VCALENDAR\r\n"));
+        assert!(out.contains("X-WR-CALNAME:personal\r\n"));
+        assert!(out.contains("BEGIN:VTIMEZONE\r\nTZID:America/New_York\r\n"));
+        // The VTIMEZONE's own DST rules carry RRULEs; the discriminators are
+        // the events': no weekly RRULE survives, no master UID unsuffixed,
+        // no vestigial RECURRENCE-ID.
+        assert!(
+            !out.contains("FREQ=WEEKLY"),
+            "no weekly recurrence is exported: {out}"
+        );
+        assert!(
+            !out.contains("RECURRENCE-ID"),
+            "no vestigial override lines: {out}"
+        );
+        assert!(
+            !out.contains("UID:RGKW68NDCGRYYVVHH55NLH5PU8Z6QH1IDKBU\r\n"),
+            "the master's unsuffixed UID does not survive: {out}"
+        );
+        assert!(
+            out.contains("UID:RGKW68NDCGRYYVVHH55NLH5PU8Z6QH1IDKBU-20261012T230000Z\r\n"),
+            "today's occurrence, UID suffixed by its own stamp: {out}"
+        );
+        assert!(
+            out.contains("DTSTART:20261019T230000Z\r\n"),
+            "next Monday's occurrence is flattened too (EDT): {out}"
+        );
+        assert!(
+            out.contains("DTSTART:20261012T230000Z\r\n"),
+            "the occurrence's own start as a UTC DATE-TIME: {out}"
+        );
+        assert!(out.contains("DURATION:"), "the master's length rides along");
+        assert_eq!(
+            out.matches("BEGIN:VEVENT\r\n").count(),
+            13,
+            "13 weekly Mondays in a 90-day horizon: {out}"
+        );
+        assert_eq!(out.matches("END:VEVENT\r\n").count(), 13);
+    }
+
+    /// A yearly all-day master takes both rewrites: the occurrences' dates as
+    /// local-midnight DATE-TIMEs (the §18.36 pass) with suffixed UIDs.
+    #[test]
+    fn export_flattens_yearly_all_day() {
+        let object = parse(YEARLY_ALL_DAY);
+        let out = build_export_ics_dailyview(
+            &export_calendar(),
+            vec![(String::from("birthday.ics"), object)],
+            "America/New_York",
+            now("2026-04-06 12:00:00"),
+        );
+        // This year's occurrence (Apr 9) is in the horizon; next year's
+        // (Apr 9 2027) is 363 days out — beyond it. One instance, and the
+        // master's 1964 date does not survive.
+        assert_eq!(out.matches("BEGIN:VEVENT\r\n").count(), 1, "{out}");
+        assert!(
+            out.contains("DTSTART;TZID=America/New_York:20260409T000000\r\n"),
+            "the occurrence's date at local midnight: {out}"
+        );
+        assert!(
+            out.contains("UID:birthday-1962@omnical-20260409\r\n"),
+            "DATE-valued instances suffix by date: {out}"
+        );
+        assert!(
+            !out.contains("19620409"),
+            "the master does not survive: {out}"
+        );
+        assert!(
+            !out.contains("VALUE=DATE"),
+            "the pass left no DATE lines: {out}"
+        );
+    }
+
+    /// Non-recurring events keep their canonical form — apart from the
+    /// all-day pass, which applies to the whole assembled export.
+    #[test]
+    fn export_keeps_non_recurring_with_all_day_pass() {
+        let stluke = parse(ALL_DAY);
+        let purple = parse(TIMED);
+        let out = build_export_ics_dailyview(
+            &export_calendar(),
+            vec![
+                (String::from("stluke.ics"), stluke),
+                (String::from("purple.ics"), purple),
+            ],
+            "America/New_York",
+            now("2026-10-12 12:00:00"),
+        );
+        assert!(
+            out.contains("DTSTART;TZID=America/New_York:20261018T000000\r\n"),
+            "the all-day pass applies to canonical events too: {out}"
+        );
+        assert!(
+            out.contains("UID:hol-rc-1962-st-luke-evangelist-20261018@omnical\r\n"),
+            "canonical UID untouched (no suffix without recurrence): {out}"
+        );
+        assert!(
+            out.contains("DTSTART;TZID=America/New_York:20260917T200000\r\n"),
+            "timed canonical lines untouched by the pass: {out}"
+        );
+        assert!(!out.contains("VALUE=DATE"), "{out}");
+    }
+
+    /// `VTODO`s ride along canonically: the phone never lists them, aphy
+    /// stores them verbatim.
+    #[test]
+    fn export_keeps_vtodos_canonical() {
+        let vtodo = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//omnical//holiday-sets//EN\r\nBEGIN:VTODO\r\nUID:todo@omnical\r\nDTSTAMP:20260101T000000Z\r\nDTSTART;TZID=America/New_York:20260928T190000\r\nSUMMARY:Chore\r\nRRULE:FREQ=WEEKLY\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+        let object = parse(vtodo);
+        let out = build_export_ics_dailyview(
+            &export_calendar(),
+            vec![(String::from("chore.ics"), object)],
+            "America/New_York",
+            now("2026-10-12 12:00:00"),
+        );
+        assert_eq!(out.matches("BEGIN:VTODO\r\n").count(), 1, "{out}");
+        assert!(
+            out.contains("RRULE:FREQ=WEEKLY"),
+            "a VTODO's recurrence is untouched: {out}"
+        );
+    }
+
+    /// An unparsable timezone serves the canonical export — the export must
+    /// never be wrong, only less-shaped.
+    #[test]
+    fn export_falls_back_to_canonical() {
+        let object = parse(WEEKLY_TIMED);
+        let out = build_export_ics_dailyview(
+            &export_calendar(),
+            vec![(String::from("daily.ics"), object.clone())],
+            "Solar/Pan",
+            now("2026-10-12 12:00:00"),
+        );
+        assert_eq!(
+            out,
+            crate::calendar::methods::get::build_export_ics(
+                &export_calendar(),
+                vec![(String::from("daily.ics"), object)],
+            ),
+            "unparsable zone: canonical bytes"
+        );
+        assert!(out.contains("RRULE:FREQ=WEEKLY"));
     }
 }

@@ -156,6 +156,10 @@
         <form action="/caldav/principal/{{ calendar.principal }}/{{ calendar.id }}" target="_blank" method="GET">
           <button type="submit">Download</button>
         </form>
+        <form action="/caldav/principal/{{ calendar.principal }}/{{ calendar.id }}" target="_blank" method="GET">
+          <input type="hidden" name="dailyview" value="1">
+          <button type="submit" title="The stock Punkt MP02 calendar (DailyView) syncs aphy.io, which never expands a recurrence — this download flattens recurring events to concrete dated instances and rewrites all-day events to local midnights, so an import there shows every event on its own day.">Download (Punkt MP02)</button>
+        </form>
         <edit-calendar-form
           principal="{{ calendar.principal }}"
           cal_id="{{ calendar.id }}"

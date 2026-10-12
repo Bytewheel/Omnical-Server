@@ -1,7 +1,7 @@
 use crate::Error;
 use crate::calendar::CalendarResourceService;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::{extract::Path, response::Response};
 use caldata::component::IcalCalendar;
 use caldata::generator::Emitter;
@@ -12,23 +12,21 @@ use rustical_dav::rfc_3986_percent_encode;
 use rustical_dav_push::DavPushStore;
 use rustical_ical::CalendarObject;
 use rustical_store::{Calendar, CalendarStore, auth::Principal};
+use serde::Deserialize;
 use std::str::FromStr;
 use tracing::instrument;
 
-/// Generate the full `.ics` export of a calendar: all objects wrapped in one
-/// `VCALENDAR`, with `X-WR-CALNAME`/`X-WR-CALDESC`/`X-WR-CALCOLOR`/
-/// `X-WR-TIMEZONE` props derived from the calendar metadata.
-///
-/// Shared between the owner-authenticated `route_get` export and the
-/// unauthenticated subscription export routes (Omnical "share links",
-/// PLAN.md §17.7), so both serve byte-identical payloads.
-#[must_use]
-pub fn build_export_ics(calendar: &Calendar, objects: Vec<(String, CalendarObject)>) -> String {
-    let objects = objects
-        .into_iter()
-        .map(|(_, object)| object.into())
-        .collect();
+/// The `?dailyview=1` request of the owner export: the DailyView-shaped
+/// variant (see `crate::dailyview`). `serde(default)` keeps unknown
+/// parameters from rejecting the request.
+#[derive(Debug, Default, Deserialize)]
+pub struct DailyviewExportQuery {
+    #[serde(default)]
+    pub(crate) dailyview: Option<String>,
+}
 
+/// The `X-WR-*` calendar metadata properties of the export envelope.
+pub(crate) fn calendar_x_wr_props(calendar: &Calendar) -> Vec<ContentLine> {
     let mut props = vec![];
 
     if let Some(displayname) = &calendar.meta.displayname {
@@ -60,15 +58,41 @@ pub fn build_export_ics(calendar: &Calendar, objects: Vec<(String, CalendarObjec
         });
     }
 
-    IcalCalendar::from_objects("RustiCal Export".to_owned(), objects, props).generate()
+    props
+}
+
+/// Generate the full `.ics` export of a calendar: all objects wrapped in one
+/// `VCALENDAR`, with `X-WR-CALNAME`/`X-WR-CALDESC`/`X-WR-CALCOLOR`/
+/// `X-WR-TIMEZONE` props derived from the calendar metadata.
+///
+/// Shared between the owner-authenticated `route_get` export and the
+/// unauthenticated subscription export routes (Omnical "share links",
+/// PLAN.md §17.7), so both serve byte-identical payloads.
+#[must_use]
+pub fn build_export_ics(calendar: &Calendar, objects: Vec<(String, CalendarObject)>) -> String {
+    let objects = objects
+        .into_iter()
+        .map(|(_, object)| object.into())
+        .collect();
+
+    IcalCalendar::from_objects(
+        "RustiCal Export".to_owned(),
+        objects,
+        calendar_x_wr_props(calendar),
+    )
+    .generate()
 }
 
 #[instrument(skip(cal_store))]
+#[allow(clippy::too_many_arguments)]
 pub async fn route_get<C: CalendarStore, DP: DavPushStore>(
     Path((principal, calendar_id)): Path<(String, String)>,
-    State(CalendarResourceService { cal_store, .. }): State<CalendarResourceService<C, DP>>,
+    State(CalendarResourceService {
+        cal_store, config, ..
+    }): State<CalendarResourceService<C, DP>>,
     user: Principal,
     method: Method,
+    Query(export_query): Query<DailyviewExportQuery>,
 ) -> Result<Response, Error> {
     if !user.is_principal(&principal) {
         return Err(crate::Error::Unauthorized);
@@ -83,7 +107,28 @@ pub async fn route_get<C: CalendarStore, DP: DavPushStore>(
 
     let objects = cal_store.get_objects(&principal, &calendar_id).await?;
 
-    let export_ics = build_export_ics(&calendar, objects);
+    // Omnical §18.38: `?dailyview=1` serves the DailyView-shaped export (the
+    // stock Punkt MP02 phone syncs aphy.io, not omnical — its only ingest is
+    // a manual import of this download, so the file itself must be
+    // phone-shaped: recurrences flattened to concrete instances, all-day
+    // lines as local midnights). Armed by the same `[caldav]`
+    // dailyview_timezone` as the wire shim; every other request — and an
+    // unarmed config — gets the canonical export.
+    let export_ics = if export_query.dailyview.is_some() {
+        config.dailyview_timezone().map_or_else(
+            || build_export_ics(&calendar, objects.clone()),
+            |timezone| {
+                crate::dailyview::build_export_ics_dailyview(
+                    &calendar,
+                    objects.clone(),
+                    timezone,
+                    chrono::Utc::now(),
+                )
+            },
+        )
+    } else {
+        build_export_ics(&calendar, objects)
+    };
 
     let mut resp = Response::builder().status(StatusCode::OK);
     let hdrs = resp.headers_mut().unwrap();

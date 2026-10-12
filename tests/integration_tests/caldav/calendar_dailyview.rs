@@ -235,6 +235,134 @@ async fn test_report_dailyview_rewrites_all_day(
     );
 }
 
+/// GET the calendar-collection export (the `Download` button's route) with
+/// `query` appended, returning the body.
+async fn get_export(app: &axum::Router, query: &str) -> String {
+    let mut request = Request::builder()
+        .method("GET")
+        .uri(format!("/caldav/principal/user/calendar{query}"))
+        .body(Body::empty())
+        .unwrap();
+    request
+        .headers_mut()
+        .typed_insert(Authorization::basic("user", "pass"));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.extract_string().await
+}
+
+/// The §18.38 export: `?dailyview=1` (armed config) serves the phone-shaped
+/// download — recurrence flattened, per-instance UIDs, a VTIMEZONE for the
+/// zone, all-day lines as local midnights — while the same route without
+/// the param keeps serving the canonical masters.
+#[rstest]
+#[tokio::test]
+async fn test_export_dailyview_flattens(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    let app = app_with_daily_event(
+        context,
+        CalDavConfig::with_dailyview_timezone("America/New_York"),
+    )
+    .await;
+
+    let body = get_export(&app, "?dailyview=1").await;
+    assert!(
+        body.starts_with("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"),
+        "one VCALENDAR envelope: {body}"
+    );
+    assert!(
+        !body.contains("FREQ=DAILY"),
+        "no recurrence is exported to the phone: {body}"
+    );
+    assert!(
+        !body.contains("RECURRENCE-ID"),
+        "instances are standalone events: {body}"
+    );
+    assert!(
+        body.contains("BEGIN:VTIMEZONE\r\nTZID:America/New_York\r\n"),
+        "the deployment's own zone block: {body}"
+    );
+    assert!(
+        body.contains("UID:daily-shim-test@omnical-"),
+        "per-instance UID suffixes: {body}"
+    );
+    let instances = body.matches("BEGIN:VEVENT\r\n").count();
+    assert!(
+        instances > 1,
+        "the horizon flattens into concrete instances: {body}"
+    );
+    assert_eq!(instances, body.matches("END:VEVENT\r\n").count());
+
+    let canonical = get_export(&app, "").await;
+    assert!(
+        canonical.contains("RRULE:FREQ=DAILY"),
+        "the plain export stays canonical: {canonical}"
+    );
+    assert!(
+        canonical.contains("DTSTART;TZID=America/New_York:20260928T190000"),
+        "the master rides along untouched: {canonical}"
+    );
+}
+
+/// The param is inert without `[caldav] dailyview_timezone`: the export
+/// stays canonical.
+#[rstest]
+#[tokio::test]
+async fn test_export_dailyview_unarmed_ignores_param(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    let app = app_with_daily_event(context, CalDavConfig::default()).await;
+
+    let body = get_export(&app, "?dailyview=1").await;
+    assert!(
+        body.contains("RRULE:FREQ=DAILY"),
+        "unarmed config: canonical export: {body}"
+    );
+    assert!(
+        body.contains("DTSTART;TZID=America/New_York:20260928T190000"),
+        "the master stays: {body}"
+    );
+}
+
+/// The all-day pass applies through the export: St Luke's `VALUE=DATE` lines
+/// arrive as local-midnight DATE-TIMEs, unsuffixed (non-recurring).
+#[rstest]
+#[tokio::test]
+async fn test_export_dailyview_all_day_pass(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    let app = app_with_all_day_event(
+        context,
+        CalDavConfig::with_dailyview_timezone("America/New_York"),
+    )
+    .await;
+
+    let body = get_export(&app, "?dailyview=1").await;
+    assert!(
+        body.contains("DTSTART;TZID=America/New_York:20261018T000000\r\n"),
+        "all-day lines as local midnights: {body}"
+    );
+    assert!(
+        body.contains("DTEND;TZID=America/New_York:20261019T000000\r\n"),
+        "DTEND rewritten alongside: {body}"
+    );
+    assert!(
+        body.contains("UID:hol-rc-1962-st-luke-evangelist-20261018@omnical\r\n"),
+        "non-recurring: no UID suffix: {body}"
+    );
+    assert!(!body.contains("VALUE=DATE"), "{body}");
+}
+
 /// DailyView's multiget carries the §18.37 recurrence flattening: a daily
 /// event with a September master is served as its first occurrence inside
 /// the phone's own 4-day window, as a plain UTC DATE-TIME with no `RRULE` —
