@@ -8,7 +8,7 @@
   {% for source in sources %}
   <li class="collection-list-item">
     <div class="inner">
-      <span class="title">{{ source.source_url }}</span>
+      <span class="title">{{ source_display[loop.index0] }}</span>
       <span class="description">
         {% if let Some(created_at) = source.created_at %}created {{ created_at }}{% endif %}
         {% if let Some(last_fetch_at) = source.last_fetch_at %} · last fetch: {{ last_fetch_at }}{% endif %}

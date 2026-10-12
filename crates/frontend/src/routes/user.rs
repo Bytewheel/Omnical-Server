@@ -83,6 +83,9 @@ pub struct ProfileDeps<AP, CS, AS> {
     pub sub_store: Option<Arc<dyn SubscriptionStore>>,
     pub invite_store: Arc<dyn InviteStore>,
     pub source_store: Arc<dyn CalendarSourceStore>,
+    /// The holiday catalog (`[frontend] holidays_dir`) — the profile renders
+    /// `holidays://` linked-platform titles from its manifest labels.
+    pub holidays: crate::routes::holidays::HolidaysCatalog,
 }
 
 // Hand-rolled because `#[derive(Clone)]` would bound `AP`/`CS`/`AS` by
@@ -97,6 +100,7 @@ impl<AP, CS, AS> Clone for ProfileDeps<AP, CS, AS> {
             sub_store: self.sub_store.clone(),
             invite_store: Arc::clone(&self.invite_store),
             source_store: Arc::clone(&self.source_store),
+            holidays: self.holidays.clone(),
         }
     }
 }
@@ -141,6 +145,11 @@ where
                 .expect("frontend_router layers the subscription store"),
             invite_store: layered::<dyn InviteStore>(parts),
             source_store: layered::<dyn CalendarSourceStore>(parts),
+            holidays: parts
+                .extensions
+                .get::<crate::routes::holidays::HolidaysCatalog>()
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 }
@@ -302,6 +311,7 @@ pub async fn render_profile_page<
     let linked_platforms_section = build_linked_platforms_section(
         &deps.cal_store,
         &deps.source_store,
+        &deps.holidays,
         user,
         linked_platforms_error,
     )

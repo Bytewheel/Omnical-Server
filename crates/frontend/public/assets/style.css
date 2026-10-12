@@ -649,6 +649,55 @@ form.inline-form {
   }
 }
 
+/* The create-calendar modal's "add holidays" dropdown: a <details> of
+   grouped checkboxes (create-calendar-form), so it stays dependency-free
+   and keyboard-native inside the <dialog>. */
+.holidays-picker {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--background-color-03);
+  margin-top: .5em;
+
+  summary {
+    cursor: pointer;
+    padding: .5em .75em;
+    font-size: .9em;
+    color: var(--text-muted);
+  }
+
+  .holidays-groups {
+    max-height: 220px;
+    overflow-y: auto;
+    padding: 0 .75em .75em;
+    display: grid;
+    gap: 1em;
+  }
+
+  .holidays-group {
+    display: grid;
+    gap: .3em;
+  }
+
+  .holidays-group-label {
+    font-size: .8em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--text-muted);
+  }
+
+  .holidays-option {
+    display: flex;
+    align-items: center;
+    gap: .5em;
+    margin: 0;
+    font-size: .9em;
+    font-weight: 400;
+    color: var(--text);
+    cursor: pointer;
+  }
+}
+
 dialog {
   background: var(--background-color-03);
   border: 1px solid var(--border);
@@ -970,7 +1019,10 @@ footer {
 
 .event {
   display: block;
-  font-size: .72em;
+  /* 1.5x the original .72em (owner request 2026-10-11): month-grid event
+     labels were unreadable at a glance; the time and summary spans inherit
+     this size and scale together. */
+  font-size: 1.08em;
   line-height: 1.3;
   margin: 2px 0;
   padding: 2px 4px;

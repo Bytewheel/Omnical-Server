@@ -146,4 +146,65 @@ impl CalendarSourceStore for SqliteCalendarSourceStore {
         }
         Ok(())
     }
+
+    #[instrument(skip(object_ids))]
+    async fn record_source_objects(
+        &self,
+        principal: &str,
+        source_id: &str,
+        object_ids: &[String],
+    ) -> Result<(), Error> {
+        // The source must be the principal's — ownership rows must not be
+        // writable under someone else's source.
+        sqlx::query("SELECT id FROM calendar_sources WHERE (principal, id) = (?, ?)")
+            .bind(principal)
+            .bind(source_id)
+            .fetch_optional(self.cal_store.db_pool())
+            .await
+            .map_err(crate::Error::from)?
+            .ok_or(Error::NotFound)?;
+        let mut tx = self
+            .cal_store
+            .db_pool()
+            .begin()
+            .await
+            .map_err(crate::Error::from)?;
+        sqlx::query("DELETE FROM calendar_source_objects WHERE source_id = ?")
+            .bind(source_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(crate::Error::from)?;
+        for object_id in object_ids {
+            sqlx::query("INSERT INTO calendar_source_objects (source_id, object_id) VALUES (?, ?)")
+                .bind(source_id)
+                .bind(object_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(crate::Error::from)?;
+        }
+        tx.commit().await.map_err(crate::Error::from)?;
+        Ok(())
+    }
+
+    #[instrument]
+    async fn get_source_object_ids(
+        &self,
+        principal: &str,
+        source_id: &str,
+    ) -> Result<Vec<String>, Error> {
+        let rows = sqlx::query(
+            "SELECT cso.object_id FROM calendar_source_objects cso \
+             JOIN calendar_sources cs ON cs.id = cso.source_id \
+             WHERE (cs.principal, cs.id) = (?, ?) ORDER BY cso.object_id",
+        )
+        .bind(principal)
+        .bind(source_id)
+        .fetch_all(self.cal_store.db_pool())
+        .await
+        .map_err(crate::Error::from)?;
+        Ok(rows
+            .iter()
+            .map(|row| row.get::<String, _>("object_id"))
+            .collect())
+    }
 }

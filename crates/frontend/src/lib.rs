@@ -69,6 +69,7 @@ use crate::routes::{
         route_group_detail, route_group_member_privilege, route_group_member_remove,
         route_group_new, route_groups,
     },
+    holidays::{HolidaysCatalog, route_holidays_json, route_post_holidays_add},
     linked_platforms::{
         route_get_linked_platforms, route_post_linked_platforms_add,
         route_post_linked_platforms_refresh, route_post_linked_platforms_remove,
@@ -126,6 +127,10 @@ pub fn frontend_router<
     // from one read — see `HawkBookApk::from_config`. `None` (unconfigured,
     // or unreadable) keeps the route a 404 and omits the intro sentence.
     let hawkbook_apk = HawkBookApk::from_config(frontend_config.hawkbook_apk.as_ref());
+    // Holiday sets (create-calendar modal's "add holidays" dropdown): the
+    // configured directory is read per request (import/refresh/list), so a
+    // regenerated `holidays.toml` + `.ics` set is picked up without a restart.
+    let holidays = HolidaysCatalog::from_config(frontend_config.holidays_dir.as_ref());
 
     let user_router = Router::new()
         .route("/", get(route_get_home))
@@ -256,6 +261,12 @@ pub fn frontend_router<
             "/{user}/linked-platforms",
             get(route_get_linked_platforms::<AP, CS, AS>),
         )
+        // Holiday import from the create-calendar modal's "add holidays"
+        // dropdown (Omnical §17.8.3 semantics: a copy + refresh-by-UID).
+        .route(
+            "/{user}/calendar/{calendar_id}/holidays",
+            post(route_post_holidays_add::<AP, CS, AS>),
+        )
         .route(
             "/{user}/linked-platforms/add",
             post(route_post_linked_platforms_add::<AP, CS, AS>),
@@ -345,6 +356,10 @@ pub fn frontend_router<
             "/_timezones.json",
             get(route_timezones).head(route_timezones),
         )
+        // The add-holidays dropdown's group/set list — public metadata in
+        // the same trust class as the timezone list (names of holiday sets
+        // staged on this deployment, nothing user-specific).
+        .route("/_holidays.json", get(route_holidays_json))
         // HawkBook download: sibling of /login, not under /user — it is not
         // user-scoped state, it is this deployment's client package. Served
         // UNAUTHENTICATED by design (see `route_download_hawkbook`): the
@@ -394,6 +409,7 @@ pub fn frontend_router<
         .layer(Extension(reset_limiter))
         .layer(Extension(frontend_trusted_proxies))
         .layer(Extension(hawkbook_apk))
+        .layer(Extension(holidays))
         .layer(Extension(smtp_accounts));
 
     Router::new()

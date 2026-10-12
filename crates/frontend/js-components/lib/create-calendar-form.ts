@@ -2,6 +2,7 @@ import { html, LitElement } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { Ref, createRef, ref } from 'lit/directives/ref.js';
 import { escapeXml, SVG_ICON_CALENDAR, SVG_ICON_INTERNET } from ".";
+import { getHolidays } from "./holidays.ts";
 import { getTimezones } from "./timezones.ts";
 
 @customElement("create-calendar-form")
@@ -10,6 +11,7 @@ export class CreateCalendarForm extends LitElement {
     super()
     this.resetForm()
     this.fetchTimezones()
+    this.fetchHolidays()
   }
 
   resetForm() {
@@ -23,6 +25,15 @@ export class CreateCalendarForm extends LitElement {
     this.isSubscription = false
     this.subscriptionUrl = null
     this.components = new Set(["VEVENT", "VTODO"])
+    this.selectedHolidays = new Set()
+  }
+
+  async fetchHolidays() {
+    try {
+      this.holidays = await getHolidays()
+    } catch (e) {
+      this.holidays = []
+    }
   }
 
   async fetchTimezones() {
@@ -53,6 +64,11 @@ export class CreateCalendarForm extends LitElement {
   subscriptionUrl: string
   @property()
   components: Set<"VEVENT" | "VTODO" | "VJOURNAL">
+  /// The deployment's holiday sets (groups from /frontend/_holidays.json).
+  @property()
+  holidays: Array<{ id: string, label: string, sets: Array<{ id: string, label: string }> }> = []
+  @property()
+  selectedHolidays: Set<string>
 
   dialog: Ref<HTMLDialogElement> = createRef()
   form: Ref<HTMLFormElement> = createRef()
@@ -117,6 +133,36 @@ export class CreateCalendarForm extends LitElement {
               Subscription URL
               <input type="text" pattern="https://.*" .required=${this.isSubscription} .value=${this.subscriptionUrl} @change=${e => this.subscriptionUrl = e.target.value}  />
             </label>
+          `: html``}
+          ${(this.principal || this.user) === this.user && !this.isSubscription && this.holidays.length ? html`
+            <label>add holidays</label>
+            <details class="holidays-picker">
+              <summary>
+                ${this.selectedHolidays.size
+                  ? html`${this.selectedHolidays.size} of ${this.holidays.reduce((n, g) => n + g.sets.length, 0)} sets selected`
+                  : html`optional — pick one or more holiday sets`}
+              </summary>
+              <div class="holidays-groups">
+                ${this.holidays.map(group => html`
+                  <div class="holidays-group">
+                    <span class="holidays-group-label">${group.label}</span>
+                    ${group.sets.map(set => html`
+                      <label class="holidays-option">
+                        <input type="checkbox" value=${set.id}
+                          .checked=${this.selectedHolidays.has(set.id)}
+                          @change=${e => {
+                            e.target.checked
+                              ? this.selectedHolidays.add(e.target.value)
+                              : this.selectedHolidays.delete(e.target.value)
+                            this.requestUpdate()
+                          }} />
+                        ${set.label}
+                      </label>
+                    `)}
+                  </div>
+                `)}
+              </div>
+            </details>
           `: html``}
 
           <label>Components</label>
@@ -189,6 +235,31 @@ export class CreateCalendarForm extends LitElement {
       alert(`Error ${response.status}: ${await response.text()}`)
       return null
     }
+
+    // Merge the selected holiday sets into the new calendar as a copy
+    // (§17.8.3 semantics — refreshable by UID via the recorded
+    // holidays://{set} sources). The calendar already exists at this point;
+    // a failed import must not lose it, so failures alert and reload.
+    if (!this.isSubscription && this.selectedHolidays.size > 0) {
+      const principal = this.principal || this.user
+      if (principal !== this.user) {
+        alert("Holidays can only be added to your own calendars, not a group's — the calendar was created without them.")
+      } else {
+        const holidayResponse = await fetch(`/frontend/user/${this.user}/calendar/${this.cal_id}/holidays`, {
+          method: 'POST',
+          body: new URLSearchParams({
+            principal: principal,
+            sets: Array.from(this.selectedHolidays).join(','),
+          }),
+        })
+        if (!holidayResponse.ok) {
+          let body = await holidayResponse.text()
+          try { body = JSON.parse(body).error ?? body } catch (e) { /* not JSON — show raw */ }
+          alert(`Calendar created, but the holiday import failed: ${body}`)
+        }
+      }
+    }
+
     window.location.reload()
     return null
   }

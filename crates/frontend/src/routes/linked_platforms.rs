@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
+use crate::routes::holidays::{HolidaysCatalog, holiday_set_label};
 use crate::routes::user::{
     ProfileAnchor, ProfileDeps, ProfileExtras, ProfileRequest, render_profile_page,
 };
@@ -157,6 +158,12 @@ async fn fetch_and_parse(source_url: &str) -> Result<Vec<CalendarObject>, &'stat
         return Err("Response too large");
     }
     let ics = std::str::from_utf8(&bytes).map_err(|_| "not UTF-8")?;
+    parse_ics(ics)
+}
+
+/// Parse an `.ics` body into [`CalendarObject`]s — the one parser shared by
+/// the linked-platform HTTPS fetch and the holiday sets (disk).
+pub fn parse_ics(ics: &str) -> Result<Vec<CalendarObject>, &'static str> {
     let calendar: IcalCalendar = IcalParser::<BytesLines>::from_slice(ics.as_bytes())
         .with_options(ParserOptions::default())
         .expect_one()
@@ -247,7 +254,7 @@ async fn apply_refresh(
 }
 
 /// Insert the initial import's objects into the target calendar (a copy).
-async fn materialize_objects(
+pub async fn materialize_objects(
     cal_store: &Arc<dyn CalendarStore>,
     principal: &str,
     calendar_id: &str,
@@ -265,20 +272,59 @@ async fn materialize_objects(
 
 /// Re-fetch a source, diff by UID against what is already materialized, and
 /// apply adds/updates/removes. Stamps `last_fetch_at` on success.
+///
+/// A `holidays://{set}` source resolves from the catalog's `.ics` on disk
+/// instead of an HTTPS fetch — the linked-platform engine's fetch is
+/// HTTPS-only *with an SSRF guard on private ranges* (rightly), and the
+/// holiday files are already local bytes; see `HolidaysCatalog::load_set`.
 async fn refresh_source(
     cal_store: &Arc<dyn CalendarStore>,
     source_store: &Arc<dyn CalendarSourceStore>,
+    holidays: &HolidaysCatalog,
     source: &CalendarSource,
 ) -> Result<(), String> {
-    let objects = fetch_and_parse(&source.source_url)
-        .await
-        .inspect_err(|e| warn!(source = %source.id, error = %e, "refresh fetch failed"))?;
+    let objects = if let Some(set_id) = source.source_url.strip_prefix("holidays://") {
+        holidays.load_set(set_id).inspect_err(
+            |e| warn!(source = %source.id, set_id, error = %e, "holiday set load failed"),
+        )?
+    } else {
+        fetch_and_parse(&source.source_url)
+            .await
+            .inspect_err(|e| warn!(source = %source.id, error = %e, "refresh fetch failed"))?
+    };
     let existing = cal_store
         .get_objects(&source.principal, &source.calendar_id)
         .await
         .map_err(|e| e.to_string())?;
-    let plan = plan_refresh(&existing, &objects);
+    // Scope the diff to this source's own objects: a calendar can carry
+    // several sources at once, and a refresh of ONE source must not treat
+    // every other set's events as "vanished from the feed". An empty
+    // recorded set is a source from before the ownership rows (or a feed
+    // that materialized nothing) — the diff then covers the whole
+    // calendar, exactly the pre-ownership behaviour the mass-delete abort
+    // guards.
+    let owned_ids: std::collections::HashSet<String> = source_store
+        .get_source_object_ids(&source.principal, &source.id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let existing_for_diff: Vec<(String, CalendarObject)> = if owned_ids.is_empty() {
+        existing
+    } else {
+        existing
+            .into_iter()
+            .filter(|(id, _)| owned_ids.contains(id))
+            .collect()
+    };
+    let plan = plan_refresh(&existing_for_diff, &objects);
     apply_refresh(cal_store, &source.principal, &source.calendar_id, plan).await?;
+
+    let imported: Vec<String> = objects.iter().map(|o| o.get_uid().to_owned()).collect();
+    let _ = source_store
+        .record_source_objects(&source.principal, &source.id, &imported)
+        .await
+        .inspect_err(|e| warn!(source = %source.id, error = %e, "record source objects failed"));
 
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let _ = source_store
@@ -295,6 +341,10 @@ async fn refresh_source(
 pub struct LinkedPlatformsSection {
     pub user: Principal,
     pub sources: Vec<CalendarSource>,
+    /// Per-source display title: the raw `source_url`, except a
+    /// `holidays://{set}` source shows its human label ("Holidays ·
+    /// United States") from the catalog manifest.
+    pub source_display: Vec<String>,
     pub calendars: Vec<Calendar>,
     pub calendar_display_names: Vec<String>,
     pub error: Option<String>,
@@ -307,6 +357,15 @@ impl LinkedPlatformsSection {
             .clone()
             .unwrap_or_else(|| cal.id.clone())
     }
+
+    /// The source tile's title: the set's manifest label for holidays, the
+    /// URL itself for everything else.
+    fn source_title(source: &CalendarSource, holidays: &HolidaysCatalog) -> String {
+        source.source_url.strip_prefix("holidays://").map_or_else(
+            || source.source_url.clone(),
+            |set_id| holiday_set_label(holidays, set_id),
+        )
+    }
 }
 
 /// The Linked-platforms-section builder, rendered into the profile page's
@@ -314,6 +373,7 @@ impl LinkedPlatformsSection {
 pub async fn build_linked_platforms_section<CS: CalendarStore>(
     cal_store: &Arc<CS>,
     source_store: &Arc<dyn CalendarSourceStore>,
+    holidays: &HolidaysCatalog,
     user: &Principal,
     error: Option<String>,
 ) -> LinkedPlatformsSection {
@@ -321,6 +381,10 @@ pub async fn build_linked_platforms_section<CS: CalendarStore>(
         .get_calendar_sources(&user.id)
         .await
         .unwrap_or_default();
+    let source_display = sources
+        .iter()
+        .map(|source| LinkedPlatformsSection::source_title(source, holidays))
+        .collect();
     let calendars = cal_store.get_calendars(&user.id).await.unwrap_or_default();
     let calendar_display_names = calendars
         .iter()
@@ -329,6 +393,7 @@ pub async fn build_linked_platforms_section<CS: CalendarStore>(
     LinkedPlatformsSection {
         user: user.clone(),
         sources,
+        source_display,
         calendars,
         calendar_display_names,
         error,
@@ -463,12 +528,22 @@ pub async fn route_post_linked_platforms_add<
     };
 
     let cal_dyn: Arc<dyn CalendarStore> = deps.cal_store.clone();
+    let imported: Vec<String> = objects.iter().map(|o| o.get_uid().to_owned()).collect();
     if let Err(e) = materialize_objects(&cal_dyn, &user.id, &form.calendar_id, objects).await {
         warn!(%e, "materialize failed after fetch");
         return page_error(format!(
             "Fetched the feed but could not import its events: {e}."
         ))
         .await;
+    }
+    // Record what this source owns, so a later Refresh of it (or of a
+    // sibling source in the same calendar) diffs only its own events.
+    if let Err(e) = deps
+        .source_store
+        .record_source_objects(&user.id, &source_id, &imported)
+        .await
+    {
+        warn!(%e, source_id = %source_id, "record source objects failed");
     }
 
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -490,6 +565,7 @@ pub async fn route_post_linked_platforms_refresh<
 >(
     Path((user_id, id)): Path<(String, String)>,
     deps: ProfileDeps<AP, CS, AS>,
+    Extension(holidays): Extension<HolidaysCatalog>,
     req: ProfileRequest,
     user: Principal,
 ) -> Response {
@@ -500,7 +576,7 @@ pub async fn route_post_linked_platforms_refresh<
         return StatusCode::NOT_FOUND.into_response();
     };
     let cal_dyn: Arc<dyn CalendarStore> = deps.cal_store.clone();
-    match refresh_source(&cal_dyn, &deps.source_store, &source).await {
+    match refresh_source(&cal_dyn, &deps.source_store, &holidays, &source).await {
         Ok(()) => {
             Redirect::to(&format!("/frontend/user/{}/linked-platforms", user.id)).into_response()
         }

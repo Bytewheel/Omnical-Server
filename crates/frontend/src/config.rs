@@ -35,6 +35,25 @@ pub struct FrontendConfig {
     /// cannot hold two copies of it.
     #[serde(default)]
     pub hawkbook_apk: Option<PathBuf>,
+    /// The directory holding this deployment's holiday `.ics` sets and their
+    /// `holidays.toml` manifest — the "add holidays" dropdown of the
+    /// create-calendar modal reads its groups and sets from it, and a
+    /// selection is merged into the new calendar as a copy (the same
+    /// semantics as a linked platform: a `holidays://{set}` source is
+    /// recorded per set, so Refresh keeps the copy updatable by UID when
+    /// the `.ics` files are regenerated).
+    ///
+    /// Unset ⇒ `/_holidays.json` answers an empty list and imports answer
+    /// "no holiday sets on this server" — the modal then shows nothing to
+    /// select, which is honest, not broken.
+    ///
+    /// Files are read from disk at import/refresh time (never an HTTP
+    /// self-fetch: the linked-platform engine's fetch is HTTPS-only with an
+    /// SSRF guard, and making the router fetch its own flash over TLS just
+    /// to hand it back would be a certificate dance for bytes it already
+    /// has), so a regenerated set is picked up without a restart.
+    #[serde(default)]
+    pub holidays_dir: Option<PathBuf>,
     /// `[tenancy] trusted_proxies`, already parsed (C5, §7.3.4).
     ///
     /// **`serde(skip)`, and that is the point.** The operator-facing key is
@@ -67,6 +86,7 @@ impl Default for FrontendConfig {
             min_password_length: default_min_password_length(),
             trusted_proxies: Vec::new(),
             hawkbook_apk: None,
+            holidays_dir: None,
         }
     }
 }

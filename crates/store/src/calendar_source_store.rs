@@ -87,4 +87,40 @@ pub trait CalendarSourceStore: Send + Sync + 'static {
     async fn delete_calendar_source(&self, _principal: &str, _id: &str) -> Result<(), Error> {
         Err(Error::NotFound)
     }
+
+    /// Record which materialized objects a source owns after an import or
+    /// refresh — the recorded set scopes the next refresh's by-UID diff to
+    /// this source's own events. A calendar can carry several sources at
+    /// once (the create-calendar modal merges several holiday sets into one
+    /// calendar; the linked-platforms form can point several URLs at one),
+    /// so a refresh must not treat every other set's events as "vanished
+    /// from the feed". Replaces the source's set atomically.
+    ///
+    /// # Errors
+    /// - [`Error::ReadOnly`] if the store does not implement calendar sources
+    /// - [`Error::NotFound`] if the source is not the principal's
+    async fn record_source_objects(
+        &self,
+        _principal: &str,
+        _source_id: &str,
+        _object_ids: &[String],
+    ) -> Result<(), Error> {
+        Err(Error::ReadOnly)
+    }
+
+    /// The object ids a source owns (recorded by the last import/refresh).
+    /// An empty list means a source predates the ownership rows (or holds a
+    /// legitimately empty feed) — the refresh engine falls back to the
+    /// pre-ownership whole-calendar diff in that case, which the
+    /// mass-delete abort still guards.
+    ///
+    /// # Errors
+    /// Any store error (no recorded ids is an empty list, not an error).
+    async fn get_source_object_ids(
+        &self,
+        _principal: &str,
+        _source_id: &str,
+    ) -> Result<Vec<String>, Error> {
+        Ok(Vec::new())
+    }
 }

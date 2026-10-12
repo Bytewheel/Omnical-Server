@@ -1011,6 +1011,19 @@ __decorate([n$3()], CreateBirthdayCalendarForm.prototype, "color", void 0);
 __decorate([n$3()], CreateBirthdayCalendarForm.prototype, "timezones", void 0);
 CreateBirthdayCalendarForm = __decorate([t$2("create-birthday-calendar-form")], CreateBirthdayCalendarForm);
 //#endregion
+//#region lib/holidays.ts
+var holidaysPromise = null;
+async function getHolidays() {
+	holidaysPromise ||= new Promise(async (resolve, reject) => {
+		try {
+			resolve((await (await fetch("/frontend/_holidays.json")).json()).groups || []);
+		} catch (e) {
+			reject(e);
+		}
+	});
+	return await holidaysPromise;
+}
+//#endregion
 //#region lib/timezones.ts
 var timezonesPromise = null;
 async function getTimezones() {
@@ -1029,11 +1042,13 @@ var CreateCalendarForm = class CreateCalendarForm extends i$2 {
 	constructor() {
 		super();
 		this.user = "";
+		this.holidays = [];
 		this.dialog = e();
 		this.form = e();
 		this.timezones = [];
 		this.resetForm();
 		this.fetchTimezones();
+		this.fetchHolidays();
 	}
 	resetForm() {
 		this.form.value?.reset();
@@ -1046,6 +1061,14 @@ var CreateCalendarForm = class CreateCalendarForm extends i$2 {
 		this.isSubscription = false;
 		this.subscriptionUrl = null;
 		this.components = /* @__PURE__ */ new Set(["VEVENT", "VTODO"]);
+		this.selectedHolidays = /* @__PURE__ */ new Set();
+	}
+	async fetchHolidays() {
+		try {
+			this.holidays = await getHolidays();
+		} catch (e) {
+			this.holidays = [];
+		}
 	}
 	async fetchTimezones() {
 		this.timezones = await getTimezones();
@@ -1111,6 +1134,32 @@ var CreateCalendarForm = class CreateCalendarForm extends i$2 {
               Subscription URL
               <input type="text" pattern="https://.*" .required=${this.isSubscription} .value=${this.subscriptionUrl} @change=${(e) => this.subscriptionUrl = e.target.value}  />
             </label>
+          ` : b``}
+          ${(this.principal || this.user) === this.user && !this.isSubscription && this.holidays.length ? b`
+            <label>add holidays</label>
+            <details class="holidays-picker">
+              <summary>
+                ${this.selectedHolidays.size ? b`${this.selectedHolidays.size} of ${this.holidays.reduce((n, g) => n + g.sets.length, 0)} sets selected` : b`optional — pick one or more holiday sets`}
+              </summary>
+              <div class="holidays-groups">
+                ${this.holidays.map((group) => b`
+                  <div class="holidays-group">
+                    <span class="holidays-group-label">${group.label}</span>
+                    ${group.sets.map((set) => b`
+                      <label class="holidays-option">
+                        <input type="checkbox" value=${set.id}
+                          .checked=${this.selectedHolidays.has(set.id)}
+                          @change=${(e) => {
+			e.target.checked ? this.selectedHolidays.add(e.target.value) : this.selectedHolidays.delete(e.target.value);
+			this.requestUpdate();
+		}} />
+                        ${set.label}
+                      </label>
+                    `)}
+                  </div>
+                `)}
+              </div>
+            </details>
           ` : b``}
 
           <label>Components</label>
@@ -1181,6 +1230,26 @@ var CreateCalendarForm = class CreateCalendarForm extends i$2 {
 			alert(`Error ${response.status}: ${await response.text()}`);
 			return null;
 		}
+		if (!this.isSubscription && this.selectedHolidays.size > 0) {
+			const principal = this.principal || this.user;
+			if (principal !== this.user) alert("Holidays can only be added to your own calendars, not a group's — the calendar was created without them.");
+			else {
+				const holidayResponse = await fetch(`/frontend/user/${this.user}/calendar/${this.cal_id}/holidays`, {
+					method: "POST",
+					body: new URLSearchParams({
+						principal,
+						sets: Array.from(this.selectedHolidays).join(",")
+					})
+				});
+				if (!holidayResponse.ok) {
+					let body = await holidayResponse.text();
+					try {
+						body = JSON.parse(body).error ?? body;
+					} catch (e) {}
+					alert(`Calendar created, but the holiday import failed: ${body}`);
+				}
+			}
+		}
 		window.location.reload();
 		return null;
 	}
@@ -1195,6 +1264,8 @@ __decorate([n$3()], CreateCalendarForm.prototype, "color", void 0);
 __decorate([n$3()], CreateCalendarForm.prototype, "isSubscription", void 0);
 __decorate([n$3()], CreateCalendarForm.prototype, "subscriptionUrl", void 0);
 __decorate([n$3()], CreateCalendarForm.prototype, "components", void 0);
+__decorate([n$3()], CreateCalendarForm.prototype, "holidays", void 0);
+__decorate([n$3()], CreateCalendarForm.prototype, "selectedHolidays", void 0);
 __decorate([n$3()], CreateCalendarForm.prototype, "timezones", void 0);
 CreateCalendarForm = __decorate([t$2("create-calendar-form")], CreateCalendarForm);
 //#endregion

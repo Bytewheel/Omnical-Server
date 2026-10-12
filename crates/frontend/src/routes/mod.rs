@@ -7,6 +7,7 @@ pub mod calendar;
 pub mod calendar_view;
 pub mod download;
 pub mod groups;
+pub mod holidays;
 pub mod linked_platforms;
 pub mod login;
 pub mod password;

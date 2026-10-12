@@ -18,11 +18,12 @@ use rustical_ical::CalendarObjectType;
 use rustical_store::auth::{AuthenticationProvider, PrincipalType};
 use rustical_store::{
     Addressbook, AddressbookReadStore, AddressbookWriteStore, Calendar, CalendarMetadata,
-    CalendarReadStore, CalendarWriteStore, InviteStore, SubscriptionKind, SubscriptionStore,
+    CalendarReadStore, CalendarSourceStore, CalendarWriteStore, InviteStore, SubscriptionKind,
+    SubscriptionStore,
 };
 use rustical_store_sqlite::{
-    SqliteAddressbookStore, SqliteCalendarStore, SqliteInviteStore, SqlitePrincipalStore,
-    SqliteSubscriptionStore, create_db_pool,
+    SqliteAddressbookStore, SqliteCalendarSourceStore, SqliteCalendarStore, SqliteInviteStore,
+    SqlitePrincipalStore, SqliteSubscriptionStore, create_db_pool,
 };
 use std::{collections::HashMap, time::Duration};
 
@@ -1189,6 +1190,322 @@ async fn test_portal_profile_sections_and_contacts() {
                 let body = resp.text().await.unwrap();
                 assert!(body.contains("Jane Doe"), "per-addressbook list: {body}");
             }
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_portal_holidays() {
+    let db_tempfile = tempfile::NamedTempFile::with_suffix(".rustical-test.sqlite3").unwrap();
+    let db_path = db_tempfile.path().to_string_lossy().into_owned();
+    let holidays_dir = tempfile::tempdir().unwrap();
+
+    // Fixture catalog: two groups, two sets — a multi-select import merges
+    // both into one calendar.
+    std::fs::write(
+        holidays_dir.path().join("holidays.toml"),
+        "[[groups]]\n\
+         id = \"countries\"\n\
+         label = \"Countries\"\n\n\
+         [[groups.sets]]\n\
+         id = \"us\"\n\
+         label = \"United States (federal)\"\n\
+         file = \"us.ics\"\n\n\
+         [[groups]]\n\
+         id = \"judaism\"\n\
+         label = \"Judaism\"\n\n\
+         [[groups.sets]]\n\
+         id = \"judaism\"\n\
+         label = \"Jewish holidays\"\n\
+         file = \"judaism.ics\"\n",
+    )
+    .unwrap();
+    let us_ics = "BEGIN:VCALENDAR\r\n\
+                  PRODID:-//omnical//holidays//EN\r\n\
+                  VERSION:2.0\r\n\
+                  BEGIN:VEVENT\r\n\
+                  UID:hol-us-20260101@omnical\r\n\
+                  DTSTAMP:20260101T000000Z\r\n\
+                  DTSTART;VALUE=DATE:20260101\r\n\
+                  SUMMARY:New Year's Day\r\n\
+                  END:VEVENT\r\n\
+                  BEGIN:VEVENT\r\n\
+                  UID:hol-us-20260704@omnical\r\n\
+                  DTSTAMP:20260101T000000Z\r\n\
+                  DTSTART;VALUE=DATE:20260704\r\n\
+                  SUMMARY:Independence Day\r\n\
+                  END:VEVENT\r\n\
+                  END:VCALENDAR\r\n";
+    std::fs::write(holidays_dir.path().join("us.ics"), us_ics).unwrap();
+    std::fs::write(
+        holidays_dir.path().join("judaism.ics"),
+        "BEGIN:VCALENDAR\r\n\
+         PRODID:-//omnical//holidays//EN\r\n\
+         VERSION:2.0\r\n\
+         BEGIN:VEVENT\r\n\
+         UID:hol-judaism-20260912@omnical\r\n\
+         DTSTAMP:20260101T000000Z\r\n\
+         DTSTART;VALUE=DATE:20260912\r\n\
+         SUMMARY:Rosh Hashanah\r\n\
+         END:VEVENT\r\n\
+         END:VCALENDAR\r\n",
+    )
+    .unwrap();
+
+    let dir_for_server = holidays_dir.path().to_path_buf();
+    test_runner_with(
+        Some(db_path.clone()),
+        move |config| {
+            config.frontend.holidays_dir = Some(dir_for_server);
+        },
+        async |port| {
+            let origin = format!("http://localhost:{port}");
+            let config = Config {
+                tenancy: TenancyConfig::default(),
+                data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
+                    db_url: db_path.clone(),
+                    run_repairs: true,
+                    skip_broken: false,
+                }),
+                http: HttpConfig {
+                    bind: Some(format!("127.0.0.1:{port}")),
+                    ..Default::default()
+                },
+                frontend: Default::default(),
+                oidc: None,
+                tracing: Default::default(),
+                dav_push: Default::default(),
+                nextcloud_login: Default::default(),
+                caldav: Default::default(),
+                scheduling: Default::default(),
+                subscriptions: Default::default(),
+                registration: Default::default(),
+                maintenance: Default::default(),
+                appliance: Default::default(),
+            };
+
+            // Create the principal (CLI), then set its password.
+            cmd_principals(
+                PrincipalsArgs {
+                    command: PrincipalsCommand::Create(CreateArgs {
+                        id: "user".to_owned(),
+                        name: Some("Test User".to_owned()),
+                        password: false,
+                        for_testing_password_from_arg: None,
+                        principal_type: Some(PrincipalType::Individual),
+                        overwrite: true,
+                    }),
+                },
+                config.clone(),
+            )
+            .await
+            .unwrap();
+            cmd_principals(
+                PrincipalsArgs {
+                    command: PrincipalsCommand::Edit(EditArgs {
+                        id: "user".to_owned(),
+                        name: None,
+                        password: false,
+                        remove_password: false,
+                        for_testing_password_from_arg: Some("pass".to_owned()),
+                        principal_type: None,
+                    }),
+                },
+                config.clone(),
+            )
+            .await
+            .unwrap();
+
+            // Seed one calendar to import into (the modal creates it with
+            // MKCOL; the store seed skips the XML dance).
+            let db = create_db_pool(&db_path, false).await.unwrap();
+            let (send, _recv) = tokio::sync::mpsc::channel(1);
+            SqliteCalendarStore::new(db, send, false)
+                .insert_calendar(Calendar {
+                    id: "hols".to_owned(),
+                    principal: "user".to_owned(),
+                    meta: CalendarMetadata {
+                        displayname: Some("Holidays".to_owned()),
+                        order: 0,
+                        description: None,
+                        color: None,
+                    },
+                    timezone_id: None,
+                    deleted_at: None,
+                    synctoken: 0,
+                    subscription_url: None,
+                    push_topic: "hols-push-topic".to_owned(),
+                    components: vec![CalendarObjectType::Event],
+                })
+                .await
+                .unwrap();
+
+            // The list endpoint is public metadata: names of sets, no
+            // credentials needed (same trust class as the timezone list).
+            let plain = reqwest::Client::builder().build().unwrap();
+            let resp = plain
+                .get(origin.clone() + "/frontend/_holidays.json")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = resp.text().await.unwrap();
+            assert!(body.contains("countries"), "list groups: {body}");
+            assert!(
+                body.contains("United States (federal)"),
+                "list sets: {body}"
+            );
+            assert!(body.contains("Jewish holidays"), "list sets: {body}");
+
+            // Login session for the portal writes.
+            let client = reqwest::Client::builder()
+                .redirect(Policy::none())
+                .cookie_store(true)
+                .build()
+                .unwrap();
+            let resp = client
+                .request(Method::POST, origin.clone() + "/frontend/login")
+                .form(&[("username", "user"), ("password", "pass")])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+            // Import two sets in one go — merged into the one calendar.
+            let url = origin.clone() + "/frontend/user/user/calendar/hols/holidays";
+            let resp = client
+                .request(Method::POST, &url)
+                .form(&[("principal", "user"), ("sets", "us,judaism")])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "import: {url}");
+            let body = resp.text().await.unwrap();
+            assert!(body.contains("\"imported\":2"), "import count: {body}");
+
+            // Both sets' events materialized as one calendar's objects.
+            let db = create_db_pool(&db_path, false).await.unwrap();
+            let (send, _recv) = tokio::sync::mpsc::channel(1);
+            let cal_store = SqliteCalendarStore::new(db, send, false);
+            let objects = cal_store.get_objects("user", "hols").await.unwrap();
+            let uids: std::collections::HashSet<_> =
+                objects.iter().map(|(id, _)| id.as_str()).collect();
+            assert_eq!(objects.len(), 3, "3 events from 2 sets: {uids:?}");
+            for uid in [
+                "hol-us-20260101@omnical",
+                "hol-us-20260704@omnical",
+                "hol-judaism-20260912@omnical",
+            ] {
+                assert!(uids.contains(uid), "merged UID {uid}: {uids:?}");
+            }
+
+            // Re-import is idempotent: same UIDs overwrite, never duplicate.
+            let resp = client
+                .request(Method::POST, &url)
+                .form(&[("principal", "user"), ("sets", "us,judaism")])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let objects = cal_store.get_objects("user", "hols").await.unwrap();
+            assert_eq!(objects.len(), 3, "no duplicates: {objects:?}");
+
+            // The sources recorded per set show with their manifest labels
+            // on the unified profile page.
+            let resp = client
+                .get(origin.clone() + "/frontend/user/user")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = resp.text().await.unwrap();
+            assert!(
+                body.contains("Holidays · United States (federal)"),
+                "source label: {body}"
+            );
+            assert!(body.contains("Holidays · Jewish holidays"), "label: {body}");
+
+            // Refresh: mutate the set on disk, refresh the holidays://us
+            // source via the linked-platforms flow, the new event arrives
+            // by the same by-UID diff as any other source.
+            std::fs::write(
+                holidays_dir.path().join("us.ics"),
+                "BEGIN:VCALENDAR\r\n\
+                 PRODID:-//omnical//holidays//EN\r\n\
+                 VERSION:2.0\r\n\
+                 BEGIN:VEVENT\r\n\
+                 UID:hol-us-20260101@omnical\r\n\
+                 DTSTAMP:20260101T000000Z\r\n\
+                 DTSTART;VALUE=DATE:20260101\r\n\
+                 SUMMARY:New Year's Day\r\n\
+                 END:VEVENT\r\n\
+                 BEGIN:VEVENT\r\n\
+                 UID:hol-us-20260704@omnical\r\n\
+                 DTSTAMP:20260101T000000Z\r\n\
+                 DTSTART;VALUE=DATE:20260704\r\n\
+                 SUMMARY:Independence Day\r\n\
+                 END:VEVENT\r\n\
+                 BEGIN:VEVENT\r\n\
+                 UID:hol-us-20261126@omnical\r\n\
+                 DTSTAMP:20260101T000000Z\r\n\
+                 DTSTART;VALUE=DATE:20261126\r\n\
+                 SUMMARY:Thanksgiving\r\n\
+                 END:VEVENT\r\n\
+                 END:VCALENDAR\r\n",
+            )
+            .unwrap();
+            let source_store = SqliteCalendarSourceStore::new(SqliteCalendarStore::new(
+                create_db_pool(&db_path, false).await.unwrap(),
+                tokio::sync::mpsc::channel(1).0,
+                false,
+            ));
+            let sources = source_store.get_calendar_sources("user").await.unwrap();
+            let us_source = sources
+                .iter()
+                .find(|s| s.source_url == "holidays://us")
+                .expect("the holidays://us source row");
+            let refresh_url = format!(
+                "{origin}/frontend/user/user/linked-platforms/{}/refresh",
+                us_source.id
+            );
+            let resp = client.post(&refresh_url).send().await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::SEE_OTHER,
+                "refresh: {}",
+                resp.text().await.unwrap()
+            );
+            let objects = cal_store.get_objects("user", "hols").await.unwrap();
+            let uids: std::collections::HashSet<_> =
+                objects.iter().map(|(id, _)| id.as_str()).collect();
+            assert!(
+                uids.contains("hol-us-20261126@omnical"),
+                "refresh: {uids:?}"
+            );
+            assert_eq!(objects.len(), 4, "one added, none lost: {uids:?}");
+
+            // Unknown set ids are refused before any row is written.
+            let resp = client
+                .request(Method::POST, &url)
+                .form(&[("principal", "user"), ("sets", "us,nope")])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body = resp.text().await.unwrap();
+            assert!(body.contains("nope"), "names the bad set: {body}");
+
+            // Unauthenticated imports do nothing.
+            let resp = plain
+                .request(Method::POST, &url)
+                .form(&[("principal", "user"), ("sets", "us")])
+                .send()
+                .await
+                .unwrap();
+            assert_ne!(resp.status(), StatusCode::OK, "unauthenticated: {resp:?}");
+            let objects = cal_store.get_objects("user", "hols").await.unwrap();
+            assert_eq!(objects.len(), 4, "untouched: {objects:?}");
         },
     )
     .await;

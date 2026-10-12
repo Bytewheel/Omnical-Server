@@ -450,16 +450,21 @@ mod tests {
     /// §18.21's counts, as an executable claim rather than a paragraph.
     ///
     /// The audit said 17 `.up.sql`/`.down.sql` pairs plus 4 bare base files with
-    /// no down. If a migration is added, removed or — as happened during
-    /// development — mis-versioned, the rollback command's own behaviour changes,
-    /// so the number it reports has to move with it or this fails.
+    /// no down (§18.21). 18 since `20261011130000_calendar_source_objects`
+    /// (the per-source object-ownership rows the refresh diff scopes to one
+    /// source — a calendar can carry several sources at once now, so a refresh
+    /// of one must not treat every other set's events as "vanished"). If a
+    /// migration is added, removed or — as happened during development —
+    /// mis-versioned, the rollback command's own behaviour changes, so the
+    /// number it reports has to move with it or this fails.
     #[test]
     fn the_migration_set_is_what_the_audit_counted() {
         let reversible = reversible_versions();
         assert_eq!(
             reversible.len(),
-            17,
-            "expected 17 reversible migrations (the §18.21 audit), found {}: {:?}",
+            18,
+            "expected 18 reversible migrations (the §18.21 audit + the holidays \
+             ownership table), found {}: {:?}",
             reversible.len(),
             reversible
         );
