@@ -115,8 +115,20 @@ async fn find_share(
     reason = "a match over eight subcommands; splitting it would scatter one command's validation across eight functions"
 )]
 pub async fn cmd_guest_shares(args: GuestSharesArgs, config: Config) -> anyhow::Result<()> {
-    let (addr_store, cal_store, _, principal_store, _, _, subscription_store, _, _, share_store, _) =
-        get_data_stores(true, &crate::tenancy::cli_data_store(&config).await?).await?;
+    let (
+        addr_store,
+        cal_store,
+        _,
+        principal_store,
+        _,
+        _,
+        subscription_store,
+        _,
+        _,
+        share_store,
+        _,
+        _,
+    ) = get_data_stores(true, &crate::tenancy::cli_data_store(&config).await?).await?;
 
     match args.command {
         GuestShareCommand::Add(AddArgs {

@@ -44,6 +44,10 @@ pub struct TasksSection {
     /// The new-task form URL — always present (the form itself gates).
     pub new_href: String,
     pub can_create: bool,
+    /// Print-page links (`PLAN_NEXT_AGENT_PRINTING.md` §4.4): stickers and
+    /// paper, `scope=new` by default.
+    pub print_stickers_href: String,
+    pub print_paper_href: String,
 }
 
 impl Section for TasksSection {
@@ -177,6 +181,12 @@ pub async fn route_tasks<CS: CalendarStore>(
             hide_completed_href: format!("/frontend/user/{user_id}/tasks?hide_completed=on"),
             new_href: format!("/frontend/user/{user_id}/tasks/new"),
             can_create,
+            print_stickers_href: format!(
+                "/frontend/user/{user_id}/tasks/print?scope=new&format=stickers"
+            ),
+            print_paper_href: format!(
+                "/frontend/user/{user_id}/tasks/print?scope=new&format=paper"
+            ),
         },
     }
     .into_response())

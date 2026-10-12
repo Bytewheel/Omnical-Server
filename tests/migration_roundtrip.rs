@@ -402,8 +402,11 @@ async fn a_down_up_cycle_moves_a_column_without_moving_its_meaning() {
 /// §14 said "audit all 19 pairs". There were **38** files: **17** pairs, **4**
 /// bare base migrations with no down at all, and **21** files applied going
 /// up. Since `20261011130000_calendar_source_objects` (the per-source object
-/// ownership rows the holidays refresh diff scopes to one source) there are
+/// ownership rows the holidays refresh diff scopes to one source) there were
 /// **40** files: **18** pairs, still **4** bare and **22** applied going up.
+/// Since `20261012130000_print_state` (the portal print pages'
+/// previously-printed tracking, `PLAN_NEXT_AGENT_PRINTING.md` §3.1) there are
+/// **42** files: **19** pairs, still **4** bare and **23** applied going up.
 #[test]
 fn the_migration_counts_are_what_the_plan_says() {
     let files_total = migrations().len();
@@ -412,11 +415,11 @@ fn the_migration_counts_are_what_the_plan_says() {
     let bare = bare_base_migrations().len();
 
     assert_eq!(
-        files_total, 40,
+        files_total, 42,
         "migration file count changed; update the plan"
     );
-    assert_eq!(pairs, 18, "pair count changed; update the plan");
-    assert_eq!(applied_ups, 22, "applied-up count changed; update the plan");
+    assert_eq!(pairs, 19, "pair count changed; update the plan");
+    assert_eq!(applied_ups, 23, "applied-up count changed; update the plan");
     assert_eq!(
         bare, 4,
         "base migrations without a down changed; update the plan"

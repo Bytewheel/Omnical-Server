@@ -12,6 +12,7 @@ pub mod linked_platforms;
 pub mod login;
 pub mod password;
 pub mod password_reset;
+pub mod print;
 pub mod share;
 pub mod tasks;
 pub mod timezones;

@@ -1244,3 +1244,118 @@ footer {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+
+/* ------------------------------------------------------------------ */
+/* Print pages (PLAN_NEXT_AGENT_PRINTING.md §4.3)                      */
+/* ------------------------------------------------------------------ */
+
+/* 8.5×11 paper: the browser's print dialog does the printing (plan D1); */
+@page {
+  size: letter;
+  margin: .5in;
+}
+
+.print-root {
+  max-width: 7.5in;
+  margin: 1em auto;
+}
+
+.print-toolbar {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--background-color-03);
+  padding: .75em 1em;
+  margin-bottom: 1em;
+
+  h1 {
+    margin: 0 0 .2em;
+  }
+}
+
+.print-toolbar-actions {
+  display: flex;
+  gap: .5em;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: .75em 0;
+}
+
+/* Sticker geometry is fixed (plan D3): 4×5 cells of 1.75×1.9 in inside */
+/* the 7.5×10 in printable area of a letter page with .5 in margins.     */
+.sticker-sheet {
+  display: flex;
+  flex-wrap: wrap;
+  width: 7.5in;
+  min-height: 9.5in;
+  page-break-after: always;
+  break-after: page;
+}
+
+.sticker {
+  width: 1.75in;
+  height: 1.9in;
+  outline: 1px dashed var(--text-muted);
+  outline-offset: -5px;
+  padding: .12in;
+  box-sizing: border-box;
+  border-left: 4px solid var(--event-color);
+  display: flex;
+  flex-direction: column;
+  gap: .08in;
+  overflow: hidden;
+  break-inside: avoid;
+}
+
+.sticker-title {
+  font-weight: 600;
+  font-size: 1.05em;
+}
+
+.sticker-line {
+  font-size: .85em;
+  line-height: 1.25;
+}
+
+.paper-list {
+  display: flex;
+  flex-direction: column;
+  gap: .45em;
+}
+
+.paper-row {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--event-color);
+  border-radius: var(--radius-sm);
+  background: var(--background-color-03);
+  padding: .5em .8em;
+  break-inside: avoid;
+}
+
+.paper-label {
+  font-weight: 600;
+}
+
+.paper-line {
+  font-size: .9em;
+}
+
+/* The toolbar is screen-only chrome; the page itself is what prints.    */
+@media print {
+  .print-toolbar {
+    display: none;
+  }
+
+  footer {
+    display: none;
+  }
+
+  header {
+    display: none;
+  }
+
+  body {
+    background: none;
+  }
+}

@@ -14,8 +14,8 @@ use rustical_scheduling::Scheduler;
 use rustical_store::auth::AuthenticationProvider;
 use rustical_store::{AddressbookStore, CalendarStore, CollectionOperation, PrefixedCalendarStore};
 use rustical_store::{
-    CalendarSourceStore, CollectionShareStore, InviteStore, PasswordResetStore, SchedulingStore,
-    SubscriptionStore,
+    CalendarSourceStore, CollectionShareStore, InviteStore, PasswordResetStore, PrintStore,
+    SchedulingStore, SubscriptionStore,
 };
 use rustical_store_sqlite::SqliteAddressbookStore;
 use rustical_store_sqlite::SqliteCalendarStore;
@@ -24,7 +24,7 @@ use rustical_store_sqlite::SqliteSchedulingStore;
 use rustical_store_sqlite::SqliteSubscriptionStore;
 use rustical_store_sqlite::{
     SqliteCalendarSourceStore, SqliteCollectionShareStore, SqliteDavPushStore, SqliteInviteStore,
-    SqlitePasswordResetStore, create_db_pool,
+    SqlitePasswordResetStore, SqlitePrintStore, create_db_pool,
 };
 use setup_tracing::setup_tracing;
 use std::fs;
@@ -111,7 +111,7 @@ pub enum Command {
     Upgrade(commands::upgrade::UpgradeArgs),
 }
 
-/// The twelve stores, as a named [`StoreBundle`].
+/// The thirteen stores, as a named [`StoreBundle`].
 ///
 /// §3.2 needs one of these per tenant, and the tuple this replaces had two
 /// adjacent `Arc<dyn …>` fields over the same pool (`subscription_store` and
@@ -157,6 +157,10 @@ pub async fn get_store_bundle(
             // Public forgot-/reset-password tokens share them as well.
             let password_reset_store: Arc<dyn PasswordResetStore> =
                 Arc::new(SqlitePasswordResetStore::new(cal_store.clone()));
+            // Print-state tracking for the portal print pages shares the pool
+            // too (PLAN_NEXT_AGENT_PRINTING.md §3.4).
+            let print_store: Arc<dyn PrintStore> =
+                Arc::new(SqlitePrintStore::new(cal_store.clone()));
             let cal_store = Arc::new(cal_store);
             if *run_repairs {
                 info!("Running repair tasks");
@@ -187,12 +191,13 @@ pub async fn get_store_bundle(
                 calendar_source_store,
                 share_store,
                 password_reset_store,
+                print_store,
             }
         }
     })
 }
 
-/// [`get_data_stores`] as a 12-tuple — **a shim**.
+/// [`get_data_stores`] as a 13-tuple — **a shim**.
 ///
 /// Kept so the five CLI call sites did not have to move in this commit, the
 /// same way `make_app` outlived `make_app_for` (§18.11). New code should call
@@ -250,6 +255,7 @@ pub async fn get_data_stores(
     Arc<dyn CalendarSourceStore>,
     Arc<dyn CollectionShareStore>,
     Arc<dyn PasswordResetStore>,
+    Arc<dyn PrintStore>,
 )> {
     let b = get_store_bundle(migrate, config).await?;
     Ok((
@@ -266,6 +272,7 @@ pub async fn get_data_stores(
         b.calendar_source_store,
         b.share_store,
         b.password_reset_store,
+        b.print_store,
     ))
 }
 
@@ -333,6 +340,9 @@ pub async fn cmd_serve(
         calendar_source_store,
         share_store,
         password_reset_store,
+        // Print-state tracking (the portal print pages' new-vs-all scope) —
+        // same straight-through treatment as the share/password-reset stores.
+        print_store,
     ) = get_data_stores(!args.no_migrations, &serve_store).await?;
 
     // Tenancy spawns these per tenant, from the tenant closure in `tenancy.rs`,
@@ -441,6 +451,7 @@ pub async fn cmd_serve(
         invite_store.clone(),
         share_store,
         password_reset_store,
+        print_store,
         config.scheduling.smtp.clone(),
     );
     let app = if tenancy_enabled {

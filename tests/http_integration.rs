@@ -14,7 +14,7 @@ use rustical::{
     principals::{CreateArgs, EditArgs, PrincipalsCommand},
     subscriptions::{AddArgs, KindArg, RemoveArgs, SubscriptionsArgs, SubscriptionsCommand},
 };
-use rustical_ical::CalendarObjectType;
+use rustical_ical::{AddressObject, CalendarObject, CalendarObjectType};
 use rustical_store::auth::{AuthenticationProvider, PrincipalType};
 use rustical_store::{
     Addressbook, AddressbookReadStore, AddressbookWriteStore, Calendar, CalendarMetadata,
@@ -1506,6 +1506,681 @@ async fn test_portal_holidays() {
             assert_ne!(resp.status(), StatusCode::OK, "unauthenticated: {resp:?}");
             let objects = cal_store.get_objects("user", "hols").await.unwrap();
             assert_eq!(objects.len(), 4, "untouched: {objects:?}");
+        },
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// Print pages (PLAN_NEXT_AGENT_PRINTING.md §5): sticker sheets + letter
+// lists for events/tasks/contacts, with print-state tracking (new vs all).
+// ---------------------------------------------------------------------------
+
+/// The full `Config` literal every portal test in this file builds — the
+/// spawned server's arguments (see `test_portal_profile_sections_and_contacts`
+/// for the shape's origin).
+fn print_test_config(db_path: &str, port: u16) -> Config {
+    Config {
+        tenancy: TenancyConfig::default(),
+        data_store: DataStoreConfig::Sqlite(SqliteDataStoreConfig {
+            db_url: db_path.to_owned(),
+            run_repairs: true,
+            skip_broken: false,
+        }),
+        http: HttpConfig {
+            bind: Some(format!("127.0.0.1:{port}")),
+            ..Default::default()
+        },
+        frontend: Default::default(),
+        oidc: None,
+        tracing: Default::default(),
+        dav_push: Default::default(),
+        nextcloud_login: Default::default(),
+        caldav: Default::default(),
+        scheduling: Default::default(),
+        subscriptions: Default::default(),
+        registration: Default::default(),
+        maintenance: Default::default(),
+        appliance: Default::default(),
+    }
+}
+
+/// Create a principal with a password, the way the portal tests do.
+async fn print_test_principal(config: &Config, id: &str, password: &str) {
+    cmd_principals(
+        PrincipalsArgs {
+            command: PrincipalsCommand::Create(CreateArgs {
+                id: id.to_owned(),
+                name: Some(id.to_owned()),
+                password: false,
+                for_testing_password_from_arg: None,
+                principal_type: Some(PrincipalType::Individual),
+                overwrite: true,
+            }),
+        },
+        config.clone(),
+    )
+    .await
+    .unwrap();
+    cmd_principals(
+        PrincipalsArgs {
+            command: PrincipalsCommand::Edit(EditArgs {
+                id: id.to_owned(),
+                name: None,
+                password: false,
+                remove_password: false,
+                for_testing_password_from_arg: Some(password.to_owned()),
+                principal_type: None,
+            }),
+        },
+        config.clone(),
+    )
+    .await
+    .unwrap();
+}
+
+/// A logged-in cookie client.
+async fn print_test_client(origin: &str, username: &str, password: &str) -> reqwest::Client {
+    let client = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .cookie_store(true)
+        .build()
+        .unwrap();
+    let resp = client
+        .post(format!("{origin}/frontend/login"))
+        .form(&[("username", username), ("password", password)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    client
+}
+
+/// The hidden mark inputs the print page renders (`name="markN"
+/// value="…"`): indexed names, one per rendered sticker.
+fn print_test_marks(body: &str) -> Vec<String> {
+    body.split("name=\"mark")
+        .skip(1)
+        .filter_map(|rest| {
+            let value = rest.split("value=\"").nth(1)?;
+            Some(value.split('"').next().unwrap_or_default().to_owned())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_print_events_stickers_new_then_all() {
+    let db_tempfile = tempfile::NamedTempFile::with_suffix(".rustical-test.sqlite3").unwrap();
+    let db_path = db_tempfile.path().to_string_lossy().into_owned();
+
+    test_runner_with(
+        Some(db_path.clone()),
+        |_| {},
+        async |port| {
+            let origin = format!("http://localhost:{port}");
+            let config = print_test_config(&db_path, port);
+            print_test_principal(&config, "user", "pass").await;
+
+            // One calendar; a dated event and a weekly series inside October.
+            let db = create_db_pool(&db_path, false).await.unwrap();
+            let (send, _recv) = tokio::sync::mpsc::channel(1);
+            let cal_store = SqliteCalendarStore::new(db, send, false);
+            cal_store
+                .insert_calendar(Calendar {
+                    id: "personal".to_owned(),
+                    principal: "user".to_owned(),
+                    meta: CalendarMetadata {
+                        displayname: Some("Personal".to_owned()),
+                        order: 0,
+                        description: None,
+                        color: Some("#3a87ad".to_owned()),
+                    },
+                    timezone_id: None,
+                    deleted_at: None,
+                    synctoken: 0,
+                    subscription_url: None,
+                    push_topic: "personal-push-topic".to_owned(),
+                    components: vec![CalendarObjectType::Event],
+                })
+                .await
+                .unwrap();
+            cal_store
+                .put_object(
+                    "user",
+                    "personal",
+                    "obj-dentist",
+                    CalendarObject::from_ics(
+                        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//omnical//test//EN\r\n\
+                         BEGIN:VEVENT\r\nUID:dentist@omnical\r\nSUMMARY:Dentist\r\nDTSTAMP:20260925T103702Z\r\n\
+                         DTSTART:20261014T180000Z\r\nDTEND:20261014T183000Z\r\n\
+                         END:VEVENT\r\nEND:VCALENDAR\r\n"
+                            .to_owned(),
+                    )
+                    .unwrap(),
+                    false,
+                )
+                .await
+                .unwrap();
+            cal_store
+                .put_object(
+                    "user",
+                    "personal",
+                    "obj-trash",
+                    CalendarObject::from_ics(
+                        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//omnical//test//EN\r\n\
+                         BEGIN:VEVENT\r\nUID:trash-day@omnical\r\nSUMMARY:Trash day\r\nDTSTAMP:20260925T103702Z\r\n\
+                         DTSTART:20261005T190000Z\r\nDTEND:20261005T200000Z\r\n\
+                         RRULE:FREQ=WEEKLY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+                            .to_owned(),
+                    )
+                    .unwrap(),
+                    false,
+                )
+                .await
+                .unwrap();
+
+            let client = print_test_client(&origin, "user", "pass").await;
+            let per_calendar = format!(
+                "{origin}/frontend/user/user/calendar/personal/events/print\
+                 ?scope=new&format=stickers&date=2026-10"
+            );
+
+            // Stickers for the month: the dated event plus one sticker per
+            // concrete recurrence instance (Mondays 5, 12, 19, 26 October).
+            let resp = client.get(&per_calendar).send().await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = resp.text().await.unwrap();
+            assert!(body.contains("sticker-sheet"), "sticker layout: {body}");
+            assert!(body.contains("Dentist"), "dated event: {body}");
+            let trash_positions: Vec<usize> =
+                body.match_indices("Trash day").map(|(i, _)| i).collect();
+            assert_eq!(trash_positions.len(), 4, "weekly instances: {body}");
+            let dentist_pos = body.find("Dentist").expect("the dated event");
+            assert!(
+                trash_positions[1] < dentist_pos && dentist_pos < trash_positions[2],
+                "chronological: {body}"
+            );
+            let marks = print_test_marks(&body);
+            assert_eq!(marks.len(), 5, "one mark per rendered sticker: {body}");
+
+            // The aggregate Calendar tab prints the same data set.
+            let aggregate = format!(
+                "{origin}/frontend/user/user/events/print?scope=new&format=stickers&date=2026-10"
+            );
+            let resp = client.get(&aggregate).send().await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let aggregate_body = resp.text().await.unwrap();
+            assert!(
+                aggregate_body.contains("Dentist"),
+                "aggregate: {aggregate_body}"
+            );
+            assert!(
+                aggregate_body.match_indices("Trash day").count() == 4,
+                "aggregate weekly instances: {aggregate_body}"
+            );
+
+            // Paper format: same data, letter list.
+            let paper = format!(
+                "{origin}/frontend/user/user/calendar/personal/events/print\
+                 ?scope=new&format=paper&date=2026-10"
+            );
+            let resp = client.get(&paper).send().await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let paper_body = resp.text().await.unwrap();
+            assert!(
+                paper_body.contains("paper-list"),
+                "paper layout: {paper_body}"
+            );
+            assert!(
+                !paper_body.contains("sticker-sheet"),
+                "no stickers: {paper_body}"
+            );
+
+            // Marking printed is an explicit POST, then the "new" scope is
+            // empty and "all" still shows everything.
+            let mut form: Vec<(String, String)> = marks
+                .iter()
+                .enumerate()
+                .map(|(index, mark)| (format!("mark{index}"), mark.clone()))
+                .collect();
+            form.push(("format".to_owned(), "stickers".to_owned()));
+            form.push(("date".to_owned(), "2026-10".to_owned()));
+            let resp = client.post(&per_calendar).form(&form).send().await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+            let location = resp
+                .headers()
+                .get("Location")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+
+            let resp = client
+                .get(format!("{origin}{location}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = resp.text().await.unwrap();
+            assert!(body.contains("Marked 5 as printed"), "banner: {body}");
+            assert!(
+                body.contains("Nothing new to print"),
+                "new scope drained: {body}"
+            );
+            assert!(
+                !body.contains("Dentist"),
+                "marked events gone from new: {body}"
+            );
+
+            let resp = client.get(&per_calendar).send().await.unwrap();
+            let body = resp.text().await.unwrap();
+            assert!(
+                !body.contains("Dentist"),
+                "still gone on a fresh GET: {body}"
+            );
+            assert_eq!(print_test_marks(&body).len(), 0, "no marks left: {body}");
+
+            let all = format!(
+                "{origin}/frontend/user/user/calendar/personal/events/print\
+                 ?scope=all&format=stickers&date=2026-10"
+            );
+            let resp = client.get(&all).send().await.unwrap();
+            let body = resp.text().await.unwrap();
+            assert!(body.contains("Dentist"), "all scope keeps them: {body}");
+            assert_eq!(print_test_marks(&body).len(), 5, "all-scope marks: {body}");
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_print_events_next_month_instances_are_new() {
+    let db_tempfile = tempfile::NamedTempFile::with_suffix(".rustical-test.sqlite3").unwrap();
+    let db_path = db_tempfile.path().to_string_lossy().into_owned();
+
+    test_runner_with(
+        Some(db_path.clone()),
+        |_| {},
+        async |port| {
+            let origin = format!("http://localhost:{port}");
+            let config = print_test_config(&db_path, port);
+            print_test_principal(&config, "user", "pass").await;
+
+            let db = create_db_pool(&db_path, false).await.unwrap();
+            let (send, _recv) = tokio::sync::mpsc::channel(1);
+            let cal_store = SqliteCalendarStore::new(db, send, false);
+            cal_store
+                .insert_calendar(Calendar {
+                    id: "personal".to_owned(),
+                    principal: "user".to_owned(),
+                    meta: CalendarMetadata {
+                        displayname: Some("Personal".to_owned()),
+                        order: 0,
+                        description: None,
+                        color: None,
+                    },
+                    timezone_id: None,
+                    deleted_at: None,
+                    synctoken: 0,
+                    subscription_url: None,
+                    push_topic: "personal-push-topic".to_owned(),
+                    components: vec![CalendarObjectType::Event],
+                })
+                .await
+                .unwrap();
+            cal_store
+                .put_object(
+                    "user",
+                    "personal",
+                    "obj-trash",
+                    CalendarObject::from_ics(
+                        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//omnical//test//EN\r\n\
+                         BEGIN:VEVENT\r\nUID:trash-day@omnical\r\nSUMMARY:Trash day\r\nDTSTAMP:20260925T103702Z\r\n\
+                         DTSTART:20261005T190000Z\r\nDTEND:20261005T200000Z\r\n\
+                         RRULE:FREQ=WEEKLY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+                            .to_owned(),
+                    )
+                    .unwrap(),
+                    false,
+                )
+                .await
+                .unwrap();
+
+            let client = print_test_client(&origin, "user", "pass").await;
+            let october = format!(
+                "{origin}/frontend/user/user/calendar/personal/events/print\
+                 ?scope=new&format=stickers&date=2026-10"
+            );
+
+            // Mark October's four instances printed.
+            let resp = client.get(&october).send().await.unwrap();
+            let body = resp.text().await.unwrap();
+            let mut form: Vec<(String, String)> = print_test_marks(&body)
+                .into_iter()
+                .enumerate()
+                .map(|(index, mark)| (format!("mark{index}"), mark))
+                .collect();
+            form.push(("format".to_owned(), "stickers".to_owned()));
+            form.push(("date".to_owned(), "2026-10".to_owned()));
+            let resp = client.post(&october).form(&form).send().await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+            // November: the same series, but next month's instances were never
+            // printed — they are new stickers again (plan D4: per-instance
+            // keys, not per-master marks).
+            let november = format!(
+                "{origin}/frontend/user/user/calendar/personal/events/print\
+                 ?scope=new&format=stickers&date=2026-11"
+            );
+            let resp = client.get(&november).send().await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = resp.text().await.unwrap();
+            assert!(
+                !body.contains("Nothing new to print"),
+                "next month has new instances: {body}"
+            );
+            assert_eq!(
+                body.match_indices("Trash day").count(),
+                5,
+                "the five November Mondays: {body}"
+            );
+            let marks = print_test_marks(&body);
+            assert_eq!(marks.len(), 5, "one per November instance: {body}");
+            assert!(
+                marks.iter().all(|mark| mark.contains("202611")),
+                "instance keys are November starts: {marks:?}"
+            );
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_print_tasks_and_contacts() {
+    let db_tempfile = tempfile::NamedTempFile::with_suffix(".rustical-test.sqlite3").unwrap();
+    let db_path = db_tempfile.path().to_string_lossy().into_owned();
+
+    test_runner_with(
+        Some(db_path.clone()),
+        |_| {},
+        async |port| {
+            let origin = format!("http://localhost:{port}");
+            let config = print_test_config(&db_path, port);
+            print_test_principal(&config, "user", "pass").await;
+
+            let db = create_db_pool(&db_path, false).await.unwrap();
+            let (send, _recv) = tokio::sync::mpsc::channel(1);
+            let cal_store = SqliteCalendarStore::new(db.clone(), send.clone(), false);
+            cal_store
+                .insert_calendar(Calendar {
+                    id: "chores".to_owned(),
+                    principal: "user".to_owned(),
+                    meta: CalendarMetadata {
+                        displayname: Some("Chores".to_owned()),
+                        order: 0,
+                        description: None,
+                        color: None,
+                    },
+                    timezone_id: None,
+                    deleted_at: None,
+                    synctoken: 0,
+                    subscription_url: None,
+                    push_topic: "chores-push-topic".to_owned(),
+                    components: vec![CalendarObjectType::Todo],
+                })
+                .await
+                .unwrap();
+            cal_store
+                .put_object(
+                    "user",
+                    "chores",
+                    "obj-milk",
+                    CalendarObject::from_ics(
+                        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//omnical//test//EN\r\n\
+                         BEGIN:VTODO\r\nUID:buy-milk@omnical\r\nSUMMARY:Buy milk\r\nDTSTAMP:20260925T103702Z\r\n\
+                         DUE:20261020T120000Z\r\nSTATUS:NEEDS-ACTION\r\n\
+                         END:VTODO\r\nEND:VCALENDAR\r\n"
+                            .to_owned(),
+                    )
+                    .unwrap(),
+                    false,
+                )
+                .await
+                .unwrap();
+
+            let addr_store = SqliteAddressbookStore::new(db, send, false);
+            addr_store
+                .insert_addressbook(Addressbook {
+                    id: "people".to_owned(),
+                    principal: "user".to_owned(),
+                    displayname: Some("People".to_owned()),
+                    description: None,
+                    deleted_at: None,
+                    synctoken: 0,
+                    push_topic: "people-push-topic".to_owned(),
+                })
+                .await
+                .unwrap();
+            AddressbookWriteStore::put_object(
+                &addr_store,
+                "user",
+                "people",
+                "obj-ada",
+                AddressObject::from_vcf(
+                    "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Ada Example\r\n\
+                         N:Example;Ada;;;\r\nTEL:+15550100\r\nEMAIL:ada@example.com\r\n\
+                         END:VCARD\r\n"
+                        .to_owned(),
+                )
+                .unwrap(),
+                false,
+            )
+            .await
+            .unwrap();
+
+            let client = print_test_client(&origin, "user", "pass").await;
+
+            // Tasks: sticker and paper, aggregate and per-tab hrefs.
+            let tasks_print = format!("{origin}/frontend/user/user/tasks/print");
+            let resp = client
+                .get(format!("{tasks_print}?scope=new&format=stickers"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = resp.text().await.unwrap();
+            assert!(body.contains("Buy milk"), "task sticker: {body}");
+            assert!(body.contains("NEEDS-ACTION"), "task status: {body}");
+            assert!(body.contains("due 12:00"), "task due time: {body}");
+            let marks = print_test_marks(&body);
+            assert_eq!(marks.len(), 1, "whole-object mark: {body}");
+
+            let resp = client
+                .get(format!("{tasks_print}?scope=new&format=paper"))
+                .send()
+                .await
+                .unwrap();
+            let body = resp.text().await.unwrap();
+            assert!(body.contains("paper-list"), "paper layout: {body}");
+            assert!(body.contains("Buy milk"), "paper keeps the task: {body}");
+
+            // Mark the task printed, then it is gone from "new".
+            let resp = client
+                .post(&tasks_print)
+                .form(&[("mark0", marks[0].clone()), ("format", "paper".to_owned())])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+            let resp = client
+                .get(format!("{tasks_print}?scope=new"))
+                .send()
+                .await
+                .unwrap();
+            let body = resp.text().await.unwrap();
+            assert!(
+                !body.contains("Buy milk"),
+                "marked task drained from new: {body}"
+            );
+            let resp = client
+                .get(format!("{tasks_print}?scope=all"))
+                .send()
+                .await
+                .unwrap();
+            let body = resp.text().await.unwrap();
+            assert!(body.contains("Buy milk"), "all keeps it: {body}");
+
+            // Contacts: aggregate and per-addressbook.
+            let resp = client
+                .get(format!(
+                    "{origin}/frontend/user/user/contacts/print?scope=new&format=stickers"
+                ))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = resp.text().await.unwrap();
+            assert!(body.contains("Ada Example"), "contact sticker: {body}");
+            assert!(body.contains("ada@example.com"), "contact email: {body}");
+            assert!(body.contains("+15550100"), "contact phone: {body}");
+
+            let resp = client
+                .get(format!(
+                    "{origin}/frontend/user/user/addressbook/people/contacts/print\
+                     ?scope=new&format=stickers"
+                ))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = resp.text().await.unwrap();
+            assert!(body.contains("Ada Example"), "per-addressbook: {body}");
+            let marks = print_test_marks(&body);
+            assert_eq!(marks.len(), 1, "one contact mark: {body}");
+
+            // Mark the contact printed, then it is gone from "new".
+            let resp = client
+                .post(format!(
+                    "{origin}/frontend/user/user/addressbook/people/contacts/print"
+                ))
+                .form(&[
+                    ("mark0", marks[0].clone()),
+                    ("format", "stickers".to_owned()),
+                ])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+            let resp = client
+                .get(format!(
+                    "{origin}/frontend/user/user/contacts/print?scope=new"
+                ))
+                .send()
+                .await
+                .unwrap();
+            let body = resp.text().await.unwrap();
+            assert!(
+                !body.contains("Ada Example"),
+                "marked contact drained from new: {body}"
+            );
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_print_gates() {
+    let db_tempfile = tempfile::NamedTempFile::with_suffix(".rustical-test.sqlite3").unwrap();
+    let db_path = db_tempfile.path().to_string_lossy().into_owned();
+
+    test_runner_with(
+        Some(db_path.clone()),
+        |_| {},
+        async |port| {
+            let origin = format!("http://localhost:{port}");
+            let config = print_test_config(&db_path, port);
+            print_test_principal(&config, "user", "pass").await;
+            print_test_principal(&config, "other", "pass").await;
+
+            let db = create_db_pool(&db_path, false).await.unwrap();
+            let (send, _recv) = tokio::sync::mpsc::channel(1);
+            let cal_store = SqliteCalendarStore::new(db.clone(), send.clone(), false);
+            cal_store
+                .insert_calendar(Calendar {
+                    id: "personal".to_owned(),
+                    principal: "user".to_owned(),
+                    meta: CalendarMetadata {
+                        displayname: Some("Personal".to_owned()),
+                        order: 0,
+                        description: None,
+                        color: None,
+                    },
+                    timezone_id: None,
+                    deleted_at: None,
+                    synctoken: 0,
+                    subscription_url: None,
+                    push_topic: "personal-push-topic".to_owned(),
+                    components: vec![CalendarObjectType::Event],
+                })
+                .await
+                .unwrap();
+            let addr_store = SqliteAddressbookStore::new(db, send, false);
+            addr_store
+                .insert_addressbook(Addressbook {
+                    id: "people".to_owned(),
+                    principal: "user".to_owned(),
+                    displayname: Some("People".to_owned()),
+                    description: None,
+                    deleted_at: None,
+                    synctoken: 0,
+                    push_topic: "people-push-topic".to_owned(),
+                })
+                .await
+                .unwrap();
+
+            // The non-member cannot print another principal's calendar …
+            let other = print_test_client(&origin, "other", "pass").await;
+            for url in [
+                format!("{origin}/frontend/user/user/calendar/personal/events/print"),
+                format!("{origin}/frontend/user/user/events/print"),
+                format!("{origin}/frontend/user/user/tasks/print"),
+                format!("{origin}/frontend/user/user/contacts/print"),
+                format!("{origin}/frontend/user/user/addressbook/people/contacts/print"),
+            ] {
+                let resp = other.get(&url).send().await.unwrap();
+                assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{url}");
+            }
+            // … and cannot mark printed on it either (the GET renders the
+            // form, the POST must refuse just as hard).
+            let resp = other
+                .post(format!(
+                    "{origin}/frontend/user/user/calendar/personal/events/print"
+                ))
+                .form(&[(
+                    "mark0",
+                    "user\u{1f}personal\u{1f}obj-stolen\u{1f}".to_owned(),
+                )])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+            // The owner's own pages still answer.
+            let user = print_test_client(&origin, "user", "pass").await;
+            let resp = user
+                .get(format!("{origin}/frontend/user/user/events/print"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            // `other`'s own aggregate page answers too (its own calendars,
+            // of which it has none — an empty, bannered page, not an error).
+            let resp = other
+                .get(format!("{origin}/frontend/user/other/events/print"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
         },
     )
     .await;

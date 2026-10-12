@@ -7,7 +7,7 @@ use rustical_frontend::FrontendConfig;
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
 use rustical_store_sqlite::{
     SqliteCalendarSourceStore, SqliteCollectionShareStore, SqliteInviteStore,
-    SqlitePasswordResetStore, SqliteSubscriptionStore,
+    SqlitePasswordResetStore, SqlitePrintStore, SqliteSubscriptionStore,
 };
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -58,6 +58,7 @@ pub fn get_app_with_frontend_and_caldav_config(
     let invite_store = Arc::new(SqliteInviteStore::new(cal_store.clone()));
     let share_store = Arc::new(SqliteCollectionShareStore::new(cal_store.clone()));
     let password_reset_store = Arc::new(SqlitePasswordResetStore::new(cal_store.clone()));
+    let print_store = Arc::new(SqlitePrintStore::new(cal_store.clone()));
 
     make_app(
         Arc::new(addr_store),
@@ -79,6 +80,7 @@ pub fn get_app_with_frontend_and_caldav_config(
         invite_store,
         share_store,
         password_reset_store,
+        print_store,
         vec![],
     )
 }

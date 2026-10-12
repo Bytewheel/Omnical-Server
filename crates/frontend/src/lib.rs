@@ -16,7 +16,7 @@ use rustical_scheduling::SmtpAccount;
 use rustical_store::SubscriptionStore;
 use rustical_store::{
     AddressbookStore, CalendarSourceStore, CalendarStore, CollectionShareStore, InviteStore,
-    PasswordResetStore, PrefixedCalendarStore,
+    PasswordResetStore, PrefixedCalendarStore, PrintStore,
     auth::{AuthenticationProvider, middleware::AuthenticationLayer},
 };
 use std::sync::Arc;
@@ -80,6 +80,12 @@ use crate::routes::{
         ResetRateLimiter, route_get_forgot_password, route_get_reset_password,
         route_post_forgot_password, route_post_reset_password,
     },
+    print::{
+        route_addressbook_contacts_print, route_addressbook_contacts_print_mark,
+        route_calendar_events_print, route_calendar_events_print_mark, route_contacts_print,
+        route_contacts_print_mark, route_events_print, route_events_print_mark, route_tasks_print,
+        route_tasks_print_mark,
+    },
     share::{
         route_share_create, route_share_guest_invite, route_share_guest_revoke, route_share_invite,
         route_share_invite_revoke, route_share_revoke,
@@ -113,6 +119,7 @@ pub fn frontend_router<
     invite_store: Arc<dyn InviteStore>,
     share_store: Arc<dyn CollectionShareStore>,
     password_reset_store: Arc<dyn PasswordResetStore>,
+    print_store: Arc<dyn PrintStore>,
     smtp_accounts: Vec<SmtpAccount>,
 ) -> Router {
     // Shared sliding-window limiter for the public password-reset POSTs
@@ -218,6 +225,31 @@ pub fn frontend_router<
             get(route_contacts::<AS>).post(route_contacts_create::<AS>),
         )
         .route("/{user}/contacts/new", get(route_contacts_new::<AS>))
+        // Print pages (physical calendars — PLAN_NEXT_AGENT_PRINTING.md §2):
+        // every tab that lists calendar or addressbook data can be printed
+        // onto 8.5×11 paper or sticker sheets, `scope=new|all` filtered by the
+        // print-state table, and every page POSTs back to itself to mark what
+        // was printed. Mounted beside their tabs, same view gates.
+        .route(
+            "/{user}/events/print",
+            get(route_events_print::<CS>).post(route_events_print_mark::<CS>),
+        )
+        .route(
+            "/{user}/calendar/{calendar}/events/print",
+            get(route_calendar_events_print::<CS>).post(route_calendar_events_print_mark),
+        )
+        .route(
+            "/{user}/tasks/print",
+            get(route_tasks_print::<CS>).post(route_tasks_print_mark::<CS>),
+        )
+        .route(
+            "/{user}/contacts/print",
+            get(route_contacts_print::<AS>).post(route_contacts_print_mark::<AS>),
+        )
+        .route(
+            "/{user}/addressbook/{addressbook}/contacts/print",
+            get(route_addressbook_contacts_print::<AS>).post(route_addressbook_contacts_print_mark),
+        )
         // Addressbook
         .route("/{user}/addressbook", get(route_addressbooks::<AP, CS, AS>))
         .route(
@@ -406,6 +438,7 @@ pub fn frontend_router<
         .layer(Extension(invite_store))
         .layer(Extension(share_store))
         .layer(Extension(password_reset_store))
+        .layer(Extension(print_store))
         .layer(Extension(reset_limiter))
         .layer(Extension(frontend_trusted_proxies))
         .layer(Extension(hawkbook_apk))

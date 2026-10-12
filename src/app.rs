@@ -24,7 +24,7 @@ use rustical_store::Tenant;
 use rustical_store::auth::AuthenticationProvider;
 use rustical_store::{
     AddressbookStore, CalendarSourceStore, CalendarStore, CombinedCalendarStore,
-    PrefixedCalendarStore,
+    PrefixedCalendarStore, PrintStore,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -91,6 +91,9 @@ pub struct AppStores<AS, CS, DP, AP> {
     pub invite_store: Arc<dyn rustical_store::InviteStore>,
     pub share_store: Arc<dyn rustical_store::CollectionShareStore>,
     pub password_reset_store: Arc<dyn rustical_store::PasswordResetStore>,
+    /// Print-state tracking for the portal print pages (`Arc<dyn …>` for the
+    /// same reason as the three erased stores above it).
+    pub print_store: Arc<dyn PrintStore>,
 }
 
 /// Hand the tenant to every handler in `router`, as an `Extension`.
@@ -151,6 +154,7 @@ pub fn make_app<
     invite_store: Arc<dyn rustical_store::InviteStore>,
     share_store: Arc<dyn rustical_store::CollectionShareStore>,
     password_reset_store: Arc<dyn rustical_store::PasswordResetStore>,
+    print_store: Arc<dyn PrintStore>,
     smtp_accounts: Vec<rustical_scheduling::SmtpAccount>,
 ) -> Router<()> {
     make_app_for(
@@ -182,6 +186,7 @@ pub fn make_app<
             invite_store,
             share_store,
             password_reset_store,
+            print_store,
         },
     )
 }
@@ -236,6 +241,7 @@ where
         invite_store,
         share_store,
         password_reset_store,
+        print_store,
     } = stores;
 
     let birthday_store = addr_store.clone();
@@ -387,6 +393,7 @@ where
             invite_store,
             share_store,
             password_reset_store,
+            print_store,
             smtp_accounts,
         ));
     }

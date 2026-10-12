@@ -1,0 +1,71 @@
+{% extends "layouts/default.html" %}
+
+{% block title %}Print — {{ title }}{% endblock %}
+
+{# A printout carries no portal chrome: the layout's `header` block (the logo
+   and the logout form) is emptied here, and print CSS hides the footer. #}
+{% block header %}{% endblock %}
+
+{% block content %}
+<div class="print-root">
+  <div class="print-toolbar">
+    <h1>{{ title }}</h1>
+    <p class="muted">{{ subtitle }}</p>
+    {% if let Some(n) = marked_banner %}
+    <div class="success">
+      <p>Marked {{ n }} as printed — they will not appear under “new” again. <a href="{{ all_href }}">Print everything</a></p>
+    </div>
+    {% endif %}
+    {% if nothing_new %}
+    <div class="success">
+      <p>Nothing new to print — everything below is already marked printed. <a href="{{ all_href }}">Print everything instead</a></p>
+    </div>
+    {% endif %}
+    <div class="print-toolbar-actions">
+      {% if format_stickers %}<a class="button" href="{{ stickers_href }}">Stickers (current)</a>{% else %}<a class="button" href="{{ stickers_href }}">Stickers</a>{% endif %}
+      {% if format_stickers %}<a class="button" href="{{ paper_href }}">Paper (8.5×11)</a>{% else %}<a class="button" href="{{ paper_href }}">Paper (current)</a>{% endif %}
+      <button type="button" onclick="window.print()">Print…</button>
+      <a class="button" href="{{ new_href }}">Only new</a>
+      <a class="button" href="{{ all_href }}">Everything</a>
+      {% if mark_count > 0 %}
+      <form method="POST" action="{{ post_action }}" class="inline-form print-mark-form">
+        <input type="hidden" name="format" value="{% if format_stickers %}stickers{% else %}paper{% endif %}">
+        {% if let Some(date) = print_date.as_ref() %}<input type="hidden" name="date" value="{{ date }}">{% endif %}
+        {% for mark in marks %}<input type="hidden" name="mark{{ loop.index0 }}" value="{{ mark }}">{% endfor %}
+        <button type="submit">Mark these {{ mark_count }} printed</button>
+      </form>
+      {% endif %}
+    </div>
+    <p class="muted">
+      {% if format_stickers %}
+      Sticker sheets for a physical calendar: 4×5 stickers per 8.5×11 sheet, cut along the dashed lines — {{ sheet_count }} sheet(s).
+      {% else %}
+      Letter paper (8.5×11).
+      {% endif %}
+      “New” excludes everything previously marked printed; mark a print run so the next one starts fresh.
+    </p>
+  </div>
+
+  {% if format_stickers %}
+  {% for sheet in sticker_sheets %}
+  <div class="sticker-sheet">
+    {% for sticker in sheet %}
+    <div class="sticker" style="--event-color: {{ sticker.color }}">
+      <span class="sticker-title">{{ sticker.title }}</span>
+      {% for line in sticker.lines %}<span class="sticker-line">{{ line }}</span>{% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+  {% else %}
+  <div class="paper-list">
+    {% for row in paper_rows %}
+    <div class="paper-row" style="--event-color: {{ row.color }}">
+      <span class="paper-label">{{ row.label }}</span>
+      {% for line in row.lines %}<span class="paper-line">{{ line }}</span>{% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

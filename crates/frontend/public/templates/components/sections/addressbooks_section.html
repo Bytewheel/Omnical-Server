@@ -80,6 +80,10 @@
           method="GET">
           <button type="submit">Download</button>
         </form>
+        <a class="button" title="Print this addressbook's contacts as sticker sheets — only contacts not previously marked printed"
+          href="/frontend/user/{{ addressbook.principal }}/addressbook/{{ addressbook.id }}/contacts/print?scope=new&format=stickers">Print stickers</a>
+        <a class="button" title="Print this addressbook's contacts as a letter-paper list — only contacts not previously marked printed"
+          href="/frontend/user/{{ addressbook.principal }}/addressbook/{{ addressbook.id }}/contacts/print?scope=new&format=paper">Print paper</a>
         <edit-addressbook-form
           principal="{{ addressbook.principal }}"
           addr_id="{{ addressbook.id }}"

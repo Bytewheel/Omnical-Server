@@ -51,6 +51,10 @@ pub struct CalendarGridSection {
     /// The create-event form URL.
     pub new_href: String,
     pub can_create: bool,
+    /// The print-page links (`PLAN_NEXT_AGENT_PRINTING.md` §4.4): stickers and
+    /// paper, `scope=new` by default, carrying the displayed month.
+    pub print_stickers_href: String,
+    pub print_paper_href: String,
     pub weeks: Vec<CalendarGridWeek>,
     pub calendars: Vec<CalendarLegendChip>,
 }
@@ -124,7 +128,7 @@ pub fn display_timezone_fallback(cookie_tzid: Option<&str>, fallback: ChronoTz) 
 }
 
 #[must_use]
-fn parse_month(date: Option<&str>, today: NaiveDate) -> NaiveDate {
+pub(super) fn parse_month(date: Option<&str>, today: NaiveDate) -> NaiveDate {
     date.and_then(|d| NaiveDate::parse_from_str(&format!("{d}-01"), "%Y-%m-%d").ok())
         .or_else(|| NaiveDate::from_ymd_opt(today.year(), today.month(), 1))
         .unwrap_or(today)
@@ -132,7 +136,7 @@ fn parse_month(date: Option<&str>, today: NaiveDate) -> NaiveDate {
 
 /// Shift a first-of-month date by `delta` months.
 #[must_use]
-fn shift_month(first: NaiveDate, delta: i32) -> NaiveDate {
+pub(super) fn shift_month(first: NaiveDate, delta: i32) -> NaiveDate {
     let total =
         first.year() * 12 + i32::try_from(first.month()).expect("month is 1-12") - 1 + delta;
     let (year, month0) = (total.div_euclid(12), total.rem_euclid(12));
@@ -316,6 +320,19 @@ async fn build_grid<CS: CalendarStore>(
         .collect();
 
     let can_create = can_create_any(store, user, calendars);
+    // The print links mirror `new_href`'s owner-scoping (group calendars print
+    // under the owning principal's URL) and carry the displayed month.
+    let print_base = if single_calendar {
+        let principal = calendars
+            .first()
+            .map(|c| c.principal.as_str())
+            .unwrap_or_default();
+        let cal_id = calendars.first().map(|c| c.id.as_str()).unwrap_or_default();
+        format!("/frontend/user/{principal}/calendar/{cal_id}/events/print")
+    } else {
+        format!("/frontend/user/{}/events/print", user.id)
+    };
+    let date_param = month.format("%Y-%m");
     let new_href = if single_calendar {
         // The single-calendar grid is owner-scoped in the URL (the path
         // `{user}` segment is the owning principal, same as the Calendars
@@ -347,6 +364,8 @@ async fn build_grid<CS: CalendarStore>(
         times_note: format!("Times shown in {display_tz}"),
         new_href,
         can_create,
+        print_stickers_href: format!("{print_base}?scope=new&format=stickers&date={date_param}"),
+        print_paper_href: format!("{print_base}?scope=new&format=paper&date={date_param}"),
         weeks,
         calendars: chips,
     })
@@ -354,7 +373,7 @@ async fn build_grid<CS: CalendarStore>(
 
 /// Fetch every calendar the user can see (their own plus memberships and
 /// guest shares), mirroring the Calendars tab's listing rule.
-async fn user_calendars<CS: CalendarStore>(
+pub(super) async fn user_calendars<CS: CalendarStore>(
     store: &Arc<CS>,
     user: &Principal,
 ) -> Result<Vec<Calendar>, rustical_store::Error> {

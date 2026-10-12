@@ -39,7 +39,7 @@ use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
 use rustical_store_sqlite::{
     SqliteAddressbookStore, SqliteCalendarSourceStore, SqliteCalendarStore,
     SqliteCollectionShareStore, SqliteDavPushStore, SqliteInviteStore, SqlitePasswordResetStore,
-    SqlitePrincipalStore, SqliteSubscriptionStore,
+    SqlitePrincipalStore, SqlitePrintStore, SqliteSubscriptionStore,
 };
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -94,6 +94,7 @@ fn stores(
     let invite_store = Arc::new(SqliteInviteStore::new(context.cal_store.clone()));
     let share_store = Arc::new(SqliteCollectionShareStore::new(context.cal_store.clone()));
     let password_reset_store = Arc::new(SqlitePasswordResetStore::new(context.cal_store.clone()));
+    let print_store = Arc::new(SqlitePrintStore::new(context.cal_store.clone()));
     AppStores {
         addr_store: Arc::new(context.addr_store.clone()),
         cal_store: Arc::new(context.cal_store.clone()),
@@ -103,6 +104,7 @@ fn stores(
         invite_store,
         share_store,
         password_reset_store,
+        print_store,
     }
 }
 

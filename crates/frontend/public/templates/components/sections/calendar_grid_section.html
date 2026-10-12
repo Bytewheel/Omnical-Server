@@ -6,6 +6,8 @@
       <a href="?date={{ today }}">Today</a>
       <a href="?date={{ next }}" class="nav-arrow" aria-label="Next month">&#8250;</a>
     </div>
+    <a class="button" href="{{ print_stickers_href }}">Print stickers</a>
+    <a class="button" href="{{ print_paper_href }}">Print paper</a>
     {% if can_create %}<a class="button-primary-link" href="{{ new_href }}">New event</a>{% endif %}
   </div>
 

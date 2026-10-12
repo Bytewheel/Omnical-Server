@@ -52,7 +52,7 @@ pub struct ContactItem {
 
 /// Build one [`ContactItem`] out of a stored vCard: name / email / phone plus
 /// the per-object action URLs (the same shape the Tasks list uses).
-fn contact_item(
+pub(super) fn contact_item(
     addressbook_name: &str,
     owner: &str,
     addrbook_id: &str,
@@ -165,6 +165,10 @@ pub struct ContactsSection {
     /// The new-contact form URL — always present (the form itself gates).
     pub new_href: String,
     pub can_create: bool,
+    /// Print-page links (`PLAN_NEXT_AGENT_PRINTING.md` §4.4): stickers and
+    /// paper, `scope=new` by default.
+    pub print_stickers_href: String,
+    pub print_paper_href: String,
 }
 
 impl Section for ContactsSection {
@@ -175,7 +179,7 @@ impl Section for ContactsSection {
 
 /// Every addressbook of the user's own principal and their groups (same
 /// walk as the Tasks page's `user_calendars`).
-async fn user_addressbooks<AS: AddressbookStore>(
+pub(super) async fn user_addressbooks<AS: AddressbookStore>(
     store: &Arc<AS>,
     user: &Principal,
 ) -> Result<Vec<Addressbook>, rustical_store::Error> {
@@ -227,6 +231,12 @@ pub async fn route_contacts<AS: AddressbookStore>(
             contacts,
             new_href: format!("/frontend/user/{user_id}/contacts/new"),
             can_create,
+            print_stickers_href: format!(
+                "/frontend/user/{user_id}/contacts/print?scope=new&format=stickers"
+            ),
+            print_paper_href: format!(
+                "/frontend/user/{user_id}/contacts/print?scope=new&format=paper"
+            ),
         },
     }
     .into_response())

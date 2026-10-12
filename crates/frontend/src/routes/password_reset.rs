@@ -545,13 +545,14 @@ mod tests {
     use axum::body::Body as AxBody;
     use http::{Request, header::SET_COOKIE};
     use rustical_store::{
-        CalendarSourceStore, CollectionShareStore, InviteStore, Secret, SubscriptionStore,
+        CalendarSourceStore, CollectionShareStore, InviteStore, PrintStore, Secret,
+        SubscriptionStore,
         auth::{Principal, PrincipalType},
     };
     use rustical_store_sqlite::{
         SqliteAddressbookStore, SqliteCalendarSourceStore, SqliteCalendarStore,
         SqliteCollectionShareStore, SqliteInviteStore, SqlitePasswordResetStore,
-        SqlitePrincipalStore, SqliteSubscriptionStore, create_db_pool,
+        SqlitePrincipalStore, SqlitePrintStore, SqliteSubscriptionStore, create_db_pool,
     };
     use tower::ServiceExt;
     use tower_sessions::{MemoryStore, SessionManagerLayer};
@@ -594,6 +595,8 @@ mod tests {
                 Arc::new(SqliteCollectionShareStore::new(cal_store.clone()));
             let sub_store: Arc<dyn SubscriptionStore> =
                 Arc::new(SqliteSubscriptionStore::new(cal_store.clone()));
+            let print_store: Arc<dyn PrintStore> =
+                Arc::new(SqlitePrintStore::new(cal_store.clone()));
 
             let router = frontend_router(
                 "/frontend",
@@ -608,6 +611,7 @@ mod tests {
                 invite_store,
                 share_store,
                 reset_store_dyn,
+                print_store,
                 smtp_accounts,
             )
             .layer(

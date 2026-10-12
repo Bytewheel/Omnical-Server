@@ -43,7 +43,7 @@ use lru::LruCache;
 use rustical_store::auth::AuthenticationProvider;
 use rustical_store::{
     CalendarSourceStore, CollectionOperation, CollectionShareStore, InviteStore,
-    PasswordResetStore, SchedulingStore, SubscriptionStore, TenantId,
+    PasswordResetStore, PrintStore, SchedulingStore, SubscriptionStore, TenantId,
 };
 use rustical_store_sqlite::{
     SqliteAddressbookStore, SqliteCalendarStore, SqliteDavPushStore, SqlitePrincipalStore,
@@ -60,7 +60,7 @@ use std::sync::{Arc, Mutex};
 /// hosted, not a target.
 pub const DEFAULT_MAX_CACHED_TENANTS: usize = 64;
 
-/// One tenant's twelve stores, named.
+/// One tenant's thirteen stores, named.
 ///
 /// `AP` stays a generic parameter for the reason §18.11 recorded: the DAV and
 /// frontend routers are generic over a **concrete** authentication provider, so
@@ -89,6 +89,10 @@ pub struct StoreBundle<AP: AuthenticationProvider> {
     pub calendar_source_store: Arc<dyn CalendarSourceStore>,
     pub share_store: Arc<dyn CollectionShareStore>,
     pub password_reset_store: Arc<dyn PasswordResetStore>,
+    /// Print-state tracking for the portal print pages (new-vs-all scope,
+    /// `PLAN_NEXT_AGENT_PRINTING.md` §3.4). Same erasure story as the four
+    /// stores above it.
+    pub print_store: Arc<dyn PrintStore>,
 }
 
 /// The concrete provider type this build uses, so callers need not name it.
@@ -116,6 +120,7 @@ impl<AP: AuthenticationProvider> std::fmt::Debug for StoreBundle<AP> {
             .field("calendar_source_store", &"dyn CalendarSourceStore")
             .field("share_store", &"dyn CollectionShareStore")
             .field("password_reset_store", &"dyn PasswordResetStore")
+            .field("print_store", &"dyn PrintStore")
             .field(
                 "update_recv",
                 &self.update_recv.as_ref().map_or("taken", |_| "held"),
@@ -146,7 +151,7 @@ impl<AP: AuthenticationProvider> StoreBundle<AP> {
 
     /// This bundle's stores, for `make_app_for`.
     ///
-    /// One place that maps a bundle onto [`crate::app::AppStores`], so the eight
+    /// One place that maps a bundle onto [`crate::app::AppStores`], so the
     /// fields can never be supplied in two different orders.
     ///
     /// Note what is **not** a parameter: the tenant. A `StoreBundle` is stores;
@@ -168,6 +173,7 @@ impl<AP: AuthenticationProvider> StoreBundle<AP> {
             invite_store: self.invite_store.clone(),
             share_store: self.share_store.clone(),
             password_reset_store: self.password_reset_store.clone(),
+            print_store: self.print_store.clone(),
         }
     }
 }

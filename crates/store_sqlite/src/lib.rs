@@ -23,6 +23,8 @@ mod invite_store;
 pub use invite_store::SqliteInviteStore;
 mod password_reset_store;
 pub use password_reset_store::SqlitePasswordResetStore;
+mod print_store;
+pub use print_store::SqlitePrintStore;
 mod principal_store;
 pub use principal_store::SqlitePrincipalStore;
 mod scheduling_store;
