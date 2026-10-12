@@ -154,11 +154,8 @@
       <a class="client-help-link" href="/frontend/user/{{ calendar.principal }}/calendar/{{ calendar.id }}">Set up on your device…</a>
       <div class="actions">
         <form action="/caldav/principal/{{ calendar.principal }}/{{ calendar.id }}" target="_blank" method="GET">
-          <button type="submit">Download</button>
-        </form>
-        <form action="/caldav/principal/{{ calendar.principal }}/{{ calendar.id }}" target="_blank" method="GET">
           <input type="hidden" name="dailyview" value="1">
-          <button type="submit" title="The stock Punkt MP02 calendar (DailyView) syncs aphy.io, which never expands a recurrence — this download flattens recurring events to concrete dated instances and rewrites all-day events to local midnights, so an import there shows every event on its own day.">Download (Punkt MP02)</button>
+          <button type="submit" title="Phone-shaped export (the stock Punkt MP02 calendar syncs aphy.io, which never expands a recurrence — this download flattens recurring events to concrete dated instances and rewrites all-day events to local midnights, so an import there shows every event on its own day, daily and weekly views included).">Download</button>
         </form>
         <edit-calendar-form
           principal="{{ calendar.principal }}"

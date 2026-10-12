@@ -56,7 +56,11 @@
 //! `dav.aphy.app`, never omnical, so its only ingest of this server's data is
 //! a manual import of the exported `.ics`. [`build_export_ics_dailyview`]
 //! shapes that download for the phone: recurrences flattened to concrete
-//! instances over a 90-day horizon, all-day lines as local midnights.
+//! instances over a 90-day horizon, all-day lines as local midnights — and
+//! (§18.39/§18.40, the aphy-native shape) each instance carries a
+//! materialized `DTEND` pair in the deployment's own `TZID`, the form aphy
+//! itself writes: `DTSTART;TZID=America/New_York:20261012T190000` +
+//! `DTEND;TZID=America/New_York:20261012T190100`.
 
 use std::borrow::Cow;
 
@@ -315,7 +319,7 @@ pub fn build_export_ics_dailyview(
                             win_start,
                             win_end,
                         ) {
-                            out.push_str(&flattened_instance(&instance));
+                            out.push_str(&flattened_instance(&instance, tz, timezone));
                         }
                     }
                 } else {
@@ -353,25 +357,50 @@ pub fn build_export_ics_dailyview(
 /// One flattened instance of a recurring event: the expansion's event with
 /// the master's UID suffixed by the instance's own date (deterministic, so a
 /// re-import upserts instead of duplicating on aphy) and its `RECURRENCE-ID`
-/// dropped (a lone override line is not an event). The expansion carries each
-/// instance's length as `DURATION` only (its typed `DTEND` never reaches the
-/// content lines) — but a `DTSTART`+`DTEND` pair is the one shape every
-/// renderer lays out (aphy's month grid paints by `DTSTART` date alone; day
-/// and week views need an end), so the `DURATION` line is swapped for a
-/// materialized `DTEND` at the expansion's own computed end (§18.39).
-/// Everything else — `DTSTART` at the occurrence, summary, alarms stripped
-/// by the expansion — rides along verbatim.
-fn flattened_instance(instance: &IcalEvent) -> String {
+/// dropped (a lone override line is not an event). Two shapes the expansion
+/// does not give (§18.39/§18.40), both because they are what aphy-native
+/// events carry and generic renderers lay out:
+///
+/// * the `DURATION`-only length is swapped for a materialized `DTEND` —
+///   a `DTSTART`+`DTEND` pair is the one shape every renderer lays out
+///   (aphy's month grid paints by `DTSTART` date alone; day and week views
+///   need an end);
+/// * timed lines are served in the deployment's own zone —
+///   `DTSTART;TZID=America/New_York:20261012T190000` — the form aphy itself
+///   writes, rather than the expansion's UTC `Z` instant. The phone's
+///   `getTimestamp` TZID branch is its native path, and a consumer that
+///   mishandles `Z` (aphy's week/day grids did) gets the shape it expects.
+///
+/// DATE-valued (all-day) instances keep their day shape; the §18.36 pass
+/// applied to the assembled export rewrites those lines to the same
+/// local-midnight frame.
+fn flattened_instance(instance: &IcalEvent, tz: chrono_tz::Tz, tzid: &str) -> String {
     let suffix = match &instance.dtstart.0 {
         CalDateOrDateTime::Date(date) => date.naive_date().format("%Y%m%d").to_string(),
         CalDateOrDateTime::DateTime(datetime) => {
             datetime.utc().format("%Y%m%dT%H%M%SZ").to_string()
         }
     };
+    let tzid_params =
+        || -> ContentLineParams { vec![("TZID".to_owned(), vec![tzid.to_owned()])].into() };
     let mut lines: Vec<ContentLine> = instance.get_properties().clone();
     for line in &mut lines {
-        if line.name == "UID" {
-            line.value = format!("{}-{suffix}", line.value);
+        match line.name.as_str() {
+            "UID" => line.value = format!("{}-{suffix}", line.value),
+            // The expansion's instant is UTC `Z`; aphy-native events are
+            // TZID-local, so serve the occurrence in the deployment's zone.
+            "DTSTART" => {
+                let CalDateOrDateTime::DateTime(datetime) = &instance.dtstart.0 else {
+                    continue;
+                };
+                line.value = datetime
+                    .utc()
+                    .with_timezone(&tz)
+                    .format("%Y%m%dT%H%M%S")
+                    .to_string();
+                line.params = tzid_params();
+            }
+            _ => {}
         }
     }
     lines.retain(|line| !matches!(line.name.as_str(), "RECURRENCE-ID" | "DURATION"));
@@ -391,11 +420,25 @@ fn flattened_instance(instance: &IcalEvent) -> String {
                         CalDateOrDateTime::Date(CalDate(end_date, caldata::types::Tz::utc())),
                         ContentLineParams::default(),
                     )
+                    .into()
                 }),
-            _ => Some(dtend.clone()),
+            _ => match &dtend.0 {
+                CalDateOrDateTime::DateTime(datetime) => Some(ContentLine {
+                    name: "DTEND".to_owned(),
+                    value: datetime
+                        .utc()
+                        .with_timezone(&tz)
+                        .format("%Y%m%dT%H%M%S")
+                        .to_string(),
+                    params: tzid_params(),
+                }),
+                // A degenerate DATE-valued end on a timed start: skip the
+                // line rather than guess a shape.
+                CalDateOrDateTime::Date(_) => None,
+            },
         };
         if let Some(end) = end {
-            lines.push(end.into());
+            lines.push(end);
         }
     }
     let mut out = String::from("BEGIN:VEVENT\r\n");
@@ -838,16 +881,20 @@ mod tests {
             "today's occurrence, UID suffixed by its own stamp: {out}"
         );
         assert!(
-            out.contains("DTSTART:20261019T230000Z\r\n"),
-            "next Monday's occurrence is flattened too (EDT): {out}"
+            out.contains("DTSTART;TZID=America/New_York:20261019T190000\r\n"),
+            "next Monday's occurrence is flattened too (EDT local): {out}"
         );
         assert!(
-            out.contains("DTSTART:20261012T230000Z\r\n"),
-            "the occurrence's own start as a UTC DATE-TIME: {out}"
+            out.contains("DTSTART;TZID=America/New_York:20261012T190000\r\n"),
+            "the occurrence's start in the deployment's own zone — the form aphy itself writes (§18.40): {out}"
         );
         assert!(
-            out.contains("DTEND:20261012T230100Z\r\n"),
-            "the master's length materialized as a concrete DTEND (§18.39): {out}"
+            !out.contains("DTSTART:2026"),
+            "no UTC Z-form instant lines are exported (§18.40): {out}"
+        );
+        assert!(
+            out.contains("DTEND;TZID=America/New_York:20261012T190100\r\n"),
+            "the master's length materialized as a local DTEND pair (§18.39/§18.40): {out}"
         );
         assert!(
             !out.contains("DURATION:"),

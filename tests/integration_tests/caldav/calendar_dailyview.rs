@@ -290,6 +290,18 @@ async fn test_export_dailyview_flattens(
         body.contains("UID:daily-shim-test@omnical-"),
         "per-instance UID suffixes: {body}"
     );
+    assert!(
+        body.contains("DTSTART;TZID=America/New_York:"),
+        "instance starts in the deployment's own zone — the form aphy itself writes (§18.40): {body}"
+    );
+    assert!(
+        body.contains("DTEND;TZID=America/New_York:"),
+        "materialized local DTEND pairs, not DURATION (§18.39/§18.40): {body}"
+    );
+    assert!(
+        !body.contains("DURATION:"),
+        "no DURATION-only instances are exported: {body}"
+    );
     let instances = body.matches("BEGIN:VEVENT\r\n").count();
     assert!(
         instances > 1,
