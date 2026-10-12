@@ -312,16 +312,32 @@ ul.collection-list {
       border-color: color-mix(in srgb, var(--border), var(--primary) 30%);
     }
 
-    > a {
-      position: absolute;
-      inset: 0;
-      z-index: 0;
+    /* Whole-tile navigation applies only to tiles that opt in with a
+       direct <a> child (the group tiles): the anchor spans the tile and
+       the content lets clicks fall through to it. The collection tiles
+       (calendars, addressbooks, linked platforms) carry forms and inputs
+       of their own, so they must keep their pointer events — clicks on an
+       email field must not navigate away from the tile. */
+    &:has(> a) {
+      > a {
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+      }
+
+      .inner {
+        pointer-events: none;
+
+        button, a {
+          pointer-events: all;
+          position: relative;
+        }
+      }
     }
 
     .inner {
       position: relative;
       z-index: 1;
-      pointer-events: none;
       display: grid;
       grid-template-columns: 1fr 1em;
       grid-template-areas:
@@ -337,11 +353,6 @@ ul.collection-list {
       grid-template-rows: 1em auto auto auto auto auto 1em;
       padding-left: 1em;
       padding-top: 1em;
-
-      button, a {
-        pointer-events: all;
-        position: relative;
-      }
 
       .title {
         grid-area: title;
@@ -379,7 +390,6 @@ ul.collection-list {
 
       .actions {
         grid-area: actions;
-        pointer-events: all;
         display: flex;
         flex-wrap: wrap;
         align-items: center;
@@ -448,7 +458,8 @@ span.chip {
 
 .subscribe-block,
 .access-block,
-.client-help {
+.client-help,
+.client-help-link {
   grid-area: metadata;
   grid-row: inherit;
 }
@@ -544,6 +555,15 @@ form.inline-form {
 
 .client-help.profile-intro {
   margin-bottom: 2em;
+}
+
+/* The calendar tile's single help link: the full per-client setup
+   instructions live on the calendar page — the tile links there instead
+   of carrying them inline. */
+.client-help-link {
+  font-size: .85em;
+  font-weight: 600;
+  color: var(--text-muted);
 }
 
 /* The Profile page's collapsible sections — the former top-level tabs

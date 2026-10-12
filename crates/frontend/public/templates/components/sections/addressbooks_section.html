@@ -14,7 +14,6 @@
   {% for tile in addressbooks %}
   {% let addressbook = tile.addressbook %}
   <li class="collection-list-item" id="ab-{{ addressbook.id }}">
-    <a href="/frontend/user/{{ addressbook.principal }}/addressbook/{{ addressbook.id}}"></a>
     <div class="inner">
       <span class="title">
         {%- if addressbook.principal != user.id -%}{{ addressbook.principal }}/{%- endif -%}
@@ -111,7 +110,6 @@
 <ul class="collection-list">
   {% for (meta, birthday_cal, addressbook) in deleted_addressbooks %}
   <li class="collection-list-item">
-    <a href="/frontend/user/{{ addressbook.principal }}/addressbook/{{ addressbook.id}}"></a>
     <div class="inner">
       <span class="title">
         {%- if addressbook.principal != user.id -%}{{ addressbook.principal }}/{%- endif -%}

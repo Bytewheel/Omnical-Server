@@ -248,11 +248,23 @@ async fn test_share_tab_removed_and_tile_blocks_live_on_calendars_tab(
     assert!(body.contains("Create subscribe link"));
     // The full-access block with its label renders on every tile.
     assert!(body.contains("Full access (CalDAV)"));
-    // Per-client instructions render with the client matrix (§17.15 §6).
+    // The tile is no longer one big link to the calendar page: the
+    // how-to-use info screen is reached through the tile's single help
+    // link (the full client matrix is pinned on the calendar page in
+    // frontend_calendars.rs).
     assert!(body.contains("Set up on your device"));
-    assert!(body.contains("Google Calendar"));
-    assert!(body.contains("HawkBook/DavX"));
-    assert!(body.contains("not possible"));
+    assert!(
+        body.contains("href=\"/frontend/user/user/calendar/personal\""),
+        "single help link on the own tile: {body}"
+    );
+    assert!(
+        body.contains("href=\"/frontend/user/testgroup/calendar/groupcal\""),
+        "single help link on the group tile: {body}"
+    );
+    assert!(
+        !body.contains("calendar/personal\"></a>"),
+        "no whole-tile overlay anchor: {body}"
+    );
 
     // Addressbooks tab: the share-link block lives there now.
     let body = get_page(&app, "/frontend/user/user/addressbook").await;
@@ -300,10 +312,16 @@ async fn test_share_create_shows_url_on_calendar_tile_and_serves_export(
     // the group tile.
     assert_eq!(body.matches("Create subscribe link").count(), 1);
 
-    // The instructions block offers both URL variants (§17.15 §6).
+    // The instructions live on the calendar page now (the tile's single
+    // help link) and offer both URL variants there (§17.15 §6).
+    let cal_page = get_page(&app, "/frontend/user/user/calendar/personal").await;
+    assert!(
+        cal_page.contains(&url),
+        "https variant on the calendar page"
+    );
     let webcal_url = url.replacen("https://", "webcal://", 1);
     assert!(
-        body.contains(&webcal_url),
+        cal_page.contains(&webcal_url),
         "webcal variant shown: {webcal_url}"
     );
 
@@ -1235,13 +1253,10 @@ async fn test_calendar_tile_renders_full_share_state_cas_regression(
     // The subscribe block: URL + Copy + Revoke (never a create button).
     let url = format!("https://public.example/export/{token}.ics");
     assert!(body.contains(&url), "subscribe URL shown: {body}");
-    // The URL appears 5 times on the CAS tile: block anchor + text + Copy
-    // button, instructions code + Copy button.
-    assert_eq!(
-        body.matches(&url).count(),
-        5,
-        "URL on the subscribe block and in the instructions"
-    );
+    // The URL appears 3 times on the CAS tile: block anchor + text + Copy
+    // button (the per-client instructions with their copies live on the
+    // calendar page now, behind the tile's single help link).
+    assert_eq!(body.matches(&url).count(), 3, "URL on the subscribe block");
     assert!(
         body.matches("Create subscribe link").count() >= 1,
         "other tiles keep their create button"

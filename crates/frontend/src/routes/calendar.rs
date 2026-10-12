@@ -66,9 +66,6 @@ pub struct CalendarTile {
     /// The calendar's credential-less subscribe-link URL
     /// (`/export/{token}.ics`), when a subscription exists (§17.7).
     pub subscribe_url: Option<String>,
-    /// The same URL with the `webcal://` scheme — display variant only, the
-    /// stored token keeps working over plain https (§17.15).
-    pub subscribe_url_webcal: Option<String>,
     /// Subscription id of the subscribe link (for Revoke) — `None` when the
     /// calendar has no link yet.
     pub sub_id: Option<String>,
@@ -133,8 +130,6 @@ pub struct CalendarsSection {
     pub user: Principal,
     pub calendars: Vec<CalendarTile>,
     pub deleted_calendars: Vec<(CollectionMetadata, Calendar)>,
-    /// `CalDAV` endpoint printed in the per-client instructions (§17.15).
-    pub caldav_url: String,
     pub credential_server_url: Option<String>,
     pub credential_username: Option<String>,
     pub credential_token: Option<String>,
@@ -263,9 +258,6 @@ pub async fn build_calendars_section<CS: CalendarStore>(
             can_generate,
             can_invite,
             subscribe_url: sub.as_ref().map(|s| export_url(base_url, &s.token, s.kind)),
-            subscribe_url_webcal: sub
-                .as_ref()
-                .map(|s| webcal_variant(&export_url(base_url, &s.token, s.kind))),
             sub_id: sub.as_ref().map(|s| s.id.clone()),
             sub_created_at: sub.and_then(|s| s.created_at),
             can_subscribe,
@@ -314,7 +306,6 @@ pub async fn build_calendars_section<CS: CalendarStore>(
         user: user.clone(),
         calendars: calendar_infos,
         deleted_calendars: deleted_calendar_infos,
-        caldav_url: format!("{base_url}/caldav"),
         credential_server_url,
         credential_username,
         credential_token,
