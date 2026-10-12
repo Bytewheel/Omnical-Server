@@ -62,8 +62,9 @@ use std::borrow::Cow;
 
 use caldata::component::{CalendarInnerData, Component, IcalEvent, IcalTimeZone};
 use caldata::generator::Emitter;
-use caldata::parser::ContentLine;
-use caldata::types::CalDateOrDateTime;
+use caldata::parser::{ContentLine, ContentLineParams};
+use caldata::property::IcalDTENDProperty;
+use caldata::types::{CalDate, CalDateOrDateTime};
 use chrono::{DateTime, Days, NaiveDate, TimeZone, Utc};
 use http::HeaderMap;
 use rustical_ical::CalendarObject;
@@ -352,9 +353,14 @@ pub fn build_export_ics_dailyview(
 /// One flattened instance of a recurring event: the expansion's event with
 /// the master's UID suffixed by the instance's own date (deterministic, so a
 /// re-import upserts instead of duplicating on aphy) and its `RECURRENCE-ID`
-/// dropped (a lone override line is not an event). Everything else —
-/// `DTSTART` at the occurrence, the master's `DURATION`, summary, alarms
-/// stripped by the expansion — rides along verbatim.
+/// dropped (a lone override line is not an event). The expansion carries each
+/// instance's length as `DURATION` only (its typed `DTEND` never reaches the
+/// content lines) — but a `DTSTART`+`DTEND` pair is the one shape every
+/// renderer lays out (aphy's month grid paints by `DTSTART` date alone; day
+/// and week views need an end), so the `DURATION` line is swapped for a
+/// materialized `DTEND` at the expansion's own computed end (§18.39).
+/// Everything else — `DTSTART` at the occurrence, summary, alarms stripped
+/// by the expansion — rides along verbatim.
 fn flattened_instance(instance: &IcalEvent) -> String {
     let suffix = match &instance.dtstart.0 {
         CalDateOrDateTime::Date(date) => date.naive_date().format("%Y%m%d").to_string(),
@@ -368,7 +374,30 @@ fn flattened_instance(instance: &IcalEvent) -> String {
             line.value = format!("{}-{suffix}", line.value);
         }
     }
-    lines.retain(|line| line.name != "RECURRENCE-ID");
+    lines.retain(|line| !matches!(line.name.as_str(), "RECURRENCE-ID" | "DURATION"));
+    if let Some(dtend) = &instance.dtend {
+        // A DATE-valued instance keeps its day shape: the typed end arrives
+        // as a UTC DATE-TIME (`20260410T000000Z`) next to a local-midnight
+        // DTSTART — mixed frames, a 20h bar under DST — so materialize it
+        // as the next calendar day(s) instead, and let the §18.36 pass give
+        // both ends the same local-midnight frame.
+        let typed_days = (dtend.0.utc() - instance.dtstart.0.utc()).num_days();
+        let end = match (&instance.dtstart.0, typed_days) {
+            (CalDateOrDateTime::Date(date), days) if days >= 1 => date
+                .naive_date()
+                .checked_add_days(Days::new(days.unsigned_abs()))
+                .map(|end_date| {
+                    IcalDTENDProperty(
+                        CalDateOrDateTime::Date(CalDate(end_date, caldata::types::Tz::utc())),
+                        ContentLineParams::default(),
+                    )
+                }),
+            _ => Some(dtend.clone()),
+        };
+        if let Some(end) = end {
+            lines.push(end.into());
+        }
+    }
     let mut out = String::from("BEGIN:VEVENT\r\n");
     out.push_str(&lines.generate());
     out.push_str("END:VEVENT\r\n");
@@ -816,7 +845,14 @@ mod tests {
             out.contains("DTSTART:20261012T230000Z\r\n"),
             "the occurrence's own start as a UTC DATE-TIME: {out}"
         );
-        assert!(out.contains("DURATION:"), "the master's length rides along");
+        assert!(
+            out.contains("DTEND:20261012T230100Z\r\n"),
+            "the master's length materialized as a concrete DTEND (§18.39): {out}"
+        );
+        assert!(
+            !out.contains("DURATION:"),
+            "no DURATION lines are exported (§18.39): {out}"
+        );
         assert_eq!(
             out.matches("BEGIN:VEVENT\r\n").count(),
             13,
@@ -847,6 +883,14 @@ mod tests {
         assert!(
             out.contains("UID:birthday-1962@omnical-20260409\r\n"),
             "DATE-valued instances suffix by date: {out}"
+        );
+        assert!(
+            out.contains("DTEND;TZID=America/New_York:20260410T000000\r\n"),
+            "the day of length materialized as a local-midnight DTEND (§18.39): {out}"
+        );
+        assert!(
+            !out.contains("DURATION:"),
+            "no DURATION lines are exported (§18.39): {out}"
         );
         assert!(
             !out.contains("19620409"),
