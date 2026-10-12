@@ -36,6 +36,7 @@ fn test_config(db_path: &Path) -> Config {
         caldav: Default::default(),
         scheduling: Default::default(),
         subscriptions: Default::default(),
+        mirror: Default::default(),
         registration: Default::default(),
         maintenance: Default::default(),
         appliance: Default::default(),

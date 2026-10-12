@@ -110,10 +110,11 @@ impl DailyviewContext {
     }
 }
 
-/// Serve `object` to `DailyView`: canonical bytes to everyone else, and to the
-/// phone (User-Agent prefix + armed timezone) the two wire forms above — the
-/// first in-window occurrence of a recurring event, all-day lines as local
-/// midnights.
+/// Serve `object` to `DailyView`: canonical bytes to everyone else.
+///
+/// To the phone (User-Agent prefix + armed timezone) it serves the two
+/// wire forms above — the first in-window occurrence of a recurring
+/// event, all-day lines as local midnights.
 ///
 /// Every fall-through serves the canonical serialization (optionally with the
 /// all-day pass): a non-recurring event, a recurring event with no occurrence
@@ -244,17 +245,22 @@ fn instance_body(instance: &IcalEvent, timezone: &str) -> String {
 // canonical apart from the all-day pass.
 
 /// How many days of concrete instances the `DailyView` export flattens a
-/// recurring event into. The phone's window is 4 days, but its ingest is a
-/// one-shot manual import on aphy — a horizon this long keeps one import
-/// showing correct Mondays for a quarter, and each instance only ever
-/// displays on its own day.
+/// recurring event into.
+///
+/// The phone's window is 4 days, but its ingest is a one-shot manual
+/// import on aphy — a horizon this long keeps one import showing correct
+/// Mondays for a quarter, and each instance only ever displays on its
+/// own day.
 pub const DAILYVIEW_EXPORT_HORIZON_DAYS: u64 = 90;
 
-/// Build the DailyView-shaped export of a calendar: the canonical envelope
-/// (`VERSION`/`PRODID`/`CALSCALE` + `X-WR-*` metadata), a `VTIMEZONE` for the
-/// deployment's zone, and every object DailyView-consumable — recurring
-/// events flattened to their occurrences over
-/// [`DAILYVIEW_EXPORT_HORIZON_DAYS`] days, all-day lines as local midnights.
+/// Build the DailyView-shaped export of a calendar: the canonical
+/// envelope, a `VTIMEZONE` for the deployment's zone, and every object
+/// DailyView-consumable.
+///
+/// The envelope is `VERSION`/`PRODID`/`CALSCALE` + `X-WR-*` metadata;
+/// recurring events are flattened to their occurrences over
+/// [`DAILYVIEW_EXPORT_HORIZON_DAYS`] days, all-day lines as local
+/// midnights.
 ///
 /// Falls back to the canonical [`crate::calendar::methods::get::build_export_ics`]
 /// when `timezone` does not parse: the export must never be wrong, only
@@ -282,21 +288,11 @@ pub fn build_export_ics_dailyview(
         out.push_str(&vtimezone.generate());
     }
 
-    let today = now.with_timezone(&tz).date_naive();
-    let Some(win_last_day) = today.checked_add_days(Days::new(DAILYVIEW_EXPORT_HORIZON_DAYS))
+    let Some((today, win_last_day, win_start, win_end)) =
+        dailyview_window(tz, now, DAILYVIEW_EXPORT_HORIZON_DAYS)
     else {
         return crate::calendar::methods::get::build_export_ics(calendar, objects);
     };
-    // Date-valued instances compare as local dates; timed ones as the UTC
-    // instants caldata's expansion produces.
-    let Some(win_start_local) = today
-        .and_hms_opt(0, 0, 0)
-        .and_then(|midnight| tz.from_local_datetime(&midnight).single())
-    else {
-        return crate::calendar::methods::get::build_export_ics(calendar, objects);
-    };
-    let win_start = win_start_local.with_timezone(&Utc);
-    let win_end = win_start + chrono::Duration::days(DAILYVIEW_EXPORT_HORIZON_DAYS.cast_signed());
 
     for (_, object) in objects {
         let object: caldata::component::IcalCalendarObject = object.into();
@@ -351,6 +347,93 @@ pub fn build_export_ics_dailyview(
     match rewrite_date_valued_lines(&out, timezone) {
         Cow::Borrowed(_) => out,
         Cow::Owned(rewritten) => rewritten,
+    }
+}
+
+/// The flattening window shared by the export route (§18.38) and the push
+/// mirror's phone-instance feed (§18.41): `[today local midnight, +horizon
+/// days)`, computed in the deployment's own zone. Date-valued instances
+/// compare as local dates; timed ones as the UTC instants caldata's
+/// expansion produces.
+fn dailyview_window(
+    tz: chrono_tz::Tz,
+    now: DateTime<Utc>,
+    horizon_days: u64,
+) -> Option<(NaiveDate, NaiveDate, DateTime<Utc>, DateTime<Utc>)> {
+    let today = now.with_timezone(&tz).date_naive();
+    let win_last_day = today.checked_add_days(Days::new(horizon_days))?;
+    let win_start_local = today
+        .and_hms_opt(0, 0, 0)
+        .and_then(|midnight| tz.from_local_datetime(&midnight).single())?;
+    let win_start = win_start_local.with_timezone(&Utc);
+    let win_end = win_start + chrono::Duration::days(horizon_days.cast_signed());
+    Some((today, win_last_day, win_start, win_end))
+}
+
+/// §18.41 mirror: the flattened instances of one object, returned
+/// individually so the mirror can `PUT` each as its own object.
+///
+/// The same blocks the export route concatenates into its single
+/// envelope. Empty for non-recurring objects and for anything but
+/// recurring `VEVENT`s (their masters are mirrored canonically and serve
+/// the phone directly).
+#[must_use]
+pub fn flattened_instances_of_object(
+    object: CalendarObject,
+    timezone: &str,
+    now: DateTime<Utc>,
+    horizon_days: u64,
+) -> Vec<String> {
+    let Ok(tz) = timezone.parse::<chrono_tz::Tz>() else {
+        return vec![];
+    };
+    let Some((today, win_last_day, win_start, win_end)) = dailyview_window(tz, now, horizon_days)
+    else {
+        return vec![];
+    };
+    let object: caldata::component::IcalCalendarObject = object.into();
+    let CalendarInnerData::Event(main, overrides) = object.get_inner() else {
+        return vec![];
+    };
+    if !main.has_rruleset() {
+        return vec![];
+    }
+    // Coarse bounds for the expansion (a day of slack each side — the
+    // rrule set's after/before are exclusive); the filter below is exact.
+    let instances = main.expand_recurrence(
+        Some(win_start - chrono::Duration::days(1)),
+        Some(win_end + chrono::Duration::days(1)),
+        overrides,
+    );
+    instances
+        .iter()
+        .filter(|instance| {
+            instance_in_window(&instance.dtstart.0, today, win_last_day, win_start, win_end)
+        })
+        .map(|instance| flattened_instance(instance, tz, timezone))
+        .collect()
+}
+
+/// §18.41 mirror: one flattened instance as a standalone object body —
+/// byte-identical to what a manual import of the shaped export carried
+/// for this instance.
+///
+/// The §18.38 envelope, the deployment's `VTIMEZONE`, the instance
+/// block, and the §18.36 all-day pass.
+#[must_use]
+pub fn dailyview_instance_body(instance_vevent: &str, timezone: &str) -> String {
+    let mut out = String::from(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:RustiCal Export (DailyView)\r\nCALSCALE:GREGORIAN\r\n",
+    );
+    if let Some(vtimezone) = IcalTimeZone::from_tzid(timezone) {
+        out.push_str(&vtimezone.generate());
+    }
+    out.push_str(instance_vevent);
+    out.push_str("END:VCALENDAR\r\n");
+
+    match rewrite_date_valued_lines(&out, timezone) {
+        std::borrow::Cow::Borrowed(_) => out,
+        std::borrow::Cow::Owned(rewritten) => rewritten,
     }
 }
 
@@ -471,10 +554,12 @@ fn instance_in_window(
     }
 }
 
-/// Serve `body` for `user_agent`, rewriting DATE-valued `DTSTART`/`DTEND`
-/// into TZID-qualified midnight DATE-TIMEs when the client is `DailyView`
-/// and the shim is configured (`[caldav] dailyview_timezone`). Every other
-/// client — and a disabled or absent timezone — receives the body unchanged.
+/// Serve `body` for `user_agent`: rewrite DATE-valued `DTSTART`/`DTEND`
+/// into TZID-qualified midnight DATE-TIMEs for the `DailyView` client.
+///
+/// The rewrite fires only when the client is `DailyView` and the shim is
+/// configured (`[caldav] dailyview_timezone`); every other client — and
+/// a disabled or absent timezone — receives the body unchanged.
 #[must_use]
 pub fn rewrite_all_day_ics<'a>(
     body: &'a str,

@@ -128,6 +128,7 @@ pub async fn cmd_guest_shares(args: GuestSharesArgs, config: Config) -> anyhow::
         share_store,
         _,
         _,
+        _,
     ) = get_data_stores(true, &crate::tenancy::cli_data_store(&config).await?).await?;
 
     match args.command {

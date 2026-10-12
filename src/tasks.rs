@@ -55,6 +55,43 @@ pub async fn cleanup_trashed_calendar_entities(
     }
 }
 
+/// The §18.41 push-mirror loop: one task per configured target, ticking on
+/// the target's own cadence (`interval_secs`, floored at one minute — a
+/// zero would panic `tokio::time::interval`) until shutdown. The first
+/// tick fires immediately, so a restarted server converges the mirror
+/// before its first waiting period.
+pub async fn run_mirror_target(
+    target: crate::config::MirrorTargetConfig,
+    cal_store: std::sync::Arc<dyn rustical_store::CalendarStore>,
+    mirror_store: std::sync::Arc<dyn rustical_store::MirrorStore>,
+    timezone: String,
+    shutdown_signal: impl Future + Send + 'static,
+) {
+    let mut shutdown_signal = core::pin::pin!(shutdown_signal);
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+        target.interval_secs.max(60),
+    ));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                if let Err(error) = crate::mirror::sync_target(
+                    &target,
+                    &*cal_store,
+                    &*mirror_store,
+                    &timezone,
+                    chrono::Utc::now(),
+                )
+                .await
+                {
+                    tracing::warn!(?error, target = %target.name, "mirror sync failed");
+                }
+            }
+            _ = &mut shutdown_signal => {
+                break;
+            }
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use core::future;

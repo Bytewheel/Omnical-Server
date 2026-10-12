@@ -42,7 +42,7 @@
 use lru::LruCache;
 use rustical_store::auth::AuthenticationProvider;
 use rustical_store::{
-    CalendarSourceStore, CollectionOperation, CollectionShareStore, InviteStore,
+    CalendarSourceStore, CollectionOperation, CollectionShareStore, InviteStore, MirrorStore,
     PasswordResetStore, PrintStore, SchedulingStore, SubscriptionStore, TenantId,
 };
 use rustical_store_sqlite::{
@@ -93,6 +93,11 @@ pub struct StoreBundle<AP: AuthenticationProvider> {
     /// `PLAN_NEXT_AGENT_PRINTING.md` §3.4). Same erasure story as the four
     /// stores above it.
     pub print_store: Arc<dyn PrintStore>,
+    /// Push-mirror state (§18.41): which objects each `[mirror]` target last
+    /// wrote to its remote. Not consumed by the HTTP surface at all — the
+    /// background mirror loop and `rustical mirror sync` read it — but it
+    /// lives here so it shares the tenant's pool like every other store.
+    pub mirror_store: Arc<dyn MirrorStore>,
 }
 
 /// The concrete provider type this build uses, so callers need not name it.
@@ -121,6 +126,7 @@ impl<AP: AuthenticationProvider> std::fmt::Debug for StoreBundle<AP> {
             .field("share_store", &"dyn CollectionShareStore")
             .field("password_reset_store", &"dyn PasswordResetStore")
             .field("print_store", &"dyn PrintStore")
+            .field("mirror_store", &"dyn MirrorStore")
             .field(
                 "update_recv",
                 &self.update_recv.as_ref().map_or("taken", |_| "held"),

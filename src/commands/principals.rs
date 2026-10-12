@@ -108,7 +108,7 @@ pub enum PrincipalsCommand {
     clippy::too_many_lines
 )]
 pub async fn cmd_principals(args: PrincipalsArgs, config: Config) -> anyhow::Result<()> {
-    let (_, _, _, principal_store, _, _, _, _, _, _, _, _) =
+    let (_, _, _, principal_store, _, _, _, _, _, _, _, _, _) =
         get_data_stores(true, &crate::tenancy::cli_data_store(&config).await?).await?;
     match args.command {
         PrincipalsCommand::List => {

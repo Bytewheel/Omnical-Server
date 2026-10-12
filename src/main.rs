@@ -6,8 +6,8 @@ use figment::providers::{Env, Format, Toml};
 use rustical::config::Config;
 use rustical::{Args, Command, commands::tenants::cmd_tenants, commands::upgrade::cmd_upgrade};
 use rustical::{
-    cmd_backup, cmd_gen_config, cmd_guest_shares, cmd_health, cmd_invites, cmd_principals,
-    cmd_restore, cmd_serve, cmd_setup, cmd_subscriptions,
+    cmd_backup, cmd_gen_config, cmd_guest_shares, cmd_health, cmd_invites, cmd_mirror,
+    cmd_principals, cmd_restore, cmd_serve, cmd_setup, cmd_subscriptions,
 };
 use rustical_store::tenant_store::TenantStore;
 use std::path::PathBuf;
@@ -38,6 +38,7 @@ async fn main() -> Result<()> {
         Command::Subscriptions(subscriptions_args) => {
             cmd_subscriptions(subscriptions_args, parse_config().await?).await
         }
+        Command::Mirror(mirror_args) => cmd_mirror(mirror_args, parse_config().await?).await,
         Command::Invites(invites_args) => cmd_invites(invites_args, parse_config().await?).await,
         Command::GuestShare(guest_share_args) => {
             cmd_guest_shares(guest_share_args, parse_config().await?).await

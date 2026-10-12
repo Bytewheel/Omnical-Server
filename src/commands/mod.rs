@@ -8,6 +8,7 @@ pub mod guest_shares;
 mod health;
 pub mod invites;
 pub mod membership;
+pub mod mirror;
 pub mod principals;
 pub mod setup;
 pub mod subscriptions;
@@ -23,6 +24,7 @@ pub use backup::{
 pub use guest_shares::{GuestSharesArgs, cmd_guest_shares};
 pub use health::{HealthArgs, cmd_health};
 pub use invites::{InvitesArgs, cmd_invites};
+pub use mirror::{MirrorArgs, cmd_mirror};
 pub use principals::{PrincipalsArgs, cmd_principals};
 pub use setup::{
     RegistrationChoice, SetupAnswers, SetupArgs, SetupReport, TlsChoice, cmd_setup, run_setup,

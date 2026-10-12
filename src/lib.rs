@@ -14,8 +14,8 @@ use rustical_scheduling::Scheduler;
 use rustical_store::auth::AuthenticationProvider;
 use rustical_store::{AddressbookStore, CalendarStore, CollectionOperation, PrefixedCalendarStore};
 use rustical_store::{
-    CalendarSourceStore, CollectionShareStore, InviteStore, PasswordResetStore, PrintStore,
-    SchedulingStore, SubscriptionStore,
+    CalendarSourceStore, CollectionShareStore, InviteStore, MirrorStore, PasswordResetStore,
+    PrintStore, SchedulingStore, SubscriptionStore,
 };
 use rustical_store_sqlite::SqliteAddressbookStore;
 use rustical_store_sqlite::SqliteCalendarStore;
@@ -24,7 +24,7 @@ use rustical_store_sqlite::SqliteSchedulingStore;
 use rustical_store_sqlite::SqliteSubscriptionStore;
 use rustical_store_sqlite::{
     SqliteCalendarSourceStore, SqliteCollectionShareStore, SqliteDavPushStore, SqliteInviteStore,
-    SqlitePasswordResetStore, SqlitePrintStore, create_db_pool,
+    SqliteMirrorStore, SqlitePasswordResetStore, SqlitePrintStore, create_db_pool,
 };
 use setup_tracing::setup_tracing;
 use std::fs;
@@ -49,6 +49,7 @@ pub use commands::*;
 pub mod config;
 pub mod export;
 pub mod host_dispatch;
+pub mod mirror;
 pub mod quota;
 pub mod readiness;
 pub mod register;
@@ -88,6 +89,9 @@ pub enum Command {
     Health(HealthArgs),
     Principals(PrincipalsArgs),
     Subscriptions(SubscriptionsArgs),
+    /// §18.41: one-way push of a local calendar into a remote `CalDAV`
+    /// collection (aphy in the reference deployment).
+    Mirror(MirrorArgs),
     Invites(InvitesArgs),
     #[command(about = "Manage per-calendar guest shares (Omnical §17.10)")]
     GuestShare(GuestSharesArgs),
@@ -161,6 +165,10 @@ pub async fn get_store_bundle(
             // too (PLAN_NEXT_AGENT_PRINTING.md §3.4).
             let print_store: Arc<dyn PrintStore> =
                 Arc::new(SqlitePrintStore::new(cal_store.clone()));
+            // Push-mirror state (§18.41) shares the pool as well: one table,
+            // read and written only by the mirror sync.
+            let mirror_store: Arc<dyn MirrorStore> =
+                Arc::new(SqliteMirrorStore::new(cal_store.clone()));
             let cal_store = Arc::new(cal_store);
             if *run_repairs {
                 info!("Running repair tasks");
@@ -192,12 +200,13 @@ pub async fn get_store_bundle(
                 share_store,
                 password_reset_store,
                 print_store,
+                mirror_store,
             }
         }
     })
 }
 
-/// [`get_data_stores`] as a 13-tuple — **a shim**.
+/// [`get_data_stores`] as a 14-tuple — **a shim**.
 ///
 /// Kept so the five CLI call sites did not have to move in this commit, the
 /// same way `make_app` outlived `make_app_for` (§18.11). New code should call
@@ -256,6 +265,7 @@ pub async fn get_data_stores(
     Arc<dyn CollectionShareStore>,
     Arc<dyn PasswordResetStore>,
     Arc<dyn PrintStore>,
+    Arc<dyn MirrorStore>,
 )> {
     let b = get_store_bundle(migrate, config).await?;
     Ok((
@@ -273,6 +283,7 @@ pub async fn get_data_stores(
         b.share_store,
         b.password_reset_store,
         b.print_store,
+        b.mirror_store,
     ))
 }
 
@@ -343,6 +354,9 @@ pub async fn cmd_serve(
         // Print-state tracking (the portal print pages' new-vs-all scope) —
         // same straight-through treatment as the share/password-reset stores.
         print_store,
+        // Push-mirror state (§18.41) — consumed by the background mirror loop
+        // spawned below, same straight-through treatment.
+        mirror_store,
     ) = get_data_stores(!args.no_migrations, &serve_store).await?;
 
     // Tenancy spawns these per tenant, from the tenant closure in `tenancy.rs`,
@@ -428,6 +442,13 @@ pub async fn cmd_serve(
     // than by convention: the `false` arm below builds the *same* `make_app`
     // call with the *same* arguments and puts no dispatch layer in front of it.
     // There is no third path in which tenancy is on but not routing.
+    // Read before `make_app` below consumes `config.caldav`: the §18.41
+    // mirror loop stamps instances in the deployment's own zone (§18.36).
+    let mirror_timezone = config
+        .caldav
+        .dailyview_timezone()
+        .map_or_else(|| "UTC".to_owned(), str::to_owned);
+
     let app = make_app(
         addr_store.clone(),
         cal_store.clone(),
@@ -515,6 +536,22 @@ pub async fn cmd_serve(
             tokio::spawn(tasks::cleanup_trashed_calendar_entities(
                 cal_store.clone(),
                 trash_retention_days,
+                shutdown_signal(),
+            ));
+        }
+    }
+
+    // §18.41 push mirrors: one loop per target, over the default tenant's
+    // stores. Tenancy deployments do not get a background mirror yet — a
+    // target names its source principal explicitly, and per-tenant mirror
+    // wiring is §7 work, not §18.41's.
+    if config.mirror.enabled && !tenancy_enabled {
+        for target in config.mirror.targets.clone() {
+            tokio::spawn(tasks::run_mirror_target(
+                target,
+                cal_store.clone(),
+                mirror_store.clone(),
+                mirror_timezone.clone(),
                 shutdown_signal(),
             ));
         }

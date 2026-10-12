@@ -15,7 +15,9 @@ use rustical_store::auth::{AuthenticationProvider, Principal};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-mod dailyview;
+// Public since §18.41: the push mirror (root crate) reuses the flattening
+// machinery for its phone-instance feed.
+pub mod dailyview;
 
 pub mod calendar;
 pub mod calendar_object;
