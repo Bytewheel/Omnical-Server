@@ -29,6 +29,19 @@ pub fn get_app_with_frontend_config(
     context: TestStoreContext,
     frontend_config: FrontendConfig,
 ) -> axum::Router {
+    get_app_with_frontend_and_caldav_config(context, frontend_config, CalDavConfig::default())
+}
+
+/// The same app as [`get_app`], with the caller's `[frontend]` *and*
+/// `[caldav]` sections — the DailyView shim tests need
+/// `dailyview_timezone` set while every other test keeps the default
+/// (shim disabled).
+#[allow(clippy::too_many_lines)]
+pub fn get_app_with_frontend_and_caldav_config(
+    context: TestStoreContext,
+    frontend_config: FrontendConfig,
+    caldav_config: CalDavConfig,
+) -> axum::Router {
     let TestStoreContext {
         addr_store,
         cal_store,
@@ -53,7 +66,7 @@ pub fn get_app_with_frontend_config(
         Arc::new(principal_store),
         frontend_config,
         None,
-        CalDavConfig::default(),
+        caldav_config,
         None,
         Some(subscription_store),
         None,

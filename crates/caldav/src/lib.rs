@@ -15,6 +15,8 @@ use rustical_store::auth::{AuthenticationProvider, Principal};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+mod dailyview;
+
 pub mod calendar;
 pub mod calendar_object;
 pub mod error;
@@ -75,11 +77,40 @@ const fn default_true() -> bool {
 pub struct CalDavConfig {
     #[serde(default = "default_true")]
     rfc7809: bool,
+    /// Omnical: the timezone for the `DailyView` (Punkt MP02) all-day shim —
+    /// see the `dailyview` module. Absent (the default) disables the
+    /// rewrite, and every client receives the canonical data.
+    #[serde(default)]
+    dailyview_timezone: Option<String>,
+}
+
+impl CalDavConfig {
+    /// A config with the `DailyView` all-day shim armed for `timezone` — the
+    /// cross-crate constructor the shim's tests use (`rfc7809` stays
+    /// upstream's private field, so functional record update does not
+    /// compile outside this crate).
+    #[must_use]
+    pub fn with_dailyview_timezone(timezone: &str) -> Self {
+        Self {
+            dailyview_timezone: Some(timezone.to_owned()),
+            ..Self::default()
+        }
+    }
+
+    /// The armed `DailyView`-shim timezone, if any (see the `dailyview`
+    /// module).
+    #[must_use]
+    pub fn dailyview_timezone(&self) -> Option<&str> {
+        self.dailyview_timezone.as_deref()
+    }
 }
 
 impl Default for CalDavConfig {
     fn default() -> Self {
-        Self { rfc7809: true }
+        Self {
+            rfc7809: true,
+            dailyview_timezone: None,
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-use super::{ResponseExtractString, get_app};
+use super::{ResponseExtractString, get_app, get_app_with_frontend_and_caldav_config};
 use axum::body::Body;
 use axum::extract::Request;
 use headers::{Authorization, HeaderMapExt};
@@ -8,6 +8,7 @@ use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
 use tower::ServiceExt;
 
 mod calendar;
+mod calendar_dailyview;
 mod calendar_import;
 mod calendar_put;
 mod calendar_report;

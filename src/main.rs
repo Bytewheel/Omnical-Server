@@ -333,6 +333,36 @@ db_url = "/var/lib/rustical/db.sqlite3"
     }
 
     #[test]
+    fn test_config_toml_caldav_dailyview_timezone() {
+        // With the key: the DailyView all-day shim is armed for the
+        // deployment's timezone.
+        let config = r#"
+[data_store.sqlite]
+db_url = "/var/lib/rustical/db.sqlite3"
+
+[caldav]
+dailyview_timezone = "America/New_York"
+"#;
+
+        let config: Config = Figment::new()
+            .merge(Toml::string(config))
+            .extract()
+            .unwrap();
+        assert_eq!(config.caldav.dailyview_timezone(), Some("America/New_York"));
+        // Without the section the shim is inert — every client, DailyView
+        // included, is served the canonical all-day data.
+        let config = r#"
+[data_store.sqlite]
+db_url = "/var/lib/rustical/db.sqlite3"
+"#;
+        let config: Config = Figment::new()
+            .merge(Toml::string(config))
+            .extract()
+            .unwrap();
+        assert_eq!(config.caldav.dailyview_timezone(), None);
+    }
+
+    #[test]
     fn test_config_toml_http_host() {
         let config = r#"
 [data_store.sqlite]
