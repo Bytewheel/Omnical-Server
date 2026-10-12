@@ -90,9 +90,12 @@ pub fn href_component(uid: &str) -> String {
 /// `DTSTAMP` (RFC 5545 required) and `CREATED`/`LAST-MODIFIED` are
 /// added when missing, and `ORGANIZER` on `VEVENT`s that lack one —
 /// aphy's week/day grids drop events without it, and khal never writes
-/// it. `CREATED` inherits the object's own `DTSTAMP` so it stays stable
-/// across syncs; `LAST-MODIFIED` is the sync time, because that is when
-/// this copy was last modified. Every other byte is preserved.
+/// it. `CREATED` and `LAST-MODIFIED` both inherit the object's own
+/// `DTSTAMP` (the source's own last-modified) so a body is byte-stable
+/// across syncs — change detection hashes the body, and a mirror that
+/// re-stamped every run would re-`PUT` the whole source each cadence.
+/// `DTSTAMP`'s own absence takes the sync time (the RFC's intent for a
+/// copy). Every other byte is preserved.
 ///
 /// The walk is line-level on purpose: the stored form (khal's minimal
 /// `VTIMEZONE`, its property order, its folding) is exactly what a
@@ -141,14 +144,12 @@ pub fn shape_master_body(raw: &str, organizer: &str, now: &str) -> String {
             out.push(format!("DTSTAMP:{now}"));
         }
         if !has("CREATED") {
-            let created = block
-                .iter()
-                .find_map(|line| line.strip_prefix("DTSTAMP:"))
-                .unwrap_or(now);
+            let created = object_stamp(block).unwrap_or(now);
             out.push(format!("CREATED:{created}"));
         }
         if !has("LAST-MODIFIED") {
-            out.push(format!("LAST-MODIFIED:{now}"));
+            let modified = object_stamp(block).unwrap_or(now);
+            out.push(format!("LAST-MODIFIED:{modified}"));
         }
         if component == "VEVENT" && !has("ORGANIZER") {
             out.push(format!("ORGANIZER:{organizer}"));
@@ -162,6 +163,13 @@ pub fn shape_master_body(raw: &str, organizer: &str, now: &str) -> String {
         body.push_str("\r\n");
     }
     body
+}
+
+/// The object's own `DTSTAMP` — the source's last-modified, which the
+/// mirror's `CREATED`/`LAST-MODIFIED` inherit so a mirrored body never
+/// changes between syncs.
+fn object_stamp(block: &[String]) -> Option<&str> {
+    block.iter().find_map(|line| line.strip_prefix("DTSTAMP:"))
 }
 
 /// The `UID:` value of a flattened instance block (§18.41's mirror owns the
