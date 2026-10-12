@@ -85,6 +85,9 @@ impl<C: CalendarStore> ResourceService for CalendarObjectResourceService<C> {
             object,
             object_id: object_id.to_owned(),
             principal: principal.to_owned(),
+            // PROPFIND paths serve canonical bytes (§18.37): the phone
+            // never asks for calendar-data here, so no request context.
+            dailyview: None,
         })
     }
 

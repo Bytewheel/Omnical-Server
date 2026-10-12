@@ -100,6 +100,9 @@ impl<C: CalendarStore, DP: DavPushStore> ResourceService for CalendarResourceSer
                 object,
                 object_id,
                 principal: principal.to_owned(),
+                // PROPFIND paths serve canonical bytes (§18.37): the phone
+                // never asks for calendar-data here, so no request context.
+                dailyview: None,
             })
             .collect())
     }

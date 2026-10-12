@@ -12,7 +12,7 @@ use axum::{
 };
 use calendar_multiget::{CalendarMultigetRequest, get_objects_calendar_multiget};
 use calendar_query::{CalendarQueryRequest, get_objects_calendar_query};
-use http::{StatusCode, Uri};
+use http::{HeaderMap, StatusCode, Uri};
 use rustical_dav::{
     resource::{PrincipalUri, Resource},
     rfc_3986_percent_encode,
@@ -52,6 +52,7 @@ impl ReportRequest {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn objects_response(
     objects: Vec<(String, CalendarObject)>,
     not_found: Vec<Uri>,
@@ -59,6 +60,7 @@ fn objects_response(
     principal: &str,
     puri: &impl PrincipalUri,
     user: &Principal,
+    dailyview: &crate::dailyview::DailyviewContext,
     prop: &PropfindType<CalendarObjectPropWrapperName>,
 ) -> Result<MultistatusElement<CalendarObjectPropWrapper, String>, Error> {
     let mut responses = Vec::new();
@@ -73,6 +75,7 @@ fn objects_response(
                 object,
                 object_id,
                 principal: principal.to_owned(),
+                dailyview: Some(dailyview.clone()),
             }
             .propfind(&path, prop, None, puri, user)?,
         );
@@ -95,13 +98,17 @@ fn objects_response(
 }
 
 #[instrument(skip(cal_store))]
+#[allow(clippy::too_many_arguments)]
 pub async fn route_report_calendar<C: CalendarStore, DP: DavPushStore>(
     Path((principal, cal_id)): Path<(String, String)>,
     user: Principal,
     Extension(puri): Extension<CalDavPrincipalUri>,
-    State(CalendarResourceService { cal_store, .. }): State<CalendarResourceService<C, DP>>,
+    State(CalendarResourceService {
+        cal_store, config, ..
+    }): State<CalendarResourceService<C, DP>>,
     OriginalUri(uri): OriginalUri,
     matched_path: MatchedPath,
+    header_map: HeaderMap,
     body: String,
 ) -> Result<impl IntoResponse, Error> {
     if !user.is_principal(&principal) {
@@ -110,13 +117,25 @@ pub async fn route_report_calendar<C: CalendarStore, DP: DavPushStore>(
 
     let request = ReportRequest::parse_str(&body)?;
     let props = request.props();
+    // Omnical §18.37: the DailyView shim is armed per-request — the phone
+    // consumes this route's `<C:calendar-data/>` (it never GETs).
+    let dailyview = crate::dailyview::DailyviewContext::from_request(&header_map, &config);
 
     Ok(match &request {
         ReportRequest::CalendarQuery(cal_query) => {
             let objects =
                 get_objects_calendar_query(cal_query, &principal, &cal_id, cal_store.as_ref())
                     .await?;
-            objects_response(objects, vec![], uri.path(), &principal, &puri, &user, props)?
+            objects_response(
+                objects,
+                vec![],
+                uri.path(),
+                &principal,
+                &puri,
+                &user,
+                &dailyview,
+                props,
+            )?
         }
         ReportRequest::CalendarMultiget(cal_multiget) => {
             let (objects, not_found) = get_objects_calendar_multiget(
@@ -134,6 +153,7 @@ pub async fn route_report_calendar<C: CalendarStore, DP: DavPushStore>(
                 &principal,
                 &puri,
                 &user,
+                &dailyview,
                 props,
             )?
         }
@@ -146,6 +166,7 @@ pub async fn route_report_calendar<C: CalendarStore, DP: DavPushStore>(
                 &principal,
                 &cal_id,
                 cal_store.as_ref(),
+                &dailyview,
             )
             .await?
         }
@@ -342,6 +363,12 @@ END:VCALENDAR"
                 memberships: vec![],
                 needs_password_change: false,
                 privileges: std::collections::BTreeMap::default(),
+            },
+            // No DailyView on this wire: canonical bytes.
+            &crate::dailyview::DailyviewContext {
+                user_agent: None,
+                timezone: None,
+                now: chrono::Utc::now(),
             },
             &PropfindType::Propname,
         )

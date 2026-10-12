@@ -4,7 +4,6 @@ use super::prop::{
 };
 use crate::Error;
 use caldata::generator::Emitter;
-use derive_more::derive::{From, Into};
 use rustical_dav::{
     extensions::CommonPropertiesExtension,
     privileges::UserPrivilegeSet,
@@ -16,11 +15,15 @@ use rustical_ical::CalendarObject;
 use rustical_store::auth::Principal;
 use std::borrow::Cow;
 
-#[derive(Clone, From, Into)]
+#[derive(Clone)]
 pub struct CalendarObjectResource {
     pub object: CalendarObject,
     pub object_id: String,
     pub principal: String,
+    /// Omnical §18.37: the per-request `DailyView` shim context. `Some` on
+    /// the REPORT paths (where the phone consumes `<C:calendar-data/>`);
+    /// `None` — every PROPFIND path — serves canonical bytes.
+    pub dailyview: Option<crate::dailyview::DailyviewContext>,
 }
 
 impl ResourceName for CalendarObjectResource {
@@ -56,7 +59,26 @@ impl Resource for CalendarObjectResource {
                     }
                     CalendarObjectPropName::CalendarData(CalendarData { expand, .. }) => {
                         CalendarObjectProp::CalendarData(expand.as_ref().map_or_else(
-                            || self.object.get_ics().to_owned(),
+                            // Omnical §18.37: the phone files each fetched body
+                            // at its master's `DTSTART` with no recurrence
+                            // expansion — serve it the first concrete
+                            // occurrence inside its own 4-day window (and the
+                            // §18.36 all-day form) instead. Every other
+                            // client, and an unarmed shim, keep the canonical
+                            // serialization.
+                            || {
+                                self.dailyview.as_ref().map_or_else(
+                                    || self.object.get_ics().to_owned(),
+                                    |context| {
+                                        crate::dailyview::rewrite_for_dailyview(
+                                            &self.object,
+                                            context,
+                                        )
+                                        .into_owned()
+                                    },
+                                )
+                            },
+                            // CALDAV:expand keeps RFC 4791 §10.6 semantics — untouched.
                             |expand| {
                                 self.object
                                     .get_inner()

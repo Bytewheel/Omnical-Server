@@ -52,20 +52,16 @@ pub async fn get_event<C: CalendarStore>(
     if matches!(method, Method::HEAD) {
         Ok(resp.body(Body::empty()).unwrap())
     } else {
-        // Omnical: the frozen DailyView client mis-files all-day events a
-        // day early west of UTC (see `crate::dailyview`). Serve its GETs
-        // DATE→midnight rewrites scoped to its User-Agent; every other
-        // client — and every non-all-day line — is byte-identical to what
-        // was stored. The ETag above stays the stored object's: the rewrite
-        // is on the wire only.
-        let user_agent = header_map
-            .get(http::header::USER_AGENT)
-            .and_then(|val| val.to_str().ok());
-        let ics = crate::dailyview::rewrite_all_day_ics(
-            event.get_ics(),
-            user_agent,
-            config.dailyview_timezone.as_deref(),
-        );
+        // Omnical: the frozen DailyView client files each fetched body at
+        // its master's DTSTART and never expands recurrence (see
+        // `crate::dailyview`) — its GETs are served the all-day and
+        // in-window-occurrence rewrites scoped to its User-Agent; every
+        // other client — and every non-recurring, timed line — is
+        // byte-identical to what was stored. The ETag above stays the
+        // stored object's: the rewrite is on the wire only.
+        let dailyview =
+            crate::dailyview::DailyviewContext::from_request(&header_map, config.as_ref());
+        let ics = crate::dailyview::rewrite_for_dailyview(&event, &dailyview);
         Ok(resp.body(Body::new(ics.into_owned())).unwrap())
     }
 }

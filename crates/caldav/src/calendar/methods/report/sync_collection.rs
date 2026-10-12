@@ -20,6 +20,7 @@ use rustical_store::{
     synctoken::{format_synctoken, parse_synctoken},
 };
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_sync_collection<C: CalendarStore>(
     sync_collection: &SyncCollectionRequest<CalendarObjectPropWrapperName>,
     path: &str,
@@ -28,6 +29,7 @@ pub async fn handle_sync_collection<C: CalendarStore>(
     principal: &str,
     cal_id: &str,
     cal_store: &C,
+    dailyview: &crate::dailyview::DailyviewContext,
 ) -> Result<MultistatusElement<CalendarObjectPropWrapper, String>, Error> {
     let old_synctoken = parse_synctoken(&sync_collection.sync_token).unwrap_or(0);
     let (new_objects, deleted_objects, new_synctoken) = cal_store
@@ -42,6 +44,7 @@ pub async fn handle_sync_collection<C: CalendarStore>(
                 object,
                 object_id,
                 principal: principal.to_owned(),
+                dailyview: Some(dailyview.clone()),
             }
             .propfind(&path, &sync_collection.prop, None, puri, user)?,
         );

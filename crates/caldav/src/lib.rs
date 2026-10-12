@@ -77,9 +77,12 @@ const fn default_true() -> bool {
 pub struct CalDavConfig {
     #[serde(default = "default_true")]
     rfc7809: bool,
-    /// Omnical: the timezone for the `DailyView` (Punkt MP02) all-day shim —
-    /// see the `dailyview` module. Absent (the default) disables the
-    /// rewrite, and every client receives the canonical data.
+    /// Omnical: the timezone for the `DailyView` (Punkt MP02) shim — see the
+    /// `dailyview` module. Arms both wire rewrites for that client's
+    /// User-Agent (all-day events served as local-midnight DATE-TIMEs;
+    /// recurring events served as their first in-window occurrence) on the
+    /// GET and REPORT paths. Absent (the default) disables the rewrites, and
+    /// every client receives the canonical data.
     #[serde(default)]
     dailyview_timezone: Option<String>,
 }

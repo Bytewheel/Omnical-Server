@@ -21,6 +21,11 @@ const OTHER_CLIENT_UA: &str = "vdirsyncer/0.19.4";
 /// it: DATE-valued `DTSTART`/`DTEND`, fixed `DTSTAMP`.
 const ALL_DAY_EVENT: &str = "BEGIN:VCALENDAR\r\nPRODID:-//omnical//holiday-sets//EN\r\nVERSION:2.0\r\nCALSCALE:GREGORIAN\r\nBEGIN:VEVENT\r\nUID:hol-rc-1962-st-luke-evangelist-20261018@omnical\r\nDTSTAMP:20260101T000000Z\r\nDTSTART;VALUE=DATE:20261018\r\nDTEND;VALUE=DATE:20261019\r\nSUMMARY:St Luke\r\nDESCRIPTION:II class\\, red\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
+/// A daily recurring timed event with a past master — the "Trash"-master
+/// shape this deployment's calendars carry: a September `DTSTART` beside
+/// `FREQ=DAILY`, which the phone would file at September 28th forever.
+const DAILY_TIMED_EVENT: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//omnical//holiday-sets//EN\r\nCALSCALE:GREGORIAN\r\nBEGIN:VEVENT\r\nUID:daily-shim-test@omnical\r\nDTSTAMP:20260925T103702Z\r\nDTSTART;TZID=America/New_York:20260928T190000\r\nDTEND;TZID=America/New_York:20260928T190100\r\nSUMMARY:Trash\r\nRRULE:FREQ=DAILY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
 /// The app with a calendar at `/caldav/principal/user/calendar` holding
 /// [`ALL_DAY_EVENT`], exactly as the holiday import would have stored it.
 /// The caller supplies the `[caldav]` section; the frontend mirrors
@@ -28,6 +33,25 @@ const ALL_DAY_EVENT: &str = "BEGIN:VCALENDAR\r\nPRODID:-//omnical//holiday-sets/
 async fn app_with_all_day_event(
     context: TestStoreContext,
     caldav_config: CalDavConfig,
+) -> axum::Router {
+    app_with_event(context, caldav_config, "stluke.ics", ALL_DAY_EVENT).await
+}
+
+/// The same, holding [`DAILY_TIMED_EVENT`] as `daily.ics`.
+async fn app_with_daily_event(
+    context: TestStoreContext,
+    caldav_config: CalDavConfig,
+) -> axum::Router {
+    app_with_event(context, caldav_config, "daily.ics", DAILY_TIMED_EVENT).await
+}
+
+/// The app with a calendar at `/caldav/principal/user/calendar` holding
+/// `ics` as `filename`, exactly as an import would have stored it.
+async fn app_with_event(
+    context: TestStoreContext,
+    caldav_config: CalDavConfig,
+    filename: &str,
+    ics: &str,
 ) -> axum::Router {
     let app = get_app_with_frontend_and_caldav_config(
         context,
@@ -58,10 +82,10 @@ async fn app_with_all_day_event(
 
     let mut request = Request::builder()
         .method("PUT")
-        .uri(format!("{url}/stluke.ics"))
+        .uri(format!("{url}/{filename}"))
         .header("If-None-Match", "*")
         .header("Content-Type", "text/calendar")
-        .body(Body::from(ALL_DAY_EVENT))
+        .body(Body::from(ics.to_owned()))
         .unwrap();
     request
         .headers_mut()
@@ -149,5 +173,112 @@ async fn test_get_dailyview_shim_disabled_by_default(
     assert!(
         body.contains("DTSTART;VALUE=DATE:20261018\r\n"),
         "disabled shim serves the canonical data: {body}"
+    );
+}
+
+/// The phone's `calendar-multiget` REPORT — the only path its sync consumes
+/// event bodies through (`CaldavFacade.getEvent` reads the
+/// `<C:calendar-data/>`; it never issues plain GETs).
+async fn report_multiget(app: &axum::Router, user_agent: &str, filename: &str) -> String {
+    let report = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+<D:prop><D:getetag/><C:calendar-data/></D:prop>
+<D:href>/caldav/principal/user/calendar/{filename}</D:href>
+</C:calendar-multiget>"#
+    );
+    let mut request = Request::builder()
+        .method("REPORT")
+        .uri("/caldav/principal/user/calendar")
+        .header("User-Agent", user_agent)
+        .body(Body::from(report))
+        .unwrap();
+    request
+        .headers_mut()
+        .typed_insert(Authorization::basic("user", "pass"));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    response.extract_string().await
+}
+
+/// DailyView's multiget carries the §18.36 all-day rewrite in its
+/// `<C:calendar-data/>` — the path the phone actually parses — while every
+/// other client's identical REPORT answers the canonical DATE-valued bytes.
+#[rstest]
+#[tokio::test]
+async fn test_report_dailyview_rewrites_all_day(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    let app = app_with_all_day_event(
+        context,
+        CalDavConfig::with_dailyview_timezone("America/New_York"),
+    )
+    .await;
+
+    let body = report_multiget(&app, DAILYVIEW_UA, "stluke.ics").await;
+    assert!(
+        body.contains("DTSTART;TZID=America/New_York:20261018T000000"),
+        "the phone's calendar-data is the local-midnight form: {body}"
+    );
+    assert!(
+        body.contains("DTEND;TZID=America/New_York:20261019T000000"),
+        "DTEND rewritten alongside: {body}"
+    );
+
+    let body = report_multiget(&app, OTHER_CLIENT_UA, "stluke.ics").await;
+    assert!(
+        body.contains("DTSTART;VALUE=DATE:20261018"),
+        "other clients keep the canonical data: {body}"
+    );
+}
+
+/// DailyView's multiget carries the §18.37 recurrence flattening: a daily
+/// event with a September master is served as its first occurrence inside
+/// the phone's own 4-day window, as a plain UTC DATE-TIME with no `RRULE` —
+/// the exact form `CalendarEvent.getTimestamp` files on the right day.
+/// Every other client's identical REPORT answers the canonical master.
+#[rstest]
+#[tokio::test]
+async fn test_report_dailyview_flattens_recurrence(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    let app = app_with_daily_event(
+        context,
+        CalDavConfig::with_dailyview_timezone("America/New_York"),
+    )
+    .await;
+
+    let body = report_multiget(&app, DAILYVIEW_UA, "daily.ics").await;
+    assert!(
+        !body.contains("RRULE"),
+        "no recurrence is shipped to the phone: {body}"
+    );
+    let instance = body
+        .split("DTSTART:")
+        .nth(1)
+        .and_then(|rest| rest.get(..16));
+    assert!(
+        instance.is_some_and(|value| value.ends_with('Z') && value.as_bytes()[8] == b'T'),
+        "a concrete UTC DATE-TIME occurrence is shipped: {body}"
+    );
+    assert!(
+        body.contains("SUMMARY:Trash"),
+        "the event's own lines survive: {body}"
+    );
+
+    let body = report_multiget(&app, OTHER_CLIENT_UA, "daily.ics").await;
+    assert!(
+        body.contains("DTSTART;TZID=America/New_York:20260928T190000"),
+        "other clients keep the canonical master: {body}"
+    );
+    assert!(
+        body.contains("RRULE:FREQ=DAILY"),
+        "other clients keep the recurrence: {body}"
     );
 }
