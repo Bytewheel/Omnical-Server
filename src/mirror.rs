@@ -24,11 +24,16 @@
 //! (`phone_instances = true`): the §18.39/§18.40 flattened concrete
 //! instances the MP02 needs, because the phone never expands an `RRULE`
 //! and files every body at its master's `DTSTART` (§18.37). Those bodies
-//! are deliberately left `ORGANIZER`-less and keep their `{uid}-{stamp}`
-//! UIDs — aphy's grid ignores them (they parse as series overrides of the
-//! mirrored master, not standalone events), while the phone, which
-//! matches nothing but its own time-range `REPORT`, files them on their
-//! own days exactly as the §18.40 import did.
+//! are deliberately left `ORGANIZER`-less — aphy's grid gate drops them,
+//! which keeps the feed invisible on the web — and their `{uid}-{stamp}`
+//! family UIDs carry a trailing `-m` marker ([`feed_uid`]): aphy parses
+//! a bare `{uid}-{datestamp}` UID as a Kolab recurrence override of that
+//! master, and with the master in the web calendar and the family in
+//! the phone calendar the web's series model broke (§18.41's live
+//! finding: series operations vanished). The marker breaks the
+//! datetime-suffix parse; the phone, which matches nothing but its own
+//! time-range `REPORT`, files them on their own days exactly as the
+//! §18.40 import did.
 //!
 //! ## Ownership
 //!
@@ -200,8 +205,8 @@ fn object_dtstart_stamp(raw: &str) -> String {
     String::new()
 }
 
-/// Rewrite every `UID:` line of a body to `new_uid` — the one-shot
-/// phone-feed copy needs its UID re-keyed to the suffixed family form
+/// Rewrite every `UID:` line of a body to `new_uid` — the phone-feed
+/// copies need their UID re-keyed to the marked family form ([`feed_uid`])
 /// while every other byte of the shaped body stays.
 fn override_uid(body: &str, new_uid: &str) -> String {
     let mut out = String::with_capacity(body.len());
@@ -224,6 +229,18 @@ fn block_uid(block: &str) -> Option<String> {
         .split("\r\n")
         .find_map(|line| line.strip_prefix("UID:"))
         .map(str::to_owned)
+}
+
+/// The feed form of a UID: a trailing `-m` marker segment. aphy's
+/// Roundcube parses `{uid}-{datestamp}` UIDs as Kolab recurrence
+/// overrides of that master, and with the master in the web calendar
+/// and the family in the phone calendar the series model breaks
+/// (§18.41's live finding: series ops vanish). The marker breaks the
+/// datetime-suffix parse while staying deterministic (re-syncs
+/// upsert) and inside the `{uid}-` family (the adoption sweep still
+/// claims stale old-scheme objects).
+fn feed_uid(uid: &str) -> String {
+    format!("{uid}-m")
 }
 
 /// A remote `CalDAV` collection to push into: one authenticated client per
@@ -418,11 +435,15 @@ pub async fn sync_target(
         // in the feed calendar and the web calendar is a 403 (found live:
         // every omnical one-shot PUT failed exactly this way). Recurring
         // events reach the feed only as their flattened instances (the
-        // `{uid}-{stamp}` scheme below, which the phone files on each
-        // occurrence's own day, §18.37/§18.39); non-recurring objects are
-        // the phone's only way to see a one-shot, so they ride along with
-        // their UID suffixed by their own DTSTART stamp — the same family
-        // shape, never a UID the web calendar owns.
+        // `{uid}-{stamp}-m` feed scheme below, which the phone files on
+        // each occurrence's own day, §18.37/§18.39); non-recurring
+        // objects are the phone's only way to see a one-shot, so they
+        // ride along with their UID suffixed by their own DTSTART stamp —
+        // the same family shape, never a UID the web calendar owns. Both
+        // forms take the `-m` marker (`feed_uid`): a bare
+        // `{uid}-{datestamp}` UID parses on aphy as a Kolab recurrence
+        // override of the mirrored master, and the cross-calendar split
+        // broke the web's series model — the marker ends the parse.
         if !target.phone_feed_only {
             let body = shape_master_body(object.get_ics(), organizer, &now_stamp);
             let href = format!("{}.ics", href_component(&uid));
@@ -436,14 +457,14 @@ pub async fn sync_target(
                     "a phone-feed object without a parsable DTSTART was skipped"
                 );
             } else {
-                let feed_uid = format!("{uid}-{stamp}");
+                let key = feed_uid(&format!("{uid}-{stamp}"));
                 let body = override_uid(
                     &shape_master_body(object.get_ics(), organizer, &now_stamp),
-                    &feed_uid,
+                    &key,
                 );
                 let body = rustical_caldav::dailyview::apply_all_day_pass(&body, timezone);
-                let href = format!("{}.ics", href_component(&feed_uid));
-                desired.insert(feed_uid, (href, body_hash(&body), body));
+                let href = format!("{}.ics", href_component(&key));
+                desired.insert(key, (href, body_hash(&body), body));
             }
         }
         master_uids.push(uid.clone());
@@ -459,9 +480,17 @@ pub async fn sync_target(
                     warn!("a flattened instance without a UID was dropped");
                     continue;
                 };
-                let body = rustical_caldav::dailyview::dailyview_instance_body(&block, timezone);
-                let href = format!("{}.ics", href_component(&instance_uid));
-                desired.insert(instance_uid, (href, body_hash(&body), body));
+                // The block's `{uid}-{stamp}` UID re-keys to the marked
+                // feed form — key, href and body all move (the bare form
+                // parses on aphy as a Kolab override of the mirrored
+                // master, which broke the web's series model).
+                let key = feed_uid(&instance_uid);
+                let body = override_uid(
+                    &rustical_caldav::dailyview::dailyview_instance_body(&block, timezone),
+                    &key,
+                );
+                let href = format!("{}.ics", href_component(&key));
+                desired.insert(key, (href, body_hash(&body), body));
             }
         }
     }
@@ -654,17 +683,30 @@ END:VCALENDAR\r\n";
             "20261018"
         );
         assert_eq!(object_dtstart_stamp("BEGIN:VEVENT\r\nEND:VEVENT"), "");
-        // The re-key: every UID line moves to the suffixed family form,
+        // The re-key: every UID line moves to the marked family form,
         // nothing else changes.
         let shaped = shape_master_body(KHAL_MASTER, "", "20261012T220000Z");
         let rekeyed = override_uid(
             &shaped,
-            "RGKW68NDCGRYYVVHH55NLH5PU8Z6QH1IDKBU-20260928T190000",
+            &feed_uid("RGKW68NDCGRYYVVHH55NLH5PU8Z6QH1IDKBU-20260928T190000"),
         );
-        assert!(rekeyed.contains("UID:RGKW68NDCGRYYVVHH55NLH5PU8Z6QH1IDKBU-20260928T190000\r\n"));
+        assert!(rekeyed.contains("UID:RGKW68NDCGRYYVVHH55NLH5PU8Z6QH1IDKBU-20260928T190000-m\r\n"));
         assert_eq!(rekeyed.matches("UID:").count(), 1);
         assert!(rekeyed.contains("RRULE:FREQ=WEEKLY\r\n"));
         assert!(!rekeyed.contains("ORGANIZER"));
+    }
+
+    #[test]
+    fn feed_uid_marks_the_family_form() {
+        // The `-m` marker: a bare `{uid}-{datestamp}` UID parses on aphy
+        // as a Kolab recurrence override of the master, which broke the
+        // web's series model; the marker ends the datetime-suffix parse
+        // while staying inside the `{uid}-` family the adoption sweep
+        // claims.
+        assert_eq!(
+            feed_uid("RGKW68NDCGRYYVVHH55NLH5PU8Z6QH1IDKBU-20260928T190000"),
+            "RGKW68NDCGRYYVVHH55NLH5PU8Z6QH1IDKBU-20260928T190000-m"
+        );
     }
 
     #[test]
