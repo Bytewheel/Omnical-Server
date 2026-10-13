@@ -1,11 +1,12 @@
 //! The §18.41 push mirror (`PLAN_DEPLOYMENTS.md`): one-way sync of a local
 //! calendar into a remote `CalDAV` collection.
 //!
-//! The reference deployment mirrors the omnical `personal` calendar into
-//! the aphy (Cyrus/Roundcube) `Default` calendar, and the liturgical set
-//! into a second aphy calendar — replacing the manual
-//! download-`.ics`-import-it-into-aphy pipeline of §18.38–§18.40, which
-//! the phone depended on but aphy's web week/day grids refused to render.
+//! The reference deployment (§18.41's two-calendar layout) mirrors the
+//! user's omnical calendars into aphy twice over: canonical
+//! `ORGANIZER`-stamped masters into an aphy web calendar ("omnical"),
+//! and the flattened phone feed into the `Default` calendar the stock
+//! MP02 syncs — replacing the manual
+//! download-`.ics`-import-it-into-aphy pipeline of §18.38–§18.40.
 //!
 //! ## Why the bodies are shaped at all
 //!
@@ -151,7 +152,7 @@ pub fn shape_master_body(raw: &str, organizer: &str, now: &str) -> String {
             let modified = object_stamp(block).unwrap_or(now);
             out.push(format!("LAST-MODIFIED:{modified}"));
         }
-        if component == "VEVENT" && !has("ORGANIZER") {
+        if component == "VEVENT" && !has("ORGANIZER") && !organizer.is_empty() {
             out.push(format!("ORGANIZER:{organizer}"));
         }
         out.extend(block.iter().cloned());
@@ -340,6 +341,15 @@ pub async fn sync_target(
     // The desired set, keyed on the object UIDs the remote will carry.
     let mut desired: BTreeMap<String, (String, String, String)> = BTreeMap::new();
     let mut master_uids: Vec<String> = Vec::new();
+    // A phone-feed target carries no ORGANIZER: the feed lives in the
+    // phone's calendar, aphy's week/day gate drops ORGANIZER-less events,
+    // and that is exactly what keeps the feed invisible on the web while
+    // the canonical copies render in the web calendar.
+    let organizer = if target.phone_feed_only {
+        ""
+    } else {
+        target.organizer.as_str()
+    };
     for (_, object) in &objects {
         let uid = object.get_uid().to_owned();
         if uid.is_empty() {
@@ -349,9 +359,16 @@ pub async fn sync_target(
             );
             continue;
         }
-        let body = shape_master_body(object.get_ics(), &target.organizer, &now_stamp);
-        let href = format!("{}.ics", href_component(&uid));
-        desired.insert(uid.clone(), (href, body_hash(&body), body));
+        // A phone-feed target skips recurring masters: the phone files a
+        // master at its own DTSTART (out of its window, §18.37), so a master
+        // in the feed serves nothing — and same-UID copies in two aphy
+        // calendars shadow each other in the web grid (§18.41's live
+        // bisect). The flattened instances below are what the phone reads.
+        if !target.phone_feed_only || !rustical_caldav::dailyview::object_is_recurring(object) {
+            let body = shape_master_body(object.get_ics(), organizer, &now_stamp);
+            let href = format!("{}.ics", href_component(&uid));
+            desired.insert(uid.clone(), (href, body_hash(&body), body));
+        }
         master_uids.push(uid.clone());
 
         if target.phone_instances {
@@ -538,6 +555,16 @@ END:VCALENDAR\r\n";
         assert_eq!(twice.matches("CREATED:").count(), 1);
         // Idempotent: a shaped body hashes the same before and after.
         assert_eq!(body_hash(&shaped), body_hash(&twice));
+    }
+
+    #[test]
+    fn shape_master_body_empty_organizer_stamps_nothing() {
+        // A phone-feed target (§18.41 two-calendar layout) passes no
+        // organizer: the feed must stay out of aphy's week/day grids.
+        let shaped = shape_master_body(KHAL_MASTER, "", "20261012T220000Z");
+        assert!(!shaped.contains("ORGANIZER"));
+        assert!(shaped.contains("CREATED:20260925T103702Z\r\n"));
+        assert!(shaped.contains("RRULE:FREQ=WEEKLY\r\n"));
     }
 
     #[test]

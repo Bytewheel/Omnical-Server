@@ -378,6 +378,22 @@ fn dailyview_window(
 /// recurring `VEVENT`s (their masters are mirrored canonically and serve
 /// the phone directly).
 #[must_use]
+pub fn object_is_recurring(object: &CalendarObject) -> bool {
+    let object: caldata::component::IcalCalendarObject = object.clone().into();
+    let CalendarInnerData::Event(main, _) = object.get_inner() else {
+        return false;
+    };
+    main.has_rruleset()
+}
+
+/// §18.41 mirror: the flattened instances of one object, returned
+/// individually so the mirror can `PUT` each as its own object.
+///
+/// The same blocks the export route concatenates into its single envelope.
+/// Empty for non-recurring objects and for anything but recurring
+/// `VEVENT`s (their masters are mirrored canonically and serve the phone
+/// directly).
+#[must_use]
 pub fn flattened_instances_of_object(
     object: CalendarObject,
     timezone: &str,

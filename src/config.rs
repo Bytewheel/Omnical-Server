@@ -509,6 +509,15 @@ pub struct MirrorTargetConfig {
     /// `DailyView`, §18.37 — can list them.
     #[serde(default)]
     pub phone_instances: bool,
+    /// Target is a phone feed, not a web calendar (§18.41's two-calendar
+    /// layout): recurring masters are skipped — the phone files a master
+    /// at its own `DTSTART`, out of its 4-day window, so a master in the
+    /// feed only risks the same-UID object shadowing the canonical copy in
+    /// the web calendar — and no `ORGANIZER` is stamped, so the feed stays
+    /// out of aphy's week/day grids. Non-recurring objects pass through:
+    /// a one-shot is its own concrete occurrence and the phone lists it.
+    #[serde(default)]
+    pub phone_feed_only: bool,
     /// Horizon of the instance feed in days (§18.38 chose 90 for a manual
     /// import cadence; a synced feed could go shorter).
     #[serde(default = "default_mirror_horizon_days")]
