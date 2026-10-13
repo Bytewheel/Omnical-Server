@@ -418,21 +418,28 @@ ul.collection-list {
     }
 
     /* A calendar tile folds one by one (2026-10-13): the section heading
-       above folds all tiles at once, the tile's own <details> — which
-       carries the .inner grid, so an open tile lays out exactly as the
-       unfolded one did, the summary in the title's own grid row — folds
-       a single calendar. Closed, the grid's fixed spacer rows would
-       leave air around a lone summary, so the fold lays out as a plain
-       block until opened; the div-tiles of the other sections match
-       neither rule and are untouched. */
-    details.inner:not([open]) {
-      display: block;
-      padding-bottom: 1em;
-      padding-right: 1em;
-    }
+       above folds all tiles at once, the tile's own <details> folds a
+       single calendar — a plain wrapper around the .inner grid div (a
+       display:grid details would make the browser's internal
+       ::details-content slot — which holds every non-summary child —
+       the single grid item, auto-placed into the grid's first 1em
+       spacer row, so the opened tile rendered empty; found live). The
+       summary is the tile's title row. */
+    details.collection-tile {
+      summary {
+        cursor: pointer;
+        font-weight: 600;
+        line-height: 1em;
+        padding: 1em 1em .4em;
+      }
 
-    .inner summary {
-      cursor: pointer;
+      &[open] summary {
+        padding-bottom: 0;
+      }
+
+      &[open] > .inner {
+        padding-top: 0;
+      }
     }
   }
 }

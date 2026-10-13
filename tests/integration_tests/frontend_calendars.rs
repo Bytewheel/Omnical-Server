@@ -980,11 +980,21 @@ async fn test_calendar_tiles_fold_individually_and_banners_open_their_tile(
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.extract_string().await;
     assert_eq!(
-        body.matches("<details class=\"inner collection-tile\">")
-            .count(),
+        body.matches("<details class=\"collection-tile\">").count(),
         3,
         "personal + group + editable tiles each fold: {body}"
     );
+    // The fold is a plain wrapper around the grid div — a display:grid
+    // details would put the whole body in the browser's ::details-content
+    // slot, a single grid item clipped into the grid's first 1em spacer
+    // row, and the opened tile would render empty (found live 2026-10-13).
+    for fold in body.split("<details class=\"collection-tile\">").skip(1) {
+        let fold_end = fold.find("</details>").expect("the fold closes");
+        assert!(
+            fold[..fold_end].contains("<div class=\"inner\">"),
+            "the fold wraps its tile's grid div: {body}"
+        );
+    }
     assert_eq!(
         body.matches("<summary class=\"title\">").count(),
         3,
@@ -1016,7 +1026,7 @@ async fn test_calendar_tiles_fold_individually_and_banners_open_their_tile(
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.extract_string().await;
-    let open = "<details class=\"inner collection-tile\" open";
+    let open = "<details class=\"collection-tile\" open";
     assert_eq!(
         body.matches(open).count(),
         1,
