@@ -173,6 +173,50 @@ fn object_stamp(block: &[String]) -> Option<&str> {
     block.iter().find_map(|line| line.strip_prefix("DTSTAMP:"))
 }
 
+/// A non-recurring object's own DTSTART value, non-alphanumerics stripped:
+/// the deterministic suffix of its phone-feed copy (the same family shape
+/// the flattened instances carry). `DTSTART;TZID=…:20260928T190000`
+/// becomes `20260928T190000`, a DATE-valued start `20261018`.
+fn object_dtstart_stamp(raw: &str) -> String {
+    // Inside the addressable component only: a VTIMEZONE's transition
+    // lines carry DTSTARTs too, and the wrong one must not key the href.
+    let mut in_component = false;
+    for line in raw.split(['\r', '\n']) {
+        match line {
+            "BEGIN:VEVENT" | "BEGIN:VTODO" | "BEGIN:VJOURNAL" => in_component = true,
+            "END:VEVENT" | "END:VTODO" | "END:VJOURNAL" => in_component = false,
+            _ if in_component && line.starts_with("DTSTART") => {
+                if let Some(value) = line.rsplit(':').next() {
+                    let stripped: String =
+                        value.chars().filter(char::is_ascii_alphanumeric).collect();
+                    if !stripped.is_empty() {
+                        return stripped;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    String::new()
+}
+
+/// Rewrite every `UID:` line of a body to `new_uid` — the one-shot
+/// phone-feed copy needs its UID re-keyed to the suffixed family form
+/// while every other byte of the shaped body stays.
+fn override_uid(body: &str, new_uid: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    for line in body.split("\r\n") {
+        if line.split(':').next() == Some("UID") {
+            out.push_str("UID:");
+            out.push_str(new_uid);
+        } else {
+            out.push_str(line);
+        }
+        out.push_str("\r\n");
+    }
+    out
+}
+
 /// The `UID:` value of a flattened instance block (§18.41's mirror owns the
 /// block's shape, so a direct scan is honest).
 fn block_uid(block: &str) -> Option<String> {
@@ -359,15 +403,45 @@ pub async fn sync_target(
             );
             continue;
         }
-        // A phone-feed target skips recurring masters: the phone files a
-        // master at its own DTSTART (out of its window, §18.37), so a master
-        // in the feed serves nothing — and same-UID copies in two aphy
-        // calendars shadow each other in the web grid (§18.41's live
-        // bisect). The flattened instances below are what the phone reads.
-        if !target.phone_feed_only || !rustical_caldav::dailyview::object_is_recurring(object) {
+        // §18.41's two paths, split by target kind.
+        //
+        // A canonical target carries the object as-is under its real UID:
+        // the web calendar renders it (ORGANIZER-stamped) and series
+        // operations work.
+        //
+        // A phone-feed target never claims a real UID: aphy's Cyrus
+        // enforces RFC 6638's `unique-scheduling-object-resource` — a
+        // VEVENT UID is unique across the whole account, so the same UID
+        // in the feed calendar and the web calendar is a 403 (found live:
+        // every omnical one-shot PUT failed exactly this way). Recurring
+        // events reach the feed only as their flattened instances (the
+        // `{uid}-{stamp}` scheme below, which the phone files on each
+        // occurrence's own day, §18.37/§18.39); non-recurring objects are
+        // the phone's only way to see a one-shot, so they ride along with
+        // their UID suffixed by their own DTSTART stamp — the same family
+        // shape, never a UID the web calendar owns.
+        if !target.phone_feed_only {
             let body = shape_master_body(object.get_ics(), organizer, &now_stamp);
             let href = format!("{}.ics", href_component(&uid));
             desired.insert(uid.clone(), (href, body_hash(&body), body));
+        } else if !rustical_caldav::dailyview::object_is_recurring(object) {
+            let stamp = object_dtstart_stamp(object.get_ics());
+            if stamp.is_empty() {
+                warn!(
+                    calendar = %target.calendar,
+                    uid = %uid,
+                    "a phone-feed object without a parsable DTSTART was skipped"
+                );
+            } else {
+                let feed_uid = format!("{uid}-{stamp}");
+                let body = override_uid(
+                    &shape_master_body(object.get_ics(), organizer, &now_stamp),
+                    &feed_uid,
+                );
+                let body = rustical_caldav::dailyview::apply_all_day_pass(&body, timezone);
+                let href = format!("{}.ics", href_component(&feed_uid));
+                desired.insert(feed_uid, (href, body_hash(&body), body));
+            }
         }
         master_uids.push(uid.clone());
 
@@ -565,6 +639,29 @@ END:VCALENDAR\r\n";
         assert!(!shaped.contains("ORGANIZER"));
         assert!(shaped.contains("CREATED:20260925T103702Z\r\n"));
         assert!(shaped.contains("RRULE:FREQ=WEEKLY\r\n"));
+    }
+
+    #[test]
+    fn object_dtstart_stamp_and_override_uid_key_the_feed_copy() {
+        // The §18.41 feed suffix: the object's own DTSTART value, the same
+        // family form the flattened instances carry.
+        assert_eq!(object_dtstart_stamp(KHAL_MASTER), "20260928T190000");
+        assert_eq!(
+            object_dtstart_stamp("BEGIN:VEVENT\r\nDTSTART;VALUE=DATE:20261018\r\nEND:VEVENT"),
+            "20261018"
+        );
+        assert_eq!(object_dtstart_stamp("BEGIN:VEVENT\r\nEND:VEVENT"), "");
+        // The re-key: every UID line moves to the suffixed family form,
+        // nothing else changes.
+        let shaped = shape_master_body(KHAL_MASTER, "", "20261012T220000Z");
+        let rekeyed = override_uid(
+            &shaped,
+            "RGKW68NDCGRYYVVHH55NLH5PU8Z6QH1IDKBU-20260928T190000",
+        );
+        assert!(rekeyed.contains("UID:RGKW68NDCGRYYVVHH55NLH5PU8Z6QH1IDKBU-20260928T190000\r\n"));
+        assert_eq!(rekeyed.matches("UID:").count(), 1);
+        assert!(rekeyed.contains("RRULE:FREQ=WEEKLY\r\n"));
+        assert!(!rekeyed.contains("ORGANIZER"));
     }
 
     #[test]

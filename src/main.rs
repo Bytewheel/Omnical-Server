@@ -488,3 +488,64 @@ allow_sign_up = true
         });
     }
 }
+
+#[cfg(test)]
+mod test_config_mirror {
+    use figment::{
+        Figment,
+        providers::{Env, Format, Toml},
+    };
+    use rustical::config::Config;
+
+    /// §18.41: the exact provider chain `load_config` uses (TOML file, then
+    /// the `RUSTICAL_`-prefixed env provider with `__` splitting) must give
+    /// each `[[mirror.targets]]` table its own `phone_feed_only` — a live
+    /// sync showed the omnical targets skipping recurring masters as if the
+    /// feed flag had leaked across array elements.
+    #[test]
+    fn test_config_mirror_targets_per_table_flags() {
+        let config = r#"
+[data_store.sqlite]
+db_url = ":memory:"
+
+[mirror]
+enabled = false
+
+[[mirror.targets]]
+name = "personal-to-default"
+principal = "nfcalaway@novo-ordo.com"
+calendar = "personal"
+url = "https://dav.aphy.app/dav/calendars/user/burningserenity@aphy.io/Default/"
+username = "u"
+password = "p"
+organizer = "mailto:o@x"
+phone_feed_only = true
+phone_instances = true
+
+[[mirror.targets]]
+name = "personal-to-omnical"
+principal = "nfcalaway@novo-ordo.com"
+calendar = "personal"
+url = "https://dav.aphy.app/dav/calendars/user/burningserenity@aphy.io/omnical/"
+username = "u"
+password = "p"
+organizer = "mailto:o@x"
+phone_instances = false
+"#;
+        let config: Config = Figment::new()
+            .merge(Toml::string(config))
+            .merge(Env::prefixed("RUSTICAL_").split("__"))
+            .extract()
+            .unwrap();
+        let targets = &config.mirror.targets;
+        assert_eq!(targets.len(), 2, "both targets must parse");
+        assert!(targets[0].phone_feed_only);
+        assert!(targets[0].phone_instances);
+        assert!(
+            !targets[1].phone_feed_only,
+            "the flag of the first table must not leak into the second"
+        );
+        assert!(!targets[1].phone_instances);
+        assert_eq!(targets[1].name, "personal-to-omnical");
+    }
+}

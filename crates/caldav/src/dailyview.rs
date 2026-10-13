@@ -430,6 +430,21 @@ pub fn flattened_instances_of_object(
         .collect()
 }
 
+/// The §18.36 all-day pass as a standalone transform.
+///
+/// DATE-valued `DTSTART`/`DTEND` lines become `TZID`-qualified
+/// local-midnight DATE-TIMEs, so an all-day event files at its own day
+/// west of UTC: the phone's `getTimestamp` subtracts the zone offset
+/// from UTC midnight (§18.36). Applied by the export route and, since
+/// §18.41, by the push mirror's non-recurring phone-feed copies.
+#[must_use]
+pub fn apply_all_day_pass(body: &str, timezone: &str) -> String {
+    match rewrite_date_valued_lines(body, timezone) {
+        std::borrow::Cow::Borrowed(_) => body.to_owned(),
+        std::borrow::Cow::Owned(rewritten) => rewritten,
+    }
+}
+
 /// §18.41 mirror: one flattened instance as a standalone object body —
 /// byte-identical to what a manual import of the shaped export carried
 /// for this instance.
