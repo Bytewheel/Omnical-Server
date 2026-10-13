@@ -951,3 +951,81 @@ async fn test_calendar_detail_page_shows_setup_instructions(
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[rstest]
+#[tokio::test]
+async fn test_calendar_tiles_fold_individually_and_banners_open_their_tile(
+    #[from(test_store_context)]
+    #[future]
+    context: TestStoreContext,
+) {
+    let context = context.await;
+    setup_fixtures(&context).await;
+    let app = get_app(context);
+
+    // A plain render: every listed calendar is its own foldable inside
+    // the section heading that folds them all at once — shipped closed,
+    // with the title row (principal/name + component chips) as its
+    // summary, and the landing-fragment handler that opens a #cal-… tile
+    // (the share routes redirect there after a mint; the calendar setup
+    // pages link there for "create a subscribe link").
+    let req = request(
+        Method::GET,
+        "/frontend/user/user/calendar",
+        "user",
+        "pass",
+        None,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    assert_eq!(
+        body.matches("<details class=\"inner collection-tile\">")
+            .count(),
+        3,
+        "personal + group + editable tiles each fold: {body}"
+    );
+    assert_eq!(
+        body.matches("<summary class=\"title\">").count(),
+        3,
+        "each fold's summary is its title row: {body}"
+    );
+    assert!(
+        body.contains("<summary class=\"title\">Personal"),
+        "the own tile's summary names it: {body}"
+    );
+    assert!(
+        !body.contains("collection-tile\" open"),
+        "no tile renders open on a plain load: {body}"
+    );
+    assert!(
+        body.contains("details.collection-tile"),
+        "the #cal-… fragment handler ships with the section: {body}"
+    );
+
+    // A per-tile banner must not sit unseen inside a fold: minting a
+    // guest share renders exactly the minted calendar's tile open — the
+    // same rule that expands the whole section for a banner.
+    let req = request(
+        Method::POST,
+        "/frontend/user/user/share/guest-invite",
+        "user",
+        "pass",
+        form("principal=user&collection_id=personal&privilege=edit&email=Guest%40example.com"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.extract_string().await;
+    let open = "<details class=\"inner collection-tile\" open";
+    assert_eq!(
+        body.matches(open).count(),
+        1,
+        "exactly the minted tile renders open: {body}"
+    );
+    let tile_start = body.find(open).expect("the open tile");
+    let tile_end = tile_start + body[tile_start..].find("</details>").expect("tile end");
+    assert!(
+        body[tile_start..tile_end].contains("Guest access"),
+        "the open tile is the one carrying the banner: {body}"
+    );
+}

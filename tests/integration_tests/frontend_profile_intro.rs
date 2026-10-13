@@ -1,12 +1,11 @@
 //! The profile page is the landing page of every signed-in session, so the
-//! Omnical introduction ("no calendar on this website — your apps display,
-//! this server stores") has to survive past the one-time onboarding page.
-//! It renders collapsed in HTML and is expanded client-side on first sight
-//! per browser, then dismissed by collapsing (`localStorage`, no server
-//! state). Users who registered before the onboarding page existed — the
-//! exact case that motivated it (2026-10-06: l.mari.222 registered under the
-//! old credential card) — therefore see the introduction in full on their
-//! next login.
+//! Omnical introduction ("your apps display, this server stores") has to
+//! survive past the one-time onboarding page. It renders collapsed in HTML
+//! and is expanded client-side on first sight per browser, then dismissed
+//! by collapsing (`localStorage`, no server state). Users who registered
+//! before the onboarding page existed — the exact case that motivated it
+//! (2026-10-06: l.mari.222 registered under the old credential card) —
+//! therefore see the introduction in full on their next login.
 use super::{ResponseExtractString, get_app};
 use axum::body::Body;
 use axum::extract::Request;
@@ -39,12 +38,18 @@ async fn test_profile_page_carries_the_intro_and_its_dismiss_logic(
     assert_eq!(response.status(), StatusCode::OK);
     let page = response.extract_string().await;
 
-    // The introduction itself.
+    // The introduction itself. Its opening claim that this website has no
+    // calendar on it was removed 2026-10-13: the portal gained a month
+    // calendar view, so the sentence contradicted the UI it sat under.
     assert!(page.contains("what-is-omnical"), "{page}");
     assert!(page.contains("New here? What is Omnical"), "{page}");
     assert!(
-        page.contains("This website has no calendar on it"),
+        page.contains("Omnical is where your calendars, tasks and contacts are stored"),
         "{page}"
+    );
+    assert!(
+        !page.contains("This website has no calendar on it"),
+        "the stale claim must not ship: {page}"
     );
 
     // The expand-until-dismissed logic: a first visit (no localStorage key)

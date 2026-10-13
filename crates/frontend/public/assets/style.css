@@ -416,6 +416,24 @@ ul.collection-list {
         background: var(--color, transparent);
       }
     }
+
+    /* A calendar tile folds one by one (2026-10-13): the section heading
+       above folds all tiles at once, the tile's own <details> — which
+       carries the .inner grid, so an open tile lays out exactly as the
+       unfolded one did, the summary in the title's own grid row — folds
+       a single calendar. Closed, the grid's fixed spacer rows would
+       leave air around a lone summary, so the fold lays out as a plain
+       block until opened; the div-tiles of the other sections match
+       neither rule and are untouched. */
+    details.inner:not([open]) {
+      display: block;
+      padding-bottom: 1em;
+      padding-right: 1em;
+    }
+
+    .inner summary {
+      cursor: pointer;
+    }
   }
 }
 

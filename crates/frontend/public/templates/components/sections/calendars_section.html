@@ -14,15 +14,23 @@
   {% for tile in calendars %}
   {% let calendar = tile.calendar %}
   {% let color = calendar.meta.color.to_owned().unwrap_or("transparent".to_owned()) %}
+  {# Each calendar folds on its own, inside the section heading that folds
+     them all at once: the tile's <details> carries the .inner grid so the
+     summary takes over the title's own grid row — an open tile lays out
+     exactly as the unfolded one did. A tile carrying a one-time banner
+     (guest access, a registration invite) renders open: a banner must not
+     sit unseen inside a fold, the same rule that expands the section
+     itself for a banner. #}
+  {% let tile_banner = guest_share_principal.as_deref().unwrap_or("") == calendar.principal && guest_share_calendar_id.as_deref().unwrap_or("") == calendar.id || invite_principal.as_deref().unwrap_or("") == calendar.principal && invite_collection_id.as_deref().unwrap_or("") == calendar.id %}
   <li class="collection-list-item" id="cal-{{ calendar.id }}" style="--color: {{ color }}">
-    <div class="inner">
-      <span class="title">
+    <details class="inner collection-tile"{% if tile_banner %} open{% endif %}>
+      <summary class="title">
         {%- if calendar.principal != user.id -%}{{ calendar.principal }}/{%- endif -%}
         {{ calendar.meta.displayname.to_owned().unwrap_or(calendar.id.to_owned()) }}
         {% for comp in calendar.components %}
           <span class="chip">{{ comp }}</span>
         {% endfor %}
-      </span>
+      </summary>
       <span class="description">
         {% if let Some(description) = calendar.meta.description %}{{ description }}{% endif %}
       </span>
@@ -176,7 +184,7 @@
         {{ tile.meta.len }} ({{ tile.meta.size | filesizeformat }}) objects, {{ tile.meta.deleted_len }} ({{ tile.meta.deleted_size | filesizeformat }}) deleted objects
       </div>
       <div class="color-chip"></div>
-    </div>
+    </details>
   </li>
   {% else %}
   You do not have any calendars yet
@@ -188,14 +196,14 @@
   {% for (meta, calendar) in deleted_calendars %}
   {% let color = calendar.meta.color.to_owned().unwrap_or("transparent".to_owned()) %}
   <li class="collection-list-item" style="--color: {{ color }}">
-    <div class="inner">
-      <span class="title">
+    <details class="inner collection-tile">
+      <summary class="title">
         {%- if calendar.principal != user.id -%}{{ calendar.principal }}/{%- endif -%}
         {{ calendar.meta.displayname.to_owned().unwrap_or(calendar.id.to_owned()) }}
         {% for comp in calendar.components %}
           <span class="chip">{{ comp }}</span>
         {% endfor %}
-      </span>
+      </summary>
       <span class="description">
         {% if let Some(description) = calendar.meta.description %}{{ description }}{% endif %}
       </span>
@@ -210,7 +218,7 @@
         {{ meta.len }} ({{ meta.size | filesizeformat }}) objects, {{ meta.deleted_len }} ({{ meta.deleted_size | filesizeformat }}) deleted objects
       </div>
       <div class="color-chip"></div>
-    </div>
+    </details>
   </li>
   {% endfor %}
 </ul>
@@ -219,3 +227,26 @@
   <create-calendar-form user="{{ user.id }}"></create-calendar-form>
   <import-calendar-form user="{{ user.id }}"></import-calendar-form>
 </div>
+<script>
+  // The tiles above fold on their own, so a landing fragment must open
+  // its tile or the browser scrolls to a summary row whose contents are
+  // hidden: the share routes redirect to …/calendar#cal-… after a mint,
+  // and the calendar setup pages link there for "create a subscribe
+  // link". In-page #cal-… clicks get the same opening from the second
+  // handler (the profile intro's anchor script opens only a target's
+  // collapsed ancestor *sections* — the tile's own fold is a descendant
+  // of the anchor target, which closest() never finds). The browser's
+  // own post-load scroll to the fragment stays correct because the tile
+  // is opened during parse, before that scroll happens.
+  (function () {
+    function openTile(hash) {
+      var tile = document.getElementById(decodeURIComponent(hash.slice(1)));
+      var fold = tile && tile.querySelector('details.collection-tile');
+      if (fold && !fold.open) fold.setAttribute('open', '');
+    }
+    if (/^#cal-/.test(window.location.hash)) openTile(window.location.hash);
+    document.querySelectorAll('a[href^="#cal-"]').forEach(function (a) {
+      a.addEventListener('click', function () { openTile(a.hash); });
+    });
+  })();
+</script>
