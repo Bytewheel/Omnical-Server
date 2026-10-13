@@ -405,8 +405,11 @@ async fn a_down_up_cycle_moves_a_column_without_moving_its_meaning() {
 /// ownership rows the holidays refresh diff scopes to one source) there were
 /// **40** files: **18** pairs, still **4** bare and **22** applied going up.
 /// Since `20261012130000_print_state` (the portal print pages'
-/// previously-printed tracking, `PLAN_NEXT_AGENT_PRINTING.md` §3.1) there are
+/// previously-printed tracking, `PLAN_NEXT_AGENT_PRINTING.md` §3.1) there were
 /// **42** files: **19** pairs, still **4** bare and **23** applied going up.
+/// Since `20261012200000_mirror_objects` (the §18.41 push-mirror state rows)
+/// there are **44** files: **20** pairs, still **4** bare and **24** applied
+/// going up.
 #[test]
 fn the_migration_counts_are_what_the_plan_says() {
     let files_total = migrations().len();
@@ -415,11 +418,11 @@ fn the_migration_counts_are_what_the_plan_says() {
     let bare = bare_base_migrations().len();
 
     assert_eq!(
-        files_total, 42,
+        files_total, 44,
         "migration file count changed; update the plan"
     );
-    assert_eq!(pairs, 19, "pair count changed; update the plan");
-    assert_eq!(applied_ups, 23, "applied-up count changed; update the plan");
+    assert_eq!(pairs, 20, "pair count changed; update the plan");
+    assert_eq!(applied_ups, 24, "applied-up count changed; update the plan");
     assert_eq!(
         bare, 4,
         "base migrations without a down changed; update the plan"
