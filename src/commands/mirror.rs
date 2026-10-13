@@ -45,6 +45,13 @@ fn validate_unique_names(targets: &[MirrorTargetConfig]) -> anyhow::Result<()> {
 
 #[allow(clippy::missing_errors_doc)]
 pub async fn cmd_mirror(args: MirrorArgs, config: Config) -> anyhow::Result<()> {
+    // Warnings are the operator's eyes on a sync: a PUT that 403s (an
+    // event whose UID is owned by an aphy-native copy elsewhere, §18.41)
+    // or a remote that vanished mid-run are only ever `warn!`s, and the
+    // CLI initializes no tracing by default. Use the same setup the serve
+    // path does so a manual sync says what happened.
+    crate::setup_tracing(&config.tracing);
+
     validate_unique_names(&config.mirror.targets)?;
     if config.mirror.targets.is_empty() {
         anyhow::bail!("no [[mirror.targets]] entries are configured");
