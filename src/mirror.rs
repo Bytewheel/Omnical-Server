@@ -368,7 +368,10 @@ fn href_basename(href: &str) -> &str {
 /// Store failures reading the source, or the first `PUT`/`DELETE` error
 /// (the state is only replaced after every write succeeded, so a failed
 /// run retries everything it did not finish on the next one).
-#[instrument(skip(cal_store, mirror_store, now))]
+// The target is recorded by name only: its `Debug` carries the remote
+// password, and a config secret in the log stream is a finding, not a
+// convenience.
+#[instrument(skip(cal_store, mirror_store, now), fields(target = %target.name))]
 #[allow(clippy::too_many_lines)]
 pub async fn sync_target(
     target: &MirrorTargetConfig,
