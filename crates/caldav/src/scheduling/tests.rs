@@ -101,6 +101,7 @@ async fn setup_fixtures(context: &TestStoreContext) {
                 password: None,
                 principal_type: PrincipalType::Individual,
                 needs_password_change: false,
+                timezone: String::new(),
                 privileges: BTreeMap::default(),
             },
             false,

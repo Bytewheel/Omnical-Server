@@ -80,6 +80,7 @@ fn principal_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Principal, Error>
             .flatten()
             .collect(),
         needs_password_change: row.get("needs_password_change"),
+        timezone: row.get("timezone"),
         privileges: BTreeMap::new(),
     })
 }
@@ -89,12 +90,13 @@ impl AuthenticationProvider for SqlitePrincipalStore {
     #[instrument]
     async fn get_principals(&self) -> Result<Vec<Principal>, Error> {
         // Runtime query (not `query_as!`) so the planner-selected rows can
-        // carry the `needs_password_change` column without regenerating the
-        // committed `.sqlx/` offline metadata for the old statement shape.
+        // carry the `needs_password_change` and `timezone` columns without
+        // regenerating the committed `.sqlx/` offline metadata for the old
+        // statement shape.
         let rows = sqlx::query(
             r"
             SELECT p.id, p.displayname, p.principal_type, p.password_hash,
-                   p.needs_password_change,
+                   p.needs_password_change, p.timezone,
                    json_group_array(m.member_of) AS memberships
             FROM principals p
             LEFT JOIN memberships m ON p.id == m.principal
@@ -166,7 +168,7 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         let row = sqlx::query(
             r"
             SELECT p.id, p.displayname, p.principal_type, p.password_hash,
-                   p.needs_password_change,
+                   p.needs_password_change, p.timezone,
                    json_group_array(m.member_of) AS memberships
             FROM (SELECT * FROM principals WHERE id = ?) AS p
             LEFT JOIN memberships m ON p.id == m.principal
@@ -414,6 +416,19 @@ impl AuthenticationProvider for SqlitePrincipalStore {
         .execute(&self.db)
         .await
         .map_err(crate::Error::from)?;
+        Ok(())
+    }
+
+    #[instrument]
+    async fn set_timezone(&self, principal: &str, timezone: &str) -> Result<(), Error> {
+        // Runtime query (not `query!`) so no sqlx prepare-cache entry is
+        // needed — same pattern as set_needs_password_change.
+        sqlx::query("UPDATE principals SET timezone = ? WHERE id = ?")
+            .bind(timezone)
+            .bind(principal)
+            .execute(&self.db)
+            .await
+            .map_err(crate::Error::from)?;
         Ok(())
     }
 

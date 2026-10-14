@@ -4,6 +4,9 @@
     <div class="tasks-filters">
       <a class="button" href="{{ print_stickers_href }}">Print stickers</a>
       <a class="button" href="{{ print_paper_href }}">Print paper</a>
+      {% if !import_destinations.is_empty() %}
+      <import-contacts-form user="{{ user_id }}" destinations='{{ import_destinations|json|safe }}'></import-contacts-form>
+      {% endif %}
       {% if can_create %}<a class="button-primary-link" href="{{ new_href }}">New contact</a>{% endif %}
     </div>
   </div>

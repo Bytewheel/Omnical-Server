@@ -29,6 +29,7 @@ mod tests {
                     password: None,
                     memberships: vec![],
                     needs_password_change: false,
+                    timezone: String::new(),
                     privileges: std::collections::BTreeMap::default(),
                 },
                 false,
@@ -49,6 +50,7 @@ mod tests {
                     password: Some(Secret::from(hash_password(password))),
                     memberships: vec![],
                     needs_password_change: false,
+                    timezone: String::new(),
                     privileges: std::collections::BTreeMap::default(),
                 },
                 false,
@@ -128,6 +130,7 @@ mod tests {
                     password: None,
                     memberships: vec![],
                     needs_password_change: false,
+                    timezone: String::new(),
                     privileges: std::collections::BTreeMap::default(),
                 },
                 false,
@@ -243,6 +246,7 @@ mod tests {
                     password: None,
                     memberships: vec![],
                     needs_password_change: false,
+                    timezone: String::new(),
                     privileges: std::collections::BTreeMap::default(),
                 },
                 false,
@@ -448,6 +452,47 @@ mod tests {
         assert!(
             !store.remove_app_token("user", &token_id).await.unwrap(),
             "re-revoking an already-revoked token must not report as removed"
+        );
+    }
+
+    /// §18.42: `set_timezone` persists verbatim (the caller validates), an
+    /// empty value clears (the "unset" state the cascade treats as unset),
+    /// and `get_principal` carries it — which is the path the profile
+    /// render and the mirror cascade both read.
+    #[rstest]
+    #[tokio::test]
+    async fn set_timezone_persists_and_get_principal_carries_it(
+        #[from(test_store_context)]
+        #[future]
+        context: TestStoreContext,
+    ) {
+        let context = context.await;
+        let principal_store = context.principal_store.clone();
+
+        principal_store
+            .set_timezone("user", "America/New_York")
+            .await
+            .unwrap();
+        assert_eq!(
+            principal_store
+                .get_principal("user")
+                .await
+                .unwrap()
+                .unwrap()
+                .timezone,
+            "America/New_York"
+        );
+
+        // Clear: the empty string is the unset state, not an error.
+        principal_store.set_timezone("user", "").await.unwrap();
+        assert_eq!(
+            principal_store
+                .get_principal("user")
+                .await
+                .unwrap()
+                .unwrap()
+                .timezone,
+            ""
         );
     }
 }

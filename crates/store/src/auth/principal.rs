@@ -28,11 +28,18 @@ pub struct Principal {
     #[serde(default)]
     pub memberships: Vec<String>,
     /// When set, the next portal login must show a forced password-change
-    /// page before any other portal section. Used for the one-time nudge on a
-    /// user's first-ever calendar/group join; cleared once the password is
+    /// page before any other portal section. Used for the one-time nudge on
+    /// a user's first-ever calendar/group join; cleared once the password is
     /// changed.
     #[serde(default)]
     pub needs_password_change: bool,
+    /// The user's IANA timezone (§18.42), e.g. `America/New_York`. Empty —
+    /// the default — means "unset": consumers fall back to the deployment's
+    /// `[caldav]` dailyview timezone, then UTC. Set from the profile page;
+    /// the reference consumer is the §18.41 push mirror, which flattens a
+    /// target's phone-feed instances in the calendar owner's zone.
+    #[serde(default)]
+    pub timezone: String,
     /// Per-group privileges of the memberships (Omnical §17.9.2): maps a
     /// group principal id to the [`Privilege`] the user holds there. Loaded
     /// by the store; a missing entry means the pre-privilege default

@@ -1674,6 +1674,92 @@ __decorate([n$3()], ImportCalendarForm.prototype, "principal", void 0);
 __decorate([n$3()], ImportCalendarForm.prototype, "cal_id", void 0);
 ImportCalendarForm = __decorate([t$2("import-calendar-form")], ImportCalendarForm);
 //#endregion
+//#region lib/import-contacts-form.ts
+var ImportContactsForm = class ImportContactsForm extends i$2 {
+	constructor() {
+		super();
+		this.user = "";
+		this.destinations = "";
+		this.dialog = e();
+		this.result = e();
+		this.destination = e();
+	}
+	createRenderRoot() {
+		return this;
+	}
+	get parsedDestinations() {
+		try {
+			let parsed = JSON.parse(this.destinations || "[]");
+			return Array.isArray(parsed) ? parsed : [];
+		} catch {
+			return [];
+		}
+	}
+	render() {
+		let destinations = this.parsedDestinations;
+		return b`
+      <button @click=${() => {
+			this.result.value?.replaceChildren();
+			this.dialog.value.showModal();
+		}}>Import contacts</button>
+      <dialog ${n(this.dialog)}>
+        <h3>${destinations.length > 1 ? "Import contacts" : "Import contacts into this addressbook"}</h3>
+        <form @submit=${this.submit}>
+          ${destinations.length > 1 ? b`
+          <label class="block">
+            Import into
+            <select ${n(this.destination)}>
+              ${destinations.map((d, i) => b`<option value=${i} ?selected=${i === 0}>${d.label}</option>`)}
+            </select>
+          </label>
+          ` : ""}
+          <label>
+            file (.vcf or .csv)
+            <input type="file" required accept=".vcf,.vcard,.csv,text/vcard,text/csv" @change=${(e) => this.file = e.target.files[0]} />
+          </label>
+          <div class="margin-top-m">
+            <button type="submit" class="primary">Import</button>
+            <button type="button" @click=${() => {
+			this.dialog.value.close();
+			window.location.reload();
+		}} class="cancel">Close</button>
+          </div>
+        </form>
+        <p class="result" ${n(this.result)}></p>
+        <p class="description">Export vCard (.vcf) from your contacts app for the best results — every field survives. Google and Outlook CSV exports also work. Duplicates are skipped, so nothing is added twice.</p>
+      </dialog>
+    `;
+	}
+	async submit(e) {
+		e.preventDefault();
+		if (!this.file) {
+			alert("Choose a file first");
+			return;
+		}
+		let principal = this.principal;
+		let addressbook_id = this.addressbook_id;
+		let destinations = this.parsedDestinations;
+		if (destinations.length > 0) {
+			let selected = destinations[0];
+			if (this.destination.value && destinations.length > 1) selected = destinations[parseInt(this.destination.value.value, 10) || 0] || destinations[0];
+			principal = selected.principal;
+			addressbook_id = selected.addressbook_id;
+		}
+		let response = await fetch(`/frontend/user/${this.user}/addressbook/import/${principal}/${addressbook_id}`, {
+			method: "POST",
+			body: this.file
+		});
+		let text = await response.text();
+		if (this.result.value) this.result.value.textContent = response.ok ? text : `Error ${response.status}: ${text}`;
+		return null;
+	}
+};
+__decorate([n$3()], ImportContactsForm.prototype, "user", void 0);
+__decorate([n$3()], ImportContactsForm.prototype, "principal", void 0);
+__decorate([n$3()], ImportContactsForm.prototype, "addressbook_id", void 0);
+__decorate([n$3()], ImportContactsForm.prototype, "destinations", void 0);
+ImportContactsForm = __decorate([t$2("import-contacts-form")], ImportContactsForm);
+//#endregion
 //#region lib/generate-app-token-form.ts
 var GenerateAppTokenForm = class GenerateAppTokenForm extends i$2 {
 	constructor(..._args) {
@@ -2050,4 +2136,4 @@ __decorate([n$3({ type: Boolean })], MemberPicker.prototype, "showDropdown", voi
 __decorate([n$3({ type: Boolean })], MemberPicker.prototype, "adding", void 0);
 MemberPicker = __decorate([t$2("member-picker")], MemberPicker);
 //#endregion
-export { CreateAddressbookForm, CreateBirthdayCalendarForm, CreateCalendarForm, DeleteButton, EditAddressbookForm, EditCalendarForm, GenerateAppTokenForm, GroupCreateForm, GroupList, ImportAddressbookForm, ImportCalendarForm, MemberPicker };
+export { CreateAddressbookForm, CreateBirthdayCalendarForm, CreateCalendarForm, DeleteButton, EditAddressbookForm, EditCalendarForm, GenerateAppTokenForm, GroupCreateForm, GroupList, ImportAddressbookForm, ImportCalendarForm, ImportContactsForm, MemberPicker };

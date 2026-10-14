@@ -180,6 +180,7 @@ impl<AP: AuthenticationProvider> StoreBundle<AP> {
             share_store: self.share_store.clone(),
             password_reset_store: self.password_reset_store.clone(),
             print_store: self.print_store.clone(),
+            mirror_store: self.mirror_store.clone(),
         }
     }
 }

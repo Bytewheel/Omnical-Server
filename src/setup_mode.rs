@@ -440,6 +440,7 @@ impl SetupMode {
                     password: Some(hash_password(form.admin_password.trim())),
                     principal_type: PrincipalType::Individual,
                     needs_password_change: false,
+                    timezone: String::new(),
                     privileges: std::collections::BTreeMap::default(),
                 },
                 false,

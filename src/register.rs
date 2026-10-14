@@ -563,6 +563,7 @@ async fn provision<AS: AddressbookStore, CS: CalendarStore>(
         password: Some(Secret::from(password_hash)),
         memberships: vec![],
         needs_password_change: false,
+        timezone: String::new(),
         privileges: BTreeMap::default(),
     };
     if let Err(err) = state.auth_provider.insert_principal(principal, false).await {
@@ -1498,6 +1499,7 @@ mod tests {
                     password: None,
                     memberships: vec![],
                     needs_password_change: false,
+                    timezone: String::new(),
                     privileges: BTreeMap::default(),
                 },
                 false,

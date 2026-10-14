@@ -19,6 +19,9 @@ use rustical_store::{
     PasswordResetStore, PrefixedCalendarStore, PrintStore,
     auth::{AuthenticationProvider, middleware::AuthenticationLayer},
 };
+// §18.42: the mirror UI context is the seam `make_app_for` hands the
+// frontend (the routes stay private; the context is the contract).
+pub use routes::mirror::MirrorUiContext;
 use std::sync::Arc;
 use url::Url;
 
@@ -53,7 +56,10 @@ use crate::routes::{
         route_contact_edit, route_contact_update, route_contacts, route_contacts_create,
         route_contacts_new,
     },
-    addressbooks::{route_addressbook_credentials, route_addressbook_credentials_revoke},
+    addressbooks::{
+        route_addressbook_credentials, route_addressbook_credentials_revoke,
+        route_post_contacts_import,
+    },
     app_token::{route_delete_app_token, route_post_app_token, route_regenerate_app_token},
     calendar::{
         route_calendar, route_calendar_credentials, route_calendar_credentials_revoke,
@@ -75,6 +81,7 @@ use crate::routes::{
         route_post_linked_platforms_refresh, route_post_linked_platforms_remove,
     },
     login::{route_get_login, route_post_login, route_post_logout},
+    mirror::route_post_mirror_sync,
     password::{password_change_gate, route_get_password_change, route_post_password_change},
     password_reset::{
         ResetRateLimiter, route_get_forgot_password, route_get_reset_password,
@@ -95,7 +102,7 @@ use crate::routes::{
         route_tasks_new,
     },
     timezones::route_timezones,
-    user::{route_get_home, route_root, route_user_named},
+    user::{route_get_home, route_post_timezone_save, route_root, route_user_named},
 };
 #[cfg(not(feature = "dev"))]
 use assets::{Assets, EmbedService};
@@ -120,6 +127,11 @@ pub fn frontend_router<
     share_store: Arc<dyn CollectionShareStore>,
     password_reset_store: Arc<dyn PasswordResetStore>,
     print_store: Arc<dyn PrintStore>,
+    // §18.42: the profile page's mirror UI context — `None` (no
+    // `[mirror.targets]` configured) mounts no mirror block and no
+    // sync button; the sync handler 404s like the password-reset
+    // endpoints do when unconfigured.
+    mirror: Option<Arc<MirrorUiContext>>,
     smtp_accounts: Vec<SmtpAccount>,
 ) -> Router {
     // Shared sliding-window limiter for the public password-reset POSTs
@@ -168,6 +180,18 @@ pub fn frontend_router<
         .route(
             "/{user}/calendar/subscribe",
             post(route_calendar_subscribe::<AP, CS, AS>),
+        )
+        // §18.42: the calendar tile's "Sync now" button — runs the
+        // configured push-mirror targets of one calendar on demand.
+        .route(
+            "/{user}/calendar/mirror-sync",
+            post(route_post_mirror_sync::<AP, CS, AS>),
+        )
+        // §18.42: the per-user timezone save (the profile's Timezone
+        // section).
+        .route(
+            "/{user}/timezone",
+            post(route_post_timezone_save::<AP, CS, AS>),
         )
         .route("/{user}/calendar/{calendar}", get(route_calendar::<CS>))
         .route(
@@ -255,6 +279,22 @@ pub fn frontend_router<
         .route(
             "/{user}/addressbook/credentials",
             post(route_addressbook_credentials::<AP, CS, AS>),
+        )
+        // §18.43: contacts import — a `.vcf` (vCard, the format every
+        // contacts app can export) or a contacts CSV (Google's or
+        // Outlook's export), posted as the raw file body by the
+        // `import-contacts-form` Lit component. The verb sits on a
+        // STATIC path segment next to `credentials` on purpose: the
+        // book-object POST route
+        // (`/{user}/addressbook/{addressbook}/contacts/{object}`) owns
+        // the literal `contacts` at the position a
+        // `…/{principal}/{addressbook_id}/import` shape would need
+        // dynamic, and matchit prefers the static one — so an import
+        // into the default `contacts` book would have answered the
+        // contact-edit form's 415 instead of this handler.
+        .route(
+            "/{user}/addressbook/import/{principal}/{addressbook_id}",
+            post(route_post_contacts_import::<AS>),
         )
         .route(
             "/{user}/addressbook/credentials/{id}/revoke",
@@ -439,6 +479,7 @@ pub fn frontend_router<
         .layer(Extension(share_store))
         .layer(Extension(password_reset_store))
         .layer(Extension(print_store))
+        .layer(Extension(mirror))
         .layer(Extension(reset_limiter))
         .layer(Extension(frontend_trusted_proxies))
         .layer(Extension(hawkbook_apk))

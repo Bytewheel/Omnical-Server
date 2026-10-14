@@ -1,6 +1,17 @@
 {% if let Some(error) = error.as_ref() %}
 <p class="error">{{ error }}</p>
 {% endif %}
+{% if let Some(lines) = mirror_synced.as_ref() %}
+<div class="success">
+  <p><strong>Mirror sync finished.</strong> One line per mirrored copy:</p>
+  <ul>
+    {% for line in lines %}
+    <li>{{ line }}</li>
+    {% endfor %}
+  </ul>
+  <p class="description">"put" means copied across, "unchanged" means already identical on the other server, "deleted" means removed there because it disappeared here.</p>
+</div>
+{% endif %}
 {% if let Some(server_url) = credential_server_url.as_ref() %}
 <div class="success">
   <p><strong>Calendar credentials generated!</strong> This one-time credential was created for <code>{{ credential_calendar_id.as_ref().unwrap() }}</code>{% if let Some(email) = credential_email.as_ref() %} and sent to {{ email }}{% endif %} — full read, write, and admin access to that calendar:</p>
@@ -164,6 +175,29 @@
           </div>
           {% endfor %}
         </div>
+        {% if !tile.mirrors.is_empty() %}
+        <div class="mirror-block">
+          <span class="block-label">Mirrors (copies on other servers)</span>
+          {% for mirror in tile.mirrors %}
+          <div class="metadata">
+            {{ mirror.name }} → {{ mirror.remote_label }} · {{ mirror.kind_label }}
+            {%- if let Some(relative) = mirror.last_run_relative.as_ref() %} · last sync {{ relative }}{% endif %}
+            {% if let Some(run) = mirror.last_run.as_ref() %}
+            {% if let Some(error) = run.error.as_ref() %} · <span class="error">last sync failed: {{ error }}</span>
+            {% else %} · last sync: {{ run.put }} copied, {{ run.deleted }} removed, {{ run.unchanged }} unchanged
+            {% endif %}
+            {% endif %}
+          </div>
+          {% endfor %}
+          {% if tile.can_generate %}
+          <form method="POST" action="/frontend/user/{{ user.id }}/calendar/mirror-sync" class="inline-form">
+            <input type="hidden" name="principal" value="{{ calendar.principal }}">
+            <input type="hidden" name="calendar_id" value="{{ calendar.id }}">
+            <button type="submit" title="Copy this calendar's events to the mirrored server(s) above right now — the same copy the scheduled background sync makes">Sync now</button>
+          </form>
+          {% endif %}
+        </div>
+        {% endif %}
         <a class="client-help-link" href="/frontend/user/{{ calendar.principal }}/calendar/{{ calendar.id }}">Set up on your device…</a>
         <div class="actions">
           <form action="/caldav/principal/{{ calendar.principal }}/{{ calendar.id }}" target="_blank" method="GET">

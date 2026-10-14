@@ -28,6 +28,25 @@ pub struct MirrorObject {
     pub hash: String,
 }
 
+/// One completed (or failed) sync run of one mirror target — the record the
+/// profile page's "last sync" line reads (§18.42).
+///
+/// Written by the engine itself, so every sync surface — the background
+/// loop, the cron'd CLI, the profile page's button — leaves the same
+/// receipt. A `None` `error` is a run that finished; `Some` is a run that
+/// aborted before its first write (store failure), which is exactly the
+/// distinction the UI needs to draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorRun {
+    /// When the run finished, `%Y-%m-%dT%H:%M:%SZ` (UTC, plain-string
+    /// comparable like the password-reset rows).
+    pub ran_at: String,
+    pub put: usize,
+    pub deleted: usize,
+    pub unchanged: usize,
+    pub error: Option<String>,
+}
+
 #[async_trait]
 pub trait MirrorStore: Send + Sync + 'static {
     /// All objects one mirror target last wrote.
@@ -50,5 +69,22 @@ pub trait MirrorStore: Send + Sync + 'static {
         _objects: &[MirrorObject],
     ) -> Result<(), Error> {
         Err(Error::ReadOnly)
+    }
+
+    /// Record one completed/failed run of one target (§18.42): the profile
+    /// page's "last sync" line, written by the engine after every attempt.
+    ///
+    /// # Errors
+    /// - [`Error::ReadOnly`] if the store does not implement mirror state
+    async fn record_mirror_run(&self, _mirror: &str, _run: &MirrorRun) -> Result<(), Error> {
+        Err(Error::ReadOnly)
+    }
+
+    /// The newest recorded run of one target, when it has ever run.
+    ///
+    /// # Errors
+    /// Any store error (never run is `Ok(None)`, not an error).
+    async fn last_mirror_run(&self, _mirror: &str) -> Result<Option<MirrorRun>, Error> {
+        Ok(None)
     }
 }

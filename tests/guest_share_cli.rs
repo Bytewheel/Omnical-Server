@@ -56,6 +56,7 @@ async fn test_guest_share_cli_roundtrip() {
                 password: None,
                 principal_type: PrincipalType::Individual,
                 needs_password_change: false,
+                timezone: String::new(),
                 privileges: Default::default(),
             },
             false,

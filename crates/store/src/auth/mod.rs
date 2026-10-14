@@ -196,6 +196,15 @@ pub trait AuthenticationProvider: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Sets a principal's IANA timezone (§18.42, profile page). The caller
+    /// validates the zone name; the store stores it verbatim.
+    ///
+    /// # Errors
+    /// - [`Error::ReadOnly`] if the store does not implement principal updates
+    async fn set_timezone(&self, _principal: &str, _timezone: &str) -> Result<(), Error> {
+        Err(Error::ReadOnly)
+    }
+
     async fn list_members(&self, principal: &str) -> Result<Vec<String>, Error>;
 
     async fn list_groups_for_user(&self, user_id: &str) -> Result<Vec<(String, String)>, Error> {

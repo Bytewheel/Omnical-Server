@@ -5,6 +5,7 @@
 //! manual-import discipline it replaces.
 use crate::config::{Config, MirrorTargetConfig};
 use clap::{Args, Parser, Subcommand};
+use rustical_store::auth::AuthenticationProvider as _;
 use std::collections::HashSet;
 
 #[derive(Parser, Debug)]
@@ -56,7 +57,7 @@ pub async fn cmd_mirror(args: MirrorArgs, config: Config) -> anyhow::Result<()> 
     if config.mirror.targets.is_empty() {
         anyhow::bail!("no [[mirror.targets]] entries are configured");
     }
-    let timezone = config
+    let deployment_timezone = config
         .caldav
         .dailyview_timezone()
         .map_or_else(|| "UTC".to_owned(), str::to_owned);
@@ -89,10 +90,23 @@ pub async fn cmd_mirror(args: MirrorArgs, config: Config) -> anyhow::Result<()> 
                 "no configured mirror target matches {name:?}"
             );
 
-            let (_, cal_store, _, _, _, _, _, _, _, _, _, _, mirror_store) =
+            // The 4th element is the auth provider: needed since §18.42 —
+            // each target's sync flattens its phone feed in the calendar
+            // **owner's** zone, looked up per run.
+            let (_, cal_store, _, auth_provider, _, _, _, _, _, _, _, _, mirror_store) =
                 crate::get_data_stores(true, &crate::tenancy::cli_data_store(&config).await?)
                     .await?;
             for target in targets {
+                // §18.42 cascade: owner's setting, deployment's, `UTC`.
+                // The CLI acts as its own deployment, so the deployment
+                // rung is the config's `[caldav] dailyview_timezone`.
+                let owner_timezone = auth_provider
+                    .get_principal(&target.principal)
+                    .await?
+                    .map(|owner| owner.timezone)
+                    .unwrap_or_default();
+                let timezone =
+                    crate::mirror::resolve_timezone(&owner_timezone, &deployment_timezone);
                 let stats = crate::mirror::sync_target(
                     target,
                     &*cal_store,

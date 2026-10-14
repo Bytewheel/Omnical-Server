@@ -60,11 +60,19 @@ pub async fn cleanup_trashed_calendar_entities(
 /// zero would panic `tokio::time::interval`) until shutdown. The first
 /// tick fires immediately, so a restarted server converges the mirror
 /// before its first waiting period.
+///
+/// The timezone is resolved **per tick** (§18.42): the calendar owner's own
+/// setting first (looked up fresh, so a user changing their zone mid-uptime
+/// is picked up without a restart), the deployment's
+/// `[caldav] dailyview_timezone` second, `UTC` last. The owner, not the
+/// deployment and not the process: one target's feed must flatten in one
+/// zone — the calendar owner's.
 pub async fn run_mirror_target(
     target: crate::config::MirrorTargetConfig,
     cal_store: std::sync::Arc<dyn rustical_store::CalendarStore>,
     mirror_store: std::sync::Arc<dyn rustical_store::MirrorStore>,
-    timezone: String,
+    auth_provider: std::sync::Arc<dyn rustical_store::auth::AuthenticationProvider>,
+    deployment_timezone: String,
     shutdown_signal: impl Future + Send + 'static,
 ) {
     let mut shutdown_signal = core::pin::pin!(shutdown_signal);
@@ -74,6 +82,18 @@ pub async fn run_mirror_target(
     loop {
         tokio::select! {
             _ = interval.tick() => {
+                // §18.42 cascade, resolved fresh each run: an absent owner
+                // row (a deleted principal) degrades to the deployment
+                // rung rather than failing the sync.
+                let owner_timezone = auth_provider
+                    .get_principal(&target.principal)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|owner| owner.timezone)
+                    .unwrap_or_default();
+                let timezone =
+                    crate::mirror::resolve_timezone(&owner_timezone, &deployment_timezone);
                 if let Err(error) = crate::mirror::sync_target(
                     &target,
                     &*cal_store,
@@ -125,6 +145,7 @@ mod tests {
             principal_type: rustical_store::auth::PrincipalType::Individual,
             memberships: Vec::new(),
             needs_password_change: false,
+            timezone: String::new(),
             privileges: std::collections::BTreeMap::default(),
         };
         principal_store

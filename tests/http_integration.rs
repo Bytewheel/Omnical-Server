@@ -1119,9 +1119,17 @@ async fn test_portal_profile_sections_and_contacts() {
                 assert!(body.contains(r#"href="/frontend/user/user/tasks""#));
                 assert!(body.contains(r#"href="/frontend/user/user/contacts""#));
                 // … and the former tab entries are gone from the nav.
-                assert!(!body.contains(">Addressbooks</a>"), "nav: {body}");
-                assert!(!body.contains(">Groups</a>"), "nav: {body}");
-                assert!(!body.contains(">Linked platforms</a>"), "nav: {body}");
+                // (Scoped to the <nav> itself: §18.43's intro
+                // deep-links the Addressbooks section, so a page-wide
+                // substring would misfire on the intro, not the nav.)
+                let nav_start = body
+                    .find(r#"<nav class="header-center">"#)
+                    .expect("the nav renders");
+                let nav_end = nav_start + body[nav_start..].find("</nav>").expect("the nav closes");
+                let nav = &body[nav_start..nav_end];
+                assert!(!nav.contains(">Addressbooks</a>"), "nav: {body}");
+                assert!(!nav.contains(">Groups</a>"), "nav: {body}");
+                assert!(!nav.contains(">Linked platforms</a>"), "nav: {body}");
             }
 
             {

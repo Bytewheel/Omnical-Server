@@ -36,6 +36,7 @@ impl<AP: AuthenticationProvider> UserStore for OidcUserStore<AP> {
                     password: None,
                     memberships: vec![],
                     needs_password_change: false,
+                    timezone: String::new(),
                     privileges: BTreeMap::default(),
                 },
                 false,

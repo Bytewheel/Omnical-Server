@@ -612,6 +612,10 @@ mod tests {
                 share_store,
                 reset_store_dyn,
                 print_store,
+                // No `[mirror.targets]` in the TestRig: the mirror UI is
+                // absent here (the §18.42 mirror tests build their own
+                // rig with targets).
+                None,
                 smtp_accounts,
             )
             .layer(
@@ -708,6 +712,7 @@ mod tests {
                         password: password.map(Secret::from),
                         memberships: vec![],
                         needs_password_change: false,
+                        timezone: String::new(),
                         privileges: std::collections::BTreeMap::new(),
                     },
                     false,

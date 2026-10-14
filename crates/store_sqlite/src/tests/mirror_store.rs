@@ -15,7 +15,8 @@ mod tests {
         #[from(test_store_context)]
         context: TestStoreContext,
     ) {
-        let store = SqliteMirrorStore::new(context.await.cal_store);
+        let context = context.await;
+        let store = SqliteMirrorStore::new(context.cal_store.clone());
 
         // Empty, not an error — a mirror's first run starts from nothing.
         assert!(
@@ -94,6 +95,128 @@ mod tests {
                 .unwrap(),
             second,
             "the replace dropped the stale instance row and moved the hash"
+        );
+    }
+
+    use rustical_store::MirrorRun;
+
+    /// §18.42: one row per recorded run, `last_mirror_run` reads the newest,
+    /// and the prune keeps the history at `KEEP_RUNS_PER_TARGET` — the
+    /// whole point of a bounded history is the bound.
+    #[rstest]
+    #[tokio::test]
+    async fn test_mirror_runs_record_last_and_prune(
+        #[future]
+        #[from(test_store_context)]
+        context: TestStoreContext,
+    ) {
+        let context = context.await;
+        let store = SqliteMirrorStore::new(context.cal_store.clone());
+
+        // Never run is Ok(None), not an error.
+        assert!(
+            store
+                .last_mirror_run("personal-to-default")
+                .await
+                .unwrap()
+                .is_none(),
+            "a target that never ran has no newest run"
+        );
+
+        // Record three runs with distinct timestamps; the newest wins.
+        for (put, deleted, unchanged, error) in [(1, 0, 5, None), (0, 1, 6, None), (0, 0, 7, None)]
+        {
+            store
+                .record_mirror_run(
+                    "personal-to-default",
+                    &MirrorRun {
+                        ran_at: format!("2026-10-13T1{unchanged}:00:00Z"),
+                        put,
+                        deleted,
+                        unchanged,
+                        error,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let last = store
+            .last_mirror_run("personal-to-default")
+            .await
+            .unwrap()
+            .expect("three recorded runs");
+        assert_eq!(last.ran_at, "2026-10-13T17:00:00Z");
+        assert_eq!((last.put, last.deleted, last.unchanged), (0, 0, 7));
+        assert!(last.error.is_none(), "a successful run carries no error");
+
+        // A failed run records its error string verbatim.
+        store
+            .record_mirror_run(
+                "personal-to-default",
+                &MirrorRun {
+                    ran_at: "2026-10-13T18:00:00Z".to_owned(),
+                    put: 0,
+                    deleted: 0,
+                    unchanged: 0,
+                    error: Some("PROPFIND http://… returned 401".to_owned()),
+                },
+            )
+            .await
+            .unwrap();
+        let last = store
+            .last_mirror_run("personal-to-default")
+            .await
+            .unwrap()
+            .expect("the failed run is recorded");
+        assert_eq!(
+            last.error.as_deref(),
+            Some("PROPFIND http://… returned 401")
+        );
+        assert_eq!(last.ran_at, "2026-10-13T18:00:00Z");
+
+        // Prune: recording 25 runs for one target keeps only the newest 20
+        // (the bound), per-target — the other target's rows are untouched.
+        for i in 0..25 {
+            store
+                .record_mirror_run(
+                    "liturgical-to-omnical",
+                    &MirrorRun {
+                        ran_at: format!("2026-10-13T19:{:02}:00Z", 25 - i),
+                        put: i,
+                        deleted: 0,
+                        unchanged: 0,
+                        error: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let kept: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mirror_runs WHERE mirror = 'liturgical-to-omnical'",
+        )
+        .fetch_one(&context.db)
+        .await
+        .unwrap();
+        assert_eq!(kept, 20, "the history is bounded at 20 per target");
+        let oldest_kept: String = sqlx::query_scalar(
+            "SELECT MIN(ran_at) FROM mirror_runs WHERE mirror = 'liturgical-to-omnical'",
+        )
+        .fetch_one(&context.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            oldest_kept, "2026-10-13T19:06:00Z",
+            "the newest 20 survive the prune"
+        );
+        let personal: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mirror_runs WHERE mirror = 'personal-to-default'",
+        )
+        .fetch_one(&context.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            personal, 4,
+            "one target's prune must not touch another's rows"
         );
     }
 }

@@ -95,6 +95,7 @@ async fn insert_user(context: &TestStoreContext, id: &str) {
                 password: None,
                 principal_type: PrincipalType::Individual,
                 needs_password_change: false,
+                timezone: String::new(),
                 privileges: Default::default(),
             },
             false,

@@ -80,6 +80,11 @@ pub struct CalendarTile {
     /// Unredeemed registration invite links minted for this calendar
     /// (§17.9.1) — empty unless the user may manage them.
     pub invites: Vec<InviteLink>,
+    /// §18.42: the push-mirror targets configured for this calendar —
+    /// the "Mirrors" block and the "Sync now" button. Empty (and the
+    /// block absent from the template) when none are configured or the
+    /// mirror context was never built.
+    pub mirrors: Vec<crate::routes::mirror::MirrorTargetUi>,
 }
 
 /// One-time banner payloads of the Calendars screen — all `None` on a plain
@@ -106,6 +111,10 @@ pub struct CalendarsExtras {
     /// §17.9: just-minted registration invite (one-time banner, shown on
     /// the minted calendar's tile only).
     pub invite_url: Option<String>,
+    /// §18.42: the "Sync now" results banner — one line per target
+    /// ("name: N put, N deleted, N unchanged" / "name: failed — …" /
+    /// "name: already syncing"), rendered once after the POST.
+    pub mirror_synced: Option<Vec<String>>,
     pub invited_email: Option<String>,
     pub invite_collection_id: Option<String>,
     pub invite_principal: Option<String>,
@@ -121,6 +130,7 @@ impl CalendarsExtras {
             || self.credential_server_url.is_some()
             || self.guest_share_server_url.is_some()
             || self.invite_url.is_some()
+            || self.mirror_synced.is_some()
     }
 }
 
@@ -144,6 +154,8 @@ pub struct CalendarsSection {
     pub guest_share_email: Option<String>,
     pub guest_share_subscribe_url: Option<String>,
     pub invite_url: Option<String>,
+    /// §18.42: the "Sync now" results banner (one line per target).
+    pub mirror_synced: Option<Vec<String>>,
     pub invited_email: Option<String>,
     pub invite_collection_id: Option<String>,
     pub invite_principal: Option<String>,
@@ -192,7 +204,7 @@ fn tile_invite_links(
 /// per-tile sharing blocks (subscribe link, full-access credentials, invites
 /// — §17.15) plus one-time banners. Rendered into the profile page's
 /// collapsible Calendars heading.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn build_calendars_section<CS: CalendarStore>(
     cal_store: &Arc<CS>,
     share_store: &Arc<dyn CollectionShareStore>,
@@ -200,6 +212,9 @@ pub async fn build_calendars_section<CS: CalendarStore>(
     invite_store: &Arc<dyn InviteStore>,
     base_url: &str,
     user: &Principal,
+    // §18.42: the mirror UI context — `None` (no targets configured)
+    // renders no mirror block on any tile.
+    mirror: Option<&Arc<crate::routes::mirror::MirrorUiContext>>,
     extras: CalendarsExtras,
 ) -> CalendarsSection {
     let mut calendars = vec![];
@@ -249,6 +264,11 @@ pub async fn build_calendars_section<CS: CalendarStore>(
         } else {
             Vec::new()
         };
+        // §18.42: this tile's mirror targets (one last-run query per
+        // target) — empty when none are configured.
+        let mirrors =
+            crate::routes::mirror::mirror_targets_for(mirror, &calendar.principal, &calendar.id)
+                .await;
         calendar_infos.push(CalendarTile {
             meta: cal_store
                 .calendar_metadata(&calendar.principal, &calendar.id)
@@ -263,6 +283,7 @@ pub async fn build_calendars_section<CS: CalendarStore>(
             can_subscribe,
             guest_shares,
             invites,
+            mirrors,
         });
     }
 
@@ -296,6 +317,7 @@ pub async fn build_calendars_section<CS: CalendarStore>(
         guest_share_principal,
         guest_share_email,
         guest_share_subscribe_url,
+        mirror_synced,
         invite_url,
         invited_email,
         invite_collection_id,
@@ -318,6 +340,7 @@ pub async fn build_calendars_section<CS: CalendarStore>(
         guest_share_principal,
         guest_share_email,
         guest_share_subscribe_url,
+        mirror_synced,
         invite_url,
         invited_email,
         invite_collection_id,
@@ -569,6 +592,7 @@ pub async fn route_calendar_credentials<
                 password: None,
                 principal_type: PrincipalType::Individual,
                 needs_password_change: false,
+                timezone: String::new(),
                 privileges: std::collections::BTreeMap::new(),
             },
             false,

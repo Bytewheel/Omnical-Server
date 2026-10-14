@@ -90,6 +90,8 @@ pub struct ContactsPage {
     /// The new-contact form URL — always present (the form itself gates).
     pub new_href: String,
     pub can_create: bool,
+    /// §18.43: the import form gates on the same `can_write` as create.
+    pub can_import: bool,
 }
 
 impl DefaultLayoutData for ContactsPage {
@@ -148,6 +150,7 @@ pub async fn route_addressbook_contacts<AS: AddressbookStore>(
         contacts,
         new_href: format!("/frontend/user/{owner}/addressbook/{addrbook_id}/contacts/new"),
         can_create: editable,
+        can_import: editable,
     }
     .into_response())
 }
@@ -155,6 +158,18 @@ pub async fn route_addressbook_contacts<AS: AddressbookStore>(
 // ---------------------------------------------------------------------------
 // The aggregate Contacts page (the contacts counterpart of the Tasks tab).
 // ---------------------------------------------------------------------------
+
+/// One import destination offered by the aggregate Contacts page's
+/// import dialog (§18.43): every addressbook the acting user may write.
+/// Serialized by askama's `|json|safe` filters — the JSON output carries
+/// no `'`, `&`, `<` or `>`, which is what makes the single-quoted
+/// `destinations` attribute of the `import-contacts-form` element safe.
+#[derive(serde::Serialize)]
+pub struct ContactImportDestination {
+    pub principal: String,
+    pub addressbook_id: String,
+    pub label: String,
+}
 
 /// The contacts list shown as the portal's "Contacts" tab, across every
 /// addressbook of the user's own principal and their groups.
@@ -169,6 +184,12 @@ pub struct ContactsSection {
     /// paper, `scope=new` by default.
     pub print_stickers_href: String,
     pub print_paper_href: String,
+    /// §18.43: the acting user's id — the import form's POST URL prefix.
+    pub user_id: String,
+    /// Every writable addressbook as one import destination — the
+    /// `import-contacts-form` dialog's picker. Empty (no element at all)
+    /// when the user may not write a single book.
+    pub import_destinations: Vec<ContactImportDestination>,
 }
 
 impl Section for ContactsSection {
@@ -202,6 +223,9 @@ pub async fn route_contacts<AS: AddressbookStore>(
 
     let mut can_create = false;
     let mut contacts = Vec::new();
+    // §18.43: every writable book is one import destination (the dialog's
+    // picker); the same `can_write` gate as every other control here.
+    let mut import_destinations = Vec::new();
     for addressbook in user_addressbooks(&store, &user).await? {
         let editable = user.can_write(&addressbook.principal);
         can_create |= editable;
@@ -209,6 +233,13 @@ pub async fn route_contacts<AS: AddressbookStore>(
             .displayname
             .clone()
             .unwrap_or_else(|| addressbook.id.clone());
+        if editable {
+            import_destinations.push(ContactImportDestination {
+                principal: addressbook.principal.clone(),
+                addressbook_id: addressbook.id.clone(),
+                label: addressbook_name.clone(),
+            });
+        }
         for (object_id, object) in store
             .get_objects(&addressbook.principal, &addressbook.id)
             .await?
@@ -237,6 +268,8 @@ pub async fn route_contacts<AS: AddressbookStore>(
             print_paper_href: format!(
                 "/frontend/user/{user_id}/contacts/print?scope=new&format=paper"
             ),
+            user_id: user.id.clone(),
+            import_destinations,
         },
     }
     .into_response())
@@ -619,4 +652,158 @@ pub async fn route_contact_delete<AS: AddressbookStore>(
         .delete_object(&owner, &addrbook_id, &object_id, true)
         .await?;
     Ok(contacts_redirect(&owner, &addrbook_id))
+}
+
+#[cfg(test)]
+mod contacts_page_import_tests {
+    //! §18.43: the import form on the *Contacts* surfaces — the aggregate
+    //! Contacts tab (one button, every writable book as a dialog
+    //! destination) and the per-addressbook Contacts page (one button,
+    //! the one book). Both ride the same `import-contacts-form` element
+    //! and the same POST route the profile's Addressbooks section uses.
+
+    use crate::routes::test_rig::Rig;
+    use http::StatusCode;
+    use rustical_store::Addressbook;
+    use rustical_store::AddressbookWriteStore;
+    use rustical_store::auth::{AuthenticationProvider, Principal, PrincipalType};
+
+    /// A book with a displayname (UFCS — `SqliteAddressbookStore` is also
+    /// a `PrefixedCalendarStore`, so the bare call is ambiguous).
+    async fn insert_addressbook(rig: &Rig, principal: &str, id: &str, label: &str) {
+        AddressbookWriteStore::insert_addressbook(
+            &*rig.addr_store,
+            Addressbook {
+                principal: principal.to_owned(),
+                id: id.to_owned(),
+                displayname: Some(label.to_owned()),
+                description: None,
+                deleted_at: None,
+                synctoken: 0,
+                push_topic: uuid::Uuid::new_v4().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The aggregate Contacts tab carries one import button whose
+    /// `destinations` lists every writable book — the user's own and their
+    /// groups' — and never a book they cannot write.
+    #[tokio::test]
+    async fn contacts_tab_lists_every_writable_book_as_a_destination() {
+        let rig = Rig::new().await;
+        insert_addressbook(&rig, "user", "personal", "Personal").await;
+        // A group the user belongs to (the default `edit` privilege) —
+        // its book is writable too.
+        rig.principal_store
+            .insert_principal(
+                Principal {
+                    id: "family".to_owned(),
+                    displayname: None,
+                    principal_type: PrincipalType::Group,
+                    password: None,
+                    memberships: vec![],
+                    needs_password_change: false,
+                    timezone: String::new(),
+                    privileges: std::collections::BTreeMap::new(),
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        AuthenticationProvider::add_membership(&*rig.principal_store, "user", "family")
+            .await
+            .unwrap();
+        insert_addressbook(&rig, "family", "shared", "Family book").await;
+        // A principal the user has no access to at all.
+        rig.insert_user("other").await;
+        insert_addressbook(&rig, "other", "personal", "Stranger's book").await;
+
+        let (status, page) = rig.get("/frontend/user/user/contacts").await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        // One import button, carrying the acting user and the writable
+        // books as a JSON destinations list (askama's `|json|safe` —
+        // the filter's output carries no `'`, `&`, `<` or `>`, so the
+        // single-quoted attribute is its documented safe shape).
+        assert_eq!(page.matches("<import-contacts-form").count(), 1, "{page}");
+        assert!(page.contains(r#"user="user""#), "{page}");
+        assert!(
+            page.contains(r#""principal":"user","addressbook_id":"personal""#),
+            "the user's own book is a destination: {page}"
+        );
+        assert!(
+            page.contains(r#""principal":"family","addressbook_id":"shared""#),
+            "the group's book is a destination (the default edit privilege): {page}"
+        );
+        assert!(
+            !page.contains(r#""principal":"other""#),
+            "a book the user cannot write is never a destination: {page}"
+        );
+    }
+
+    /// A user who may write no addressbook at all sees no import button —
+    /// the element is a gate on writability, not a fixture of the page.
+    #[tokio::test]
+    async fn contacts_tab_without_writable_books_hides_the_import_button() {
+        let rig = Rig::new().await;
+        // A book the user can read (a member without write — `view`
+        // privilege) but not write.
+        rig.principal_store
+            .insert_principal(
+                Principal {
+                    id: "family".to_owned(),
+                    displayname: None,
+                    principal_type: PrincipalType::Group,
+                    password: None,
+                    memberships: vec![],
+                    needs_password_change: false,
+                    timezone: String::new(),
+                    privileges: std::collections::BTreeMap::new(),
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        AuthenticationProvider::add_membership(&*rig.principal_store, "user", "family")
+            .await
+            .unwrap();
+        insert_addressbook(&rig, "family", "shared", "Family book").await;
+        // Demote the membership to read-only.
+        rig.principal_store
+            .set_privilege("user", "family", rustical_store::auth::Privilege::View)
+            .await
+            .unwrap();
+
+        let (status, page) = rig.get("/frontend/user/user/contacts").await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert!(
+            !page.contains("import-contacts-form"),
+            "no writable book means no import button: {page}"
+        );
+    }
+
+    /// The per-addressbook Contacts page carries the same button, scoped
+    /// to its one book (the `principal`/`addressbook_id` attributes, no
+    /// destinations list).
+    #[tokio::test]
+    async fn per_addressbook_contacts_page_carries_the_scoped_button() {
+        let rig = Rig::new().await;
+        insert_addressbook(&rig, "user", "personal", "Personal").await;
+
+        let (status, page) = rig
+            .get("/frontend/user/user/addressbook/personal/contacts")
+            .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert!(
+            page.contains(
+                r#"<import-contacts-form user="user" principal="user" addressbook_id="personal">"#
+            ),
+            "the page's own book is the button's destination: {page}"
+        );
+        assert!(
+            !page.contains("destinations='"),
+            "no destinations list on the single-book page: {page}"
+        );
+    }
 }

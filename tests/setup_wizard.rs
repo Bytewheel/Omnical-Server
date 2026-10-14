@@ -430,6 +430,7 @@ async fn test_passwordless_principal_is_offered_a_password() {
                 password: None,
                 principal_type: rustical_store::auth::PrincipalType::Individual,
                 needs_password_change: false,
+                timezone: String::new(),
                 privileges: Default::default(),
             },
             false,

@@ -454,86 +454,11 @@ pub struct SubscriptionsConfig {
     pub public_url: Option<String>,
 }
 
-/// Omnical push mirrors (§18.41): one-way sync of a local calendar into a
-/// remote `CalDAV` collection (aphy in the reference deployment).
-///
-/// While disabled (the default) the build behaves like the current one: no
-/// background loop runs. `rustical mirror sync` works regardless of
-/// `enabled`, so a mirror can be tested by hand before it is turned on.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-#[serde(deny_unknown_fields, default)]
-pub struct MirrorConfig {
-    /// Master switch for the background sync loop only.
-    pub enabled: bool,
-    /// One `[[mirror.targets]]` table per source→remote pair.
-    #[serde(default)]
-    pub targets: Vec<MirrorTargetConfig>,
-}
-
-/// One push-mirror target (§18.41).
-///
-/// Every `interval_secs` the server reads the source calendar, `PUT`s
-/// each object it does not already carry at the recorded hash, and
-/// `DELETE`s objects it previously wrote that vanished from the source.
-/// Objects on the remote that no mirror ever claimed (the remote
-/// account's own events) are never touched.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct MirrorTargetConfig {
-    /// Stable name identifying this target; the state rows key on it, so
-    /// renaming a target orphans its rows and the next run re-PUTs
-    /// everything (harmless, but slow on large calendars).
-    pub name: String,
-    /// Source: the principal owning the source calendar.
-    pub principal: String,
-    /// Source: the calendar to mirror.
-    pub calendar: String,
-    /// Target: the remote calendar collection's full URL, trailing slash
-    /// required (`PUT`/`DELETE` append object filenames to it).
-    pub url: String,
-    /// Target: HTTP Basic username.
-    pub username: String,
-    /// Target: HTTP Basic password. Router deployments inject this from
-    /// `pass` via `scripts/render-router-config.sh`; it never ships in a
-    /// distributed config.
-    pub password: String,
-    /// `ORGANIZER:…` stamped on mirrored VEVENTs that lack one. aphy's
-    /// week/day grids render only events carrying an ORGANIZER (or a
-    /// CREATED) — events created by khal never have one, which is the
-    /// original §18.39 symptom (§18.41's diagnosis).
-    pub organizer: String,
-    /// Also write flattened concrete instances of recurring events (the
-    /// §18.39/§18.40 phone feed: `{uid}-{stamp}` UIDs, `TZID`-local
-    /// `DTSTART`+`DTEND`, no `RECURRENCE-ID`, no `DURATION`, no
-    /// `ORGANIZER`) so clients that never expand RRULEs — the MP02's
-    /// `DailyView`, §18.37 — can list them.
-    #[serde(default)]
-    pub phone_instances: bool,
-    /// Target is a phone feed, not a web calendar (§18.41's two-calendar
-    /// layout): recurring masters are skipped — the phone files a master
-    /// at its own `DTSTART`, out of its 4-day window, so a master in the
-    /// feed only risks the same-UID object shadowing the canonical copy in
-    /// the web calendar — and no `ORGANIZER` is stamped, so the feed stays
-    /// out of aphy's week/day grids. Non-recurring objects pass through:
-    /// a one-shot is its own concrete occurrence and the phone lists it.
-    #[serde(default)]
-    pub phone_feed_only: bool,
-    /// Horizon of the instance feed in days (§18.38 chose 90 for a manual
-    /// import cadence; a synced feed could go shorter).
-    #[serde(default = "default_mirror_horizon_days")]
-    pub horizon_days: u64,
-    /// Sync cadence in seconds.
-    #[serde(default = "default_mirror_interval_secs")]
-    pub interval_secs: u64,
-}
-
-const fn default_mirror_horizon_days() -> u64 {
-    90
-}
-
-const fn default_mirror_interval_secs() -> u64 {
-    1800
-}
+// §18.42: the push-mirror config types moved to `rustical_caldav::mirror`
+// (with the engine) so the frontend crate can read the target list and run
+// syncs from the profile page; re-exported so every existing
+// `crate::config::Mirror…` reference (and config files) keep resolving.
+pub use rustical_caldav::mirror::{MirrorConfig, MirrorTargetConfig};
 
 /// Omnical self-service registration extension (PLAN.md §17.8).
 ///

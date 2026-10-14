@@ -38,8 +38,8 @@ use rustical_store::{Tenant, TenantStatus};
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
 use rustical_store_sqlite::{
     SqliteAddressbookStore, SqliteCalendarSourceStore, SqliteCalendarStore,
-    SqliteCollectionShareStore, SqliteDavPushStore, SqliteInviteStore, SqlitePasswordResetStore,
-    SqlitePrincipalStore, SqlitePrintStore, SqliteSubscriptionStore,
+    SqliteCollectionShareStore, SqliteDavPushStore, SqliteInviteStore, SqliteMirrorStore,
+    SqlitePasswordResetStore, SqlitePrincipalStore, SqlitePrintStore, SqliteSubscriptionStore,
 };
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -81,6 +81,10 @@ fn config(subscriptions: Arc<SqliteSubscriptionStore>) -> AppConfig {
         payload_limit_mb: 20,
         subscriptions_public_url: "https://public.example".to_owned(),
         smtp_accounts: vec![],
+        // §18.42: no targets — the tenant routers must not grow a mirror
+        // UI (or its extension) just by existing.
+        mirror_targets: vec![],
+        mirror_timezone: "UTC".to_owned(),
     }
 }
 
@@ -95,6 +99,7 @@ fn stores(
     let share_store = Arc::new(SqliteCollectionShareStore::new(context.cal_store.clone()));
     let password_reset_store = Arc::new(SqlitePasswordResetStore::new(context.cal_store.clone()));
     let print_store = Arc::new(SqlitePrintStore::new(context.cal_store.clone()));
+    let mirror_store = Arc::new(SqliteMirrorStore::new(context.cal_store.clone()));
     AppStores {
         addr_store: Arc::new(context.addr_store.clone()),
         cal_store: Arc::new(context.cal_store.clone()),
@@ -105,6 +110,7 @@ fn stores(
         share_store,
         password_reset_store,
         print_store,
+        mirror_store,
     }
 }
 

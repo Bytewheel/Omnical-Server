@@ -4416,6 +4416,7 @@ dependencies = [
 name = "rustical_caldav"
 version = "0.16.1"
 dependencies = [
+ "anyhow",
  "async-std",
  "async-trait",
  "axum",
@@ -4433,6 +4434,7 @@ dependencies = [
  "matchit-serde",
  "percent-encoding",
  "quick-xml",
+ "reqwest 0.13.4",
  "rstest",
  "rustical_dav",
  "rustical_dav_push",
@@ -4574,6 +4576,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rust-embed",
  "rustical_api",
+ "rustical_caldav",
  "rustical_dav",
  "rustical_ical",
  "rustical_oidc",

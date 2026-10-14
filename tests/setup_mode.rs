@@ -643,12 +643,25 @@ fn only_two_things_open_setup_mode() {
     std::fs::write(&fixture.config_file, "").unwrap();
     assert!(!should_enter_setup_mode(&fixture.config_file));
 
-    // 3. the reset marker
-    let marker = std::env::temp_dir().join(RESET_MARKER);
+    // 3. the reset marker — through its own path, not the machine-global one:
+    // the real marker is shared by the whole machine, and writing it here made
+    // every other test in this binary that consults the marker race on it
+    // (`a_broken_install_is_not_setup_mode` duly failed once under load — the
+    // same failure the marker test above already carries this fix for).
+    // `should_enter_setup_mode` is `should_enter_setup_mode_with_marker` over
+    // the real marker path, so the claim "marker exists ⇒ setup mode" is the
+    // same claim either way.
+    let marker = std::env::temp_dir().join(format!("{RESET_MARKER}-{}", std::process::id()));
     std::fs::write(&marker, b"pressed").unwrap();
-    assert!(should_enter_setup_mode(&fixture.config_file));
+    assert!(should_enter_setup_mode_with_marker(
+        &fixture.config_file,
+        &marker
+    ));
     std::fs::remove_file(&marker).unwrap();
-    assert!(!should_enter_setup_mode(&fixture.config_file));
+    assert!(!should_enter_setup_mode_with_marker(
+        &fixture.config_file,
+        &marker
+    ));
 }
 
 #[test]

@@ -19,6 +19,11 @@ use std::sync::Arc;
 // machinery for its phone-instance feed.
 pub mod dailyview;
 
+// §18.42: the push mirror moved from the root crate so the frontend can
+// run the same engine from the profile page; `dailyview` is why it lives
+// here and not there.
+pub mod mirror;
+
 pub mod calendar;
 pub mod calendar_object;
 pub mod error;

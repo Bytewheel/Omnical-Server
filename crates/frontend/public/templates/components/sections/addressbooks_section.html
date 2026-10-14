@@ -48,6 +48,19 @@
         {% endif %}
       </div>
       <div class="subscribe-block">
+        <span class="block-label">Import contacts</span>
+        {% if tile.can_import %}
+        <import-contacts-form
+          user="{{ user.id }}"
+          principal="{{ addressbook.principal }}"
+          addressbook_id="{{ addressbook.id }}"
+        ></import-contacts-form>
+        {% else %}
+        <p class="description">You may read this addressbook, but not add to it.</p>
+        {% endif %}
+        <p class="description">Moving your contacts over? Export them from your old service — in Google: contacts.google.com → Export → <strong>vCard</strong> (or "Google CSV"); in Apple/Outlook: the Contacts app's export — then pick the file here. Contacts that are already in this addressbook are skipped, so importing twice adds nothing twice.</p>
+      </div>
+      <div class="subscribe-block">
         <span class="block-label">Full access (read & write)</span>
         {% if tile.can_generate %}
         <form method="POST" action="/frontend/user/{{ user.id }}/addressbook/credentials" class="inline-form">

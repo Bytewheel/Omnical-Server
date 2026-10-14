@@ -6,7 +6,7 @@ use rustical_caldav::CalDavConfig;
 use rustical_frontend::FrontendConfig;
 use rustical_store_sqlite::tests::{TestStoreContext, test_store_context};
 use rustical_store_sqlite::{
-    SqliteCalendarSourceStore, SqliteCollectionShareStore, SqliteInviteStore,
+    SqliteCalendarSourceStore, SqliteCollectionShareStore, SqliteInviteStore, SqliteMirrorStore,
     SqlitePasswordResetStore, SqlitePrintStore, SqliteSubscriptionStore,
 };
 use std::sync::Arc;
@@ -59,6 +59,11 @@ pub fn get_app_with_frontend_and_caldav_config(
     let share_store = Arc::new(SqliteCollectionShareStore::new(cal_store.clone()));
     let password_reset_store = Arc::new(SqlitePasswordResetStore::new(cal_store.clone()));
     let print_store = Arc::new(SqlitePrintStore::new(cal_store.clone()));
+    // §18.42: the mirror state + run history store, sharing the same pool.
+    // No targets are configured here (the §18.42 UI tests live in the
+    // frontend crate, against a stub CalDAV server), so the mirror UI is
+    // absent — which is itself the unconfigured-deployment behaviour.
+    let mirror_store = Arc::new(SqliteMirrorStore::new(cal_store.clone()));
 
     make_app(
         Arc::new(addr_store),
@@ -81,7 +86,10 @@ pub fn get_app_with_frontend_and_caldav_config(
         share_store,
         password_reset_store,
         print_store,
+        mirror_store,
         vec![],
+        vec![],
+        "UTC".to_owned(),
     )
 }
 

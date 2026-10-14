@@ -21,6 +21,7 @@ fn test_propfind() {
         password: None,
         memberships: vec!["group".to_string()],
         needs_password_change: false,
+        timezone: String::new(),
         privileges: BTreeMap::default(),
     };
 

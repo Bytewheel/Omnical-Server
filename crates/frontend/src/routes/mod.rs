@@ -10,6 +10,7 @@ pub mod groups;
 pub mod holidays;
 pub mod linked_platforms;
 pub mod login;
+pub mod mirror;
 pub mod password;
 pub mod password_reset;
 pub mod print;
@@ -17,3 +18,6 @@ pub mod share;
 pub mod tasks;
 pub mod timezones;
 pub mod user;
+
+#[cfg(test)]
+pub mod test_rig;

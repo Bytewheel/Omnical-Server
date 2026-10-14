@@ -362,6 +362,7 @@ END:VCALENDAR"
                 password: None,
                 memberships: vec![],
                 needs_password_change: false,
+                timezone: String::new(),
                 privileges: std::collections::BTreeMap::default(),
             },
             // No DailyView on this wire: canonical bytes.

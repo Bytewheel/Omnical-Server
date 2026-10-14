@@ -47,9 +47,12 @@ pub mod commands;
 mod tasks;
 pub use commands::*;
 pub mod config;
+// §18.42: the push-mirror engine moved to `rustical_caldav::mirror`; the
+// re-export keeps `crate::mirror::sync_target` (the CLI, the background
+// loop) resolving as before.
+pub use rustical_caldav::mirror;
 pub mod export;
 pub mod host_dispatch;
-pub mod mirror;
 pub mod quota;
 pub mod readiness;
 pub mod register;
@@ -473,7 +476,13 @@ pub async fn cmd_serve(
         share_store,
         password_reset_store,
         print_store,
+        // §18.42: the mirror state + run history store, and the config
+        // axis (targets + deployment timezone) — the same three the
+        // tenancy path fills from `app_config_for`.
+        mirror_store.clone(),
         config.scheduling.smtp.clone(),
+        config.mirror.targets.clone(),
+        mirror_timezone.clone(),
     );
     let app = if tenancy_enabled {
         // The config file's path, for the appliance panel's redaction pass — see
@@ -545,12 +554,18 @@ pub async fn cmd_serve(
     // stores. Tenancy deployments do not get a background mirror yet — a
     // target names its source principal explicitly, and per-tenant mirror
     // wiring is §7 work, not §18.41's.
+    //
+    // The loop takes the auth provider and the **deployment** timezone
+    // (§18.42): the owner's own zone is looked up fresh on every tick, so a
+    // user changing their zone mid-uptime is picked up without a restart —
+    // `run_mirror_target` resolves the cascade per run.
     if config.mirror.enabled && !tenancy_enabled {
         for target in config.mirror.targets.clone() {
             tokio::spawn(tasks::run_mirror_target(
                 target,
                 cal_store.clone(),
                 mirror_store.clone(),
+                principal_store.clone(),
                 mirror_timezone.clone(),
                 shutdown_signal(),
             ));

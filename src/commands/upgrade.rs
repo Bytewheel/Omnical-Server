@@ -457,18 +457,21 @@ mod tests {
     /// `20261012130000_print_state` (the portal print pages' new-vs-all
     /// scope — shipped without this count moving, so the guard failed until
     /// this paragraph said so), 20 with `20261012200000_mirror_objects`
-    /// (§18.41 push-mirror state). If a migration is added, removed or — as
-    /// happened during development — mis-versioned, the rollback command's
-    /// own behaviour changes, so the number it reports has to move with it or
-    /// this fails.
+    /// (§18.41 push-mirror state), 22 with `20261013120000_mirror_runs` and
+    /// `20261013130000_principal_timezone` (§18.42: the per-run history the
+    /// profile page's "last sync" line reads, and the per-user zone). If a
+    /// migration is added, removed or — as happened during development —
+    /// mis-versioned, the rollback command's own behaviour changes, so the
+    /// number it reports has to move with it or this fails.
     #[test]
     fn the_migration_set_is_what_the_audit_counted() {
         let reversible = reversible_versions();
         assert_eq!(
             reversible.len(),
-            20,
-            "expected 20 reversible migrations (the §18.21 audit + the holidays \
-             ownership table + print state + mirror state), found {}: {:?}",
+            22,
+            "expected 22 reversible migrations (the §18.21 audit + the holidays \
+             ownership table + print state + mirror state + mirror runs + \
+             principal timezone), found {}: {:?}",
             reversible.len(),
             reversible
         );

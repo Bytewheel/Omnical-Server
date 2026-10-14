@@ -1,3 +1,4 @@
+use crate::config::MirrorTargetConfig;
 use crate::config::NextcloudLoginConfig;
 use crate::export::export_router;
 use crate::register::{RegistrationContext, register_router};
@@ -15,6 +16,7 @@ use http::{HeaderValue, StatusCode};
 use rustical_caldav::{CalDavConfig, caldav_router};
 use rustical_carddav::carddav_router;
 use rustical_dav_push::DavPushStore;
+use rustical_frontend::MirrorUiContext;
 use rustical_frontend::nextcloud_login::nextcloud_login_router;
 use rustical_frontend::{FrontendConfig, frontend_router};
 use rustical_oidc::OidcConfig;
@@ -23,10 +25,12 @@ use rustical_store::SubscriptionStore;
 use rustical_store::Tenant;
 use rustical_store::auth::AuthenticationProvider;
 use rustical_store::{
-    AddressbookStore, CalendarSourceStore, CalendarStore, CombinedCalendarStore,
+    AddressbookStore, CalendarSourceStore, CalendarStore, CombinedCalendarStore, MirrorStore,
     PrefixedCalendarStore, PrintStore,
 };
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::classify::ServerErrorsFailureClass;
@@ -68,6 +72,15 @@ pub struct AppConfig {
     /// `[subscriptions] public_url` with the HTTP-bind fallback already applied.
     pub subscriptions_public_url: String,
     pub smtp_accounts: Vec<rustical_scheduling::SmtpAccount>,
+    /// The configured `[mirror]` targets (§18.42): what the profile page's
+    /// Calendars section shows per calendar, and what its "Sync now"
+    /// button runs. Empty (the default) ⇒ no mirror UI at all — no
+    /// context is built, no routes are mounted, the extension is absent.
+    pub mirror_targets: Vec<MirrorTargetConfig>,
+    /// The deployment's `[caldav] dailyview_timezone` (UTC fallback) — the
+    /// second rung of the §18.42 timezone cascade: the calendar owner's own
+    /// setting first, this one next, `UTC` last.
+    pub mirror_timezone: String,
 }
 
 /// The stores a router is mounted over.
@@ -94,6 +107,11 @@ pub struct AppStores<AS, CS, DP, AP> {
     /// Print-state tracking for the portal print pages (`Arc<dyn …>` for the
     /// same reason as the three erased stores above it).
     pub print_store: Arc<dyn PrintStore>,
+    /// Push-mirror state + run history (§18.42): the engine's own records
+    /// (`mirror_objects`, `mirror_runs`). The background loop and the CLI
+    /// write them, and the profile page's "Mirrors" lines and "Sync now"
+    /// button read them.
+    pub mirror_store: Arc<dyn MirrorStore>,
 }
 
 /// Hand the tenant to every handler in `router`, as an `Extension`.
@@ -155,7 +173,15 @@ pub fn make_app<
     share_store: Arc<dyn rustical_store::CollectionShareStore>,
     password_reset_store: Arc<dyn rustical_store::PasswordResetStore>,
     print_store: Arc<dyn PrintStore>,
+    // Push-mirror state + run history (§18.42) — same erasure story as
+    // `print_store` above.
+    mirror_store: Arc<dyn MirrorStore>,
     smtp_accounts: Vec<rustical_scheduling::SmtpAccount>,
+    // The `[mirror]` targets (config axis — same values `AppConfig` holds).
+    mirror_targets: Vec<MirrorTargetConfig>,
+    // The deployment `[caldav] dailyview_timezone`, UTC fallback (config
+    // axis).
+    mirror_timezone: String,
 ) -> Router<()> {
     make_app_for(
         // `None` is the N=1 case and must stay indistinguishable from today:
@@ -176,6 +202,8 @@ pub fn make_app<
             payload_limit_mb,
             subscriptions_public_url,
             smtp_accounts,
+            mirror_targets,
+            mirror_timezone,
         },
         AppStores {
             addr_store,
@@ -187,6 +215,7 @@ pub fn make_app<
             share_store,
             password_reset_store,
             print_store,
+            mirror_store,
         },
     )
 }
@@ -231,6 +260,8 @@ where
         payload_limit_mb,
         subscriptions_public_url,
         smtp_accounts,
+        mirror_targets,
+        mirror_timezone,
     } = config;
     let AppStores {
         addr_store,
@@ -242,6 +273,7 @@ where
         share_store,
         password_reset_store,
         print_store,
+        mirror_store,
     } = stores;
 
     let birthday_store = addr_store.clone();
@@ -379,6 +411,21 @@ where
         ));
     }
 
+    // §18.42: the profile page's mirror UI — the calendar tiles'
+    // "Mirrors" lines, their "Sync now" button, and the deployment
+    // timezone the per-user cascade falls back to. `None` when no
+    // targets are configured: no context, no routes, no extension —
+    // an unconfigured deployment serves byte-for-byte today's build
+    // (the `enabled = false` house rule).
+    let mirror = (!mirror_targets.is_empty()).then(|| {
+        Arc::new(MirrorUiContext {
+            store: mirror_store,
+            targets: mirror_targets,
+            deployment_timezone: mirror_timezone,
+            in_flight: Mutex::new(HashSet::new()),
+        })
+    });
+
     if frontend_config.enabled {
         router = router.merge(frontend_router(
             "/frontend",
@@ -394,6 +441,7 @@ where
             share_store,
             password_reset_store,
             print_store,
+            mirror,
             smtp_accounts,
         ));
     }

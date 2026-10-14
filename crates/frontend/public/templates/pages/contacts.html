@@ -6,7 +6,12 @@
 <section class="contacts-page">
   <div class="tasks-toolbar">
     <h1>{% if let Some(name) = addressbook.displayname %}{{ name }}{% else %}{{ addressbook.principal }}/{{ addressbook.id }}{% endif %}</h1>
-    {% if can_create %}<a class="button-primary-link" href="{{ new_href }}">New contact</a>{% endif %}
+    <div class="tasks-filters">
+      {% if can_import %}
+      <import-contacts-form user="{{ user.id }}" principal="{{ addressbook.principal }}" addressbook_id="{{ addressbook.id }}"></import-contacts-form>
+      {% endif %}
+      {% if can_create %}<a class="button-primary-link" href="{{ new_href }}">New contact</a>{% endif %}
+    </div>
   </div>
   <p class="description">
     <a href="/frontend/user/{{ addressbook.principal }}/addressbook/{{ addressbook.id }}">Addressbook settings</a>

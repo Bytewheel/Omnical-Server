@@ -25,6 +25,7 @@ tokio.workspace = true
 rustical_store.workspace = true
 rustical_scheduling.workspace = true
 rustical_ical.workspace = true
+rustical_caldav.workspace = true
 rust-embed.workspace = true
 futures-core.workspace = true
 hex.workspace = true

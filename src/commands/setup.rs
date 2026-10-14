@@ -709,6 +709,7 @@ async fn ensure_administrator(
                 password: Some(hash_password(&password)),
                 principal_type: PrincipalType::Individual,
                 needs_password_change: false,
+                timezone: String::new(),
                 privileges: BTreeMap::default(),
             },
             false,

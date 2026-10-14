@@ -703,5 +703,16 @@ fn app_config_for(config: &Config) -> Result<AppConfig, String> {
         payload_limit_mb: config.http.payload_limit_mb,
         subscriptions_public_url: public_base,
         smtp_accounts: config.scheduling.smtp.clone(),
+        // §18.42: the mirror config rides the same per-tenant path as the
+        // extensions above — this is the production (router) route, so
+        // these two are the ones that matter. Targets verbatim from
+        // `[mirror.targets]`; the deployment timezone is the cascade's
+        // second rung (the owner's own setting, looked up per run, is the
+        // first), UTC last.
+        mirror_targets: config.mirror.targets.clone(),
+        mirror_timezone: config
+            .caldav
+            .dailyview_timezone()
+            .map_or_else(|| "UTC".to_owned(), str::to_owned),
     })
 }

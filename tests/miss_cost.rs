@@ -177,6 +177,11 @@ fn where_does_a_miss_spend_its_time() {
                 payload_limit_mb: app_config.http.payload_limit_mb,
                 subscriptions_public_url: String::new(),
                 smtp_accounts: Vec::new(),
+                // §18.42: no targets on the timed path — building a mirror
+                // UI context would be extra cost the benchmark must not
+                // attribute to a cache miss.
+                mirror_targets: Vec::new(),
+                mirror_timezone: String::new(),
             };
             let _router = rustical::app::make_app_for(
                 Some(tenant.clone()),

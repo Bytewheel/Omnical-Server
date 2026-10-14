@@ -129,6 +129,7 @@ async fn create_group<
         password: None,
         memberships: vec![],
         needs_password_change: false,
+        timezone: String::new(),
         privileges: Default::default(),
     };
 

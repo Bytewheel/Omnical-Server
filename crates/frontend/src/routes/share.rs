@@ -532,6 +532,7 @@ pub async fn route_share_guest_invite<
                 password: None,
                 principal_type: rustical_store::auth::PrincipalType::Individual,
                 needs_password_change: false,
+                timezone: String::new(),
                 privileges: std::collections::BTreeMap::new(),
             },
             false,

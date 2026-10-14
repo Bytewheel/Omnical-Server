@@ -8,11 +8,16 @@
 //! MP02 syncs — replacing the manual
 //! download-`.ics`-import-it-into-aphy pipeline of §18.38–§18.40.
 //!
+//! Lives in the `caldav` crate (not the root) since §18.42: the profile
+//! page's "Sync now" button runs the same engine from the frontend, and
+//! the frontend cannot reach the root crate's modules. The crate also
+//! owns `dailyview`, whose flattening machinery the phone feed reuses.
+//!
 //! ## Why the bodies are shaped at all
 //!
 //! §18.41's live bisect (nine rounds of `PUT` against a scratch aphy
 //! calendar) found that aphy's week/day grids render an event only when
-//! its `VEVENT` carries an `ORGANIZER` (or `CREATED`); every event this
+//! its `VEVENT` carries an `ORGANIZER` (or a `CREATED`); every event this
 //! deployment owns was written by khal, which never writes an
 //! `ORGANIZER` — that one absence is the entire original symptom. The
 //! mirror therefore stamps `ORGANIZER`/`CREATED`/`LAST-MODIFIED` on
@@ -46,14 +51,118 @@
 //! that no longer runs, and re-adding it re-adopts by UID on the first
 //! sync.
 
-use crate::config::MirrorTargetConfig;
+use crate::dailyview;
 use chrono::{DateTime, Utc};
-use rustical_store::{CalendarStore, MirrorObject, MirrorStore};
+use rustical_store::{CalendarStore, MirrorObject, MirrorRun, MirrorStore};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use tracing::{info, instrument, warn};
 
-/// One sync's outcome, for the log line and the CLI's summary.
+/// Omnical push mirrors (§18.41): one-way sync of a local calendar into a
+/// remote `CalDAV` collection (aphy in the reference deployment).
+///
+/// While disabled (the default) the build behaves like the current one: no
+/// background loop runs. `rustical mirror sync` works regardless of
+/// `enabled`, so a mirror can be tested by hand before it is turned on.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct MirrorConfig {
+    /// Master switch for the background sync loop only.
+    pub enabled: bool,
+    /// One `[[mirror.targets]]` table per source→remote pair.
+    #[serde(default)]
+    pub targets: Vec<MirrorTargetConfig>,
+}
+
+/// One push-mirror target (§18.41).
+///
+/// Every `interval_secs` the server reads the source calendar, `PUT`s
+/// each object it does not already carry at the recorded hash, and
+/// `DELETE`s objects it previously wrote that vanished from the source.
+/// Objects on the remote that no mirror ever claimed (the remote
+/// account's own events) are never touched.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MirrorTargetConfig {
+    /// Stable name identifying this target; the state rows key on it, so
+    /// renaming a target orphans its rows and the next run re-PUTs
+    /// everything (harmless, but slow on large calendars).
+    pub name: String,
+    /// Source: the principal owning the source calendar.
+    pub principal: String,
+    /// Source: the calendar to mirror.
+    pub calendar: String,
+    /// Target: the remote calendar collection's full URL, trailing slash
+    /// required (`PUT`/`DELETE` append object filenames to it).
+    pub url: String,
+    /// Target: HTTP Basic username.
+    pub username: String,
+    /// Target: HTTP Basic password. Router deployments inject this from
+    /// `pass` via `scripts/render-router-config.sh`; it never ships in a
+    /// distributed config.
+    pub password: String,
+    /// `ORGANIZER:…` stamped on mirrored VEVENTs that lack one. aphy's
+    /// week/day grids render only events carrying an ORGANIZER (or a
+    /// CREATED) — events created by khal never have one, which is the
+    /// original §18.39 symptom (§18.41's diagnosis).
+    pub organizer: String,
+    /// Also write flattened concrete instances of recurring events (the
+    /// §18.39/§18.40 phone feed: `{uid}-{stamp}` UIDs, `TZID`-local
+    /// `DTSTART`+`DTEND`, no `RECURRENCE-ID`, no `DURATION`, no
+    /// `ORGANIZER`) so clients that never expand RRULEs — the MP02's
+    /// `DailyView`, §18.37 — can list them.
+    #[serde(default)]
+    pub phone_instances: bool,
+    /// Target is a phone feed, not a web calendar (§18.41's two-calendar
+    /// layout): recurring masters are skipped — the phone files a master
+    /// at its own `DTSTART`, out of its 4-day window, so a master in the
+    /// feed only risks the same-UID object shadowing the canonical copy in
+    /// the web calendar — and no `ORGANIZER` is stamped, so the feed stays
+    /// out of aphy's week/day grids. Non-recurring objects pass through:
+    /// a one-shot is its own concrete occurrence and the phone lists it.
+    #[serde(default)]
+    pub phone_feed_only: bool,
+    /// Horizon of the instance feed in days (§18.38 chose 90 for a manual
+    /// import cadence; a synced feed could go shorter).
+    #[serde(default = "default_mirror_horizon_days")]
+    pub horizon_days: u64,
+    /// Sync cadence in seconds.
+    #[serde(default = "default_mirror_interval_secs")]
+    pub interval_secs: u64,
+}
+
+const fn default_mirror_horizon_days() -> u64 {
+    90
+}
+
+const fn default_mirror_interval_secs() -> u64 {
+    1800
+}
+
+/// The zone a target's sync runs in (§18.42), resolved per run.
+///
+/// The **calendar owner's** setting — each user flattens their own
+/// feed in their own zone — then the deployment's `[caldav]`
+/// dailyview timezone, then `UTC`. An empty principal or deployment
+/// string means unset at that level.
+///
+/// The owner, not the acting user: an admin pressing "Sync now" for a group
+/// member's calendar must not re-stamp that member's feed in the admin's
+/// zone.
+#[must_use]
+pub fn resolve_timezone(owner_timezone: &str, deployment_timezone: &str) -> String {
+    if !owner_timezone.is_empty() {
+        owner_timezone.to_owned()
+    } else if !deployment_timezone.is_empty() {
+        deployment_timezone.to_owned()
+    } else {
+        "UTC".to_owned()
+    }
+}
+
+/// One sync's outcome, for the log line, the CLI's summary and the
+/// profile page's banner.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SyncStats {
     /// Objects written (`PUT`), new or changed.
@@ -368,18 +477,13 @@ fn href_basename(href: &str) -> &str {
     href.rsplit('/').next().unwrap_or(href)
 }
 
-/// One full sync of one target.
+/// One full sync of one target, recording the run in the store.
 ///
-/// Reads the source, computes the desired set (masters + optional phone
-/// instances), `PUT`s what changed, `DELETE`s what the mirror owned but
-/// no longer wants, adopts stale `{uid}-…` instances of current
-/// masters, and records the new state.
-///
-/// Remote-listing failure degrades the run instead of failing it:
-/// without the current hrefs the mirror cannot detect remote-side
-/// deletions or adopt stale instances, so it only pushes hash-changed
-/// objects and says so — a mirror that never made anything worse is the
-/// right failure mode for a copy whose source of truth is intact.
+/// Every sync surface — the background loop, the CLI, the profile page's
+/// button — goes through here, so the run record a UI reads later is
+/// written by the very same code that ran, not by each caller
+/// remembering to. A failure to *record* is a warning, never a failed
+/// sync: the sync is the product, the record is its receipt.
 ///
 /// # Errors
 /// Store failures reading the source, or the first `PUT`/`DELETE` error
@@ -391,6 +495,49 @@ fn href_basename(href: &str) -> &str {
 #[instrument(skip(cal_store, mirror_store, now), fields(target = %target.name))]
 #[allow(clippy::too_many_lines)]
 pub async fn sync_target(
+    target: &MirrorTargetConfig,
+    cal_store: &dyn CalendarStore,
+    mirror_store: &dyn MirrorStore,
+    timezone: &str,
+    now: DateTime<Utc>,
+) -> anyhow::Result<SyncStats> {
+    let result = sync_target_inner(target, cal_store, mirror_store, timezone, now).await;
+    let run = match &result {
+        Ok(stats) => MirrorRun {
+            ran_at: now.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            put: stats.put,
+            deleted: stats.deleted,
+            unchanged: stats.unchanged,
+            error: None,
+        },
+        Err(error) => MirrorRun {
+            ran_at: now.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            put: 0,
+            deleted: 0,
+            unchanged: 0,
+            error: Some(error.to_string()),
+        },
+    };
+    if let Err(err) = mirror_store.record_mirror_run(&target.name, &run).await {
+        warn!(?err, target = %target.name, "could not record the mirror run");
+    }
+    result
+}
+
+/// The sync itself — the body [`sync_target`] wraps for run recording.
+///
+/// Reads the source, computes the desired set (masters + optional phone
+/// instances), `PUT`s what changed, `DELETE`s what the mirror owned but
+/// no longer wants, adopts stale `{uid}-…` instances of current
+/// masters, and records the new state.
+///
+/// Remote-listing failure degrades the run instead of failing it:
+/// without the current hrefs the mirror cannot detect remote-side
+/// deletions or adopt stale instances, so it only pushes hash-changed
+/// objects and says so — a mirror that never made anything worse is the
+/// right failure mode for a copy whose source of truth is intact.
+#[allow(clippy::too_many_lines)]
+async fn sync_target_inner(
     target: &MirrorTargetConfig,
     cal_store: &dyn CalendarStore,
     mirror_store: &dyn MirrorStore,
@@ -448,7 +595,7 @@ pub async fn sync_target(
             let body = shape_master_body(object.get_ics(), organizer, &now_stamp);
             let href = format!("{}.ics", href_component(&uid));
             desired.insert(uid.clone(), (href, body_hash(&body), body));
-        } else if !rustical_caldav::dailyview::object_is_recurring(object) {
+        } else if !dailyview::object_is_recurring(object) {
             let stamp = object_dtstart_stamp(object.get_ics());
             if stamp.is_empty() {
                 warn!(
@@ -462,7 +609,7 @@ pub async fn sync_target(
                     &shape_master_body(object.get_ics(), organizer, &now_stamp),
                     &key,
                 );
-                let body = rustical_caldav::dailyview::apply_all_day_pass(&body, timezone);
+                let body = dailyview::apply_all_day_pass(&body, timezone);
                 let href = format!("{}.ics", href_component(&key));
                 desired.insert(key, (href, body_hash(&body), body));
             }
@@ -470,7 +617,7 @@ pub async fn sync_target(
         master_uids.push(uid.clone());
 
         if target.phone_instances {
-            for block in rustical_caldav::dailyview::flattened_instances_of_object(
+            for block in dailyview::flattened_instances_of_object(
                 object.clone(),
                 timezone,
                 now,
@@ -485,10 +632,8 @@ pub async fn sync_target(
                 // parses on aphy as a Kolab override of the mirrored
                 // master, which broke the web's series model).
                 let key = feed_uid(&instance_uid);
-                let body = override_uid(
-                    &rustical_caldav::dailyview::dailyview_instance_body(&block, timezone),
-                    &key,
-                );
+                let body =
+                    override_uid(&dailyview::dailyview_instance_body(&block, timezone), &key);
                 let href = format!("{}.ics", href_component(&key));
                 desired.insert(key, (href, body_hash(&body), body));
             }

@@ -194,6 +194,7 @@ async fn test_app_token_regenerate_rejects_unknown_and_foreign(
                 password: None,
                 principal_type: rustical_store::auth::PrincipalType::Individual,
                 needs_password_change: false,
+                timezone: String::new(),
                 privileges: Default::default(),
             },
             false,

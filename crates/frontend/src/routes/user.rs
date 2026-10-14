@@ -1,4 +1,4 @@
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, str::FromStr as _, sync::Arc};
 
 use crate::pages::user::{Section, UserPage};
 use crate::routes::addressbooks::{AddressbooksExtras, build_addressbooks_section};
@@ -9,6 +9,7 @@ use crate::routes::linked_platforms::build_linked_platforms_section;
 use askama::Template;
 use askama_web::WebTemplate;
 use axum::{
+    Form,
     extract::{FromRequestParts, Path},
     response::{IntoResponse, Redirect, Response},
 };
@@ -63,12 +64,16 @@ pub struct ProfileExtras {
     pub anchor: ProfileAnchor,
     /// The regenerate route's one-time app-token banner.
     pub regenerated: Option<RegeneratedToken>,
-    /// The Calendars section's banners (credentials, invites, errors).
+    /// The Calendars section's banners (credentials, invites, mirror
+    /// sync results, errors).
     pub calendars: CalendarsExtras,
     /// The Addressbooks section's banners (credentials, errors).
     pub addressbooks: AddressbooksExtras,
     /// The Linked-platforms section's error banner.
     pub linked_platforms_error: Option<String>,
+    /// §18.42: the Timezone section's one-time banner (success or
+    /// error) — re-rendered right after its save POST.
+    pub timezone_banner: Option<String>,
 }
 
 /// Every store the unified profile page reads. An extractor so the deep-link
@@ -86,6 +91,10 @@ pub struct ProfileDeps<AP, CS, AS> {
     /// The holiday catalog (`[frontend] holidays_dir`) — the profile renders
     /// `holidays://` linked-platform titles from its manifest labels.
     pub holidays: crate::routes::holidays::HolidaysCatalog,
+    /// §18.42: the mirror UI context — `None` when no `[mirror.targets]`
+    /// are configured, and then no calendar tile shows a mirror block
+    /// at all.
+    pub mirror: Option<Arc<crate::routes::mirror::MirrorUiContext>>,
 }
 
 // Hand-rolled because `#[derive(Clone)]` would bound `AP`/`CS`/`AS` by
@@ -101,6 +110,7 @@ impl<AP, CS, AS> Clone for ProfileDeps<AP, CS, AS> {
             invite_store: Arc::clone(&self.invite_store),
             source_store: Arc::clone(&self.source_store),
             holidays: self.holidays.clone(),
+            mirror: self.mirror.clone(),
         }
     }
 }
@@ -150,6 +160,13 @@ where
                 .get::<crate::routes::holidays::HolidaysCatalog>()
                 .cloned()
                 .unwrap_or_default(),
+            // §18.42: layered by `frontend_router` — an `Option` because
+            // no configured targets means no context was built at all.
+            mirror: parts
+                .extensions
+                .get::<Option<Arc<crate::routes::mirror::MirrorUiContext>>>()
+                .cloned()
+                .expect("frontend_router layers the mirror context"),
         })
     }
 }
@@ -235,6 +252,16 @@ pub struct ProfileSection {
     /// Whether the App-tokens heading renders expanded (the regenerated
     /// banner forces it).
     pub app_tokens_open: bool,
+    /// §18.42: the Timezone section's `<select>` options — every
+    /// `chrono-tz` IANA name, sorted, with the current one marked
+    /// selected by the template.
+    pub timezone_options: Vec<(&'static str, bool)>,
+    /// §18.42: the Timezone section's one-time banner (save success or
+    /// error), rendered right after its POST.
+    pub timezone_banner: Option<String>,
+    /// Whether the Timezone heading renders expanded (its banner or a
+    /// deep-link anchor forces it).
+    pub timezone_open: bool,
     pub calendars: ProfileSectionHtml,
     pub addressbooks: ProfileSectionHtml,
     pub groups: ProfileSectionHtml,
@@ -261,9 +288,14 @@ pub async fn render_profile_page<
         calendars: calendars_extras,
         addressbooks: addressbooks_extras,
         linked_platforms_error,
+        timezone_banner,
     } = extras;
 
     let app_tokens_open = regenerated.is_some();
+
+    // §18.42: the Timezone section's banner or anchor expands it — a
+    // banner must not sit unseen inside a collapsed heading.
+    let timezone_open = timezone_banner.is_some();
 
     let hawkbook_hostname = req
         .headers
@@ -294,6 +326,7 @@ pub async fn render_profile_page<
         &deps.invite_store,
         &base_url,
         user,
+        deps.mirror.as_ref(),
         calendars_extras,
     )
     .await;
@@ -320,6 +353,18 @@ pub async fn render_profile_page<
     // Askama `render` only fails on writer errors, and the writer is a
     // `String`; every branch below is the same "cannot fail in practice"
     // `unwrap` as the AppleConfig render in app_token.rs.
+    //
+    // §18.42: the timezone `<select>` list is read once per render —
+    // `chrono-tz`'s `TZ_VARIANTS` is a compile-time static, and sorting
+    // ~600 names is a `Vec` shuffle of `&'static str`s, no allocation
+    // beyond the one `Vec`.
+    let mut timezone_names: Vec<&'static str> =
+        chrono_tz::TZ_VARIANTS.iter().map(|tz| tz.name()).collect();
+    timezone_names.sort_unstable();
+    let timezone_options: Vec<(&'static str, bool)> = timezone_names
+        .into_iter()
+        .map(|name| (name, name == user.timezone))
+        .collect();
     let profile_section = ProfileSection {
         user: user.clone(),
         app_tokens: deps.auth_provider.get_app_tokens(&user.id).await.unwrap(),
@@ -329,6 +374,9 @@ pub async fn render_profile_page<
         regenerated,
         hawkbook_apk_sha256: req.hawkbook_apk_sha256.clone(),
         app_tokens_open,
+        timezone_options,
+        timezone_banner,
+        timezone_open,
         calendars: ProfileSectionHtml {
             html: calendars_section.render().unwrap(),
             open: calendars_open,
@@ -373,6 +421,87 @@ pub async fn route_user_named<
 
 pub async fn route_get_home(user: Principal) -> Redirect {
     Redirect::to(&format!("/frontend/user/{}", user.id))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TimezoneForm {
+    pub timezone: String,
+}
+
+/// POST `/{user}/timezone` — save the acting user's IANA timezone
+/// (§18.42): the first rung of the mirror's cascade (the calendar
+/// owner's zone feeds the phone-feed flattening), and the profile's
+/// own "your times" setting.
+///
+/// The zone is validated by parsing it (`chrono_tz::Tz::from_str`)
+/// before it is stored — the store keeps it verbatim, so an unvalidated
+/// save would poison every consumer downstream with a string no parser
+/// accepts. An empty value ("Server default") clears the setting.
+///
+/// No CSRF token: profile POSTs don't carry one (session
+/// `SameSite=Lax` + the `user_id == user.id` gate — the
+/// credentials/subscribe pattern). And it saves only against the
+/// acting user's own principal — there is no `principal` field to
+/// forge.
+pub async fn route_post_timezone_save<
+    AP: AuthenticationProvider,
+    CS: rustical_store::CalendarStore,
+    AS: rustical_store::AddressbookStore + rustical_store::PrefixedCalendarStore,
+>(
+    Path(user_id): Path<String>,
+    deps: ProfileDeps<AP, CS, AS>,
+    req: ProfileRequest,
+    user: Principal,
+    Form(form): Form<TimezoneForm>,
+) -> Response {
+    if user_id != user.id {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let timezone = form.timezone.trim().to_owned();
+    // Success is set by the arm that earned it, not sniffed back out
+    // of the banner string it built (a reworded phrase must not change
+    // behavior).
+    let mut success = false;
+    let banner = if timezone.is_empty() {
+        match deps.auth_provider.set_timezone(&user.id, "").await {
+            Ok(()) => {
+                success = true;
+                "Timezone cleared — this server's default will be used.".to_owned()
+            }
+            Err(error) => format!("Could not clear the timezone: {error}"),
+        }
+    } else if chrono_tz::Tz::from_str(&timezone).is_ok() {
+        match deps.auth_provider.set_timezone(&user.id, &timezone).await {
+            Ok(()) => {
+                success = true;
+                format!("Timezone saved: {timezone}.")
+            }
+            Err(error) => format!("Could not save the timezone: {error}"),
+        }
+    } else {
+        format!("'{timezone}' is not a timezone this server recognises.")
+    };
+
+    // The saved zone rides back inside the refreshed `user` — the
+    // re-render reads `Principal::timezone`, so the `<select>` shows
+    // the new value selected without a second round-trip.
+    let mut user = user;
+    if success {
+        tracing::info!(timezone = %timezone, user = %user.id, "saved the profile timezone");
+        user.timezone = timezone;
+    }
+
+    render_profile_page(
+        &deps,
+        &req,
+        &user,
+        ProfileExtras {
+            timezone_banner: Some(banner),
+            ..ProfileExtras::default()
+        },
+    )
+    .await
 }
 
 pub async fn route_root(user: Option<Principal>) -> Redirect {
