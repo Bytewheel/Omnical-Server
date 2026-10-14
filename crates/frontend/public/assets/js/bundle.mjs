@@ -1805,7 +1805,7 @@ var GenerateAppTokenForm = class GenerateAppTokenForm extends i$2 {
       <form method="POST" action=${`/frontend/user/${this.user}/app_token`} @submit=${this.onSubmit} ${n(this.form)}>
         <input type="text" name="name" placeholder="App name" required />
         <div class="generate-actions">
-          <button type="submit" class="primary">Generate</button>
+          <button type="submit" class="primary">Add app</button>
           ${this.uaApple ? b`
             <button type="submit" name="apple" value="true">Apple Configuration Profile (contains token)</button>
           ` : null}
