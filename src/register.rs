@@ -969,10 +969,11 @@ fn render_success(
         <ol class="steps">
           <li>Open <a href="/frontend/user/{email}">your account page</a> — you are already
           signed in.</li>
-          <li>Under <strong>App tokens</strong>, create a token. That is the password your
+          <li>Under <strong>Connect Apps</strong>, add an app by name. You will be presented 
+          with a password. That is the password your
           calendar app will use — <em>not</em> the password you just chose; that one is only
           for signing in to this website.</li>
-          <li>Open <strong>How to use app tokens…</strong> on that page and follow the steps
+          <li>Open <strong>How to connect apps…</strong> on that page and follow the steps
           for your device.</li>
         </ol>
         <p>Your account already contains a personal calendar, a tasks list and a contacts
